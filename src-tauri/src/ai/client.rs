@@ -279,7 +279,7 @@ mod tests {
     use std::io::{ErrorKind, Read, Write};
     use std::net::{Shutdown, SocketAddr, TcpListener};
     use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     use super::*;
@@ -396,8 +396,20 @@ mod tests {
         ChatGateway::with_parts(resolver, limits)
     }
 
+    /// AI client 测试共享 tauri 的全局 tokio runtime，且多个用例依赖紧时序
+    /// （50ms 读超时、5ms 分片间隔）与 mock 服务器线程竞速——并行满载下 CPU
+    /// 饥饿会让它们偶发超时。串行化本模块的用例：每个用例不足 1s，总开销可忽略。
+    static AI_TEST_GATE: Mutex<()> = Mutex::new(());
+
+    fn ai_test_gate() -> std::sync::MutexGuard<'static, ()> {
+        AI_TEST_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn no_connection_when_provider_missing() {
+        let _gate = ai_test_gate();
         let server = MockServer::spawn(vec![RESPONSE_HEAD.to_string()], Duration::ZERO);
         let resolver = FixedResolver {
             addresses: vec![SocketAddr::from(([127, 0, 0, 1], server.port))],
@@ -419,6 +431,7 @@ mod tests {
 
     #[test]
     fn streams_from_pinned_loopback_address() {
+        let _gate = ai_test_gate();
         let server = MockServer::spawn(
             vec![
                 RESPONSE_HEAD.to_string(),
@@ -454,6 +467,7 @@ mod tests {
 
     #[test]
     fn cancels_after_first_delta() {
+        let _gate = ai_test_gate();
         let server = MockServer::spawn(
             vec![
                 RESPONSE_HEAD.to_string(),
@@ -487,6 +501,7 @@ mod tests {
 
     #[test]
     fn rejects_rebinding_to_link_local_before_connecting() {
+        let _gate = ai_test_gate();
         let server = MockServer::spawn(vec![RESPONSE_HEAD.to_string()], Duration::ZERO);
         let resolver = FixedResolver {
             addresses: vec![
@@ -512,6 +527,7 @@ mod tests {
 
     #[test]
     fn rejects_stream_over_byte_limit() {
+        let _gate = ai_test_gate();
         let server = MockServer::spawn(
             vec![
                 RESPONSE_HEAD.to_string(),
@@ -541,6 +557,7 @@ mod tests {
 
     #[test]
     fn lists_models_from_fixed_tags_endpoint() {
+        let _gate = ai_test_gate();
         let body = r#"{"models":[{"name":"qwen2.5:7b"},{"name":"llama3.2:3b"},{"name":"qwen2.5:7b"},{"name":"  "}]}"#;
         let payload = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -564,6 +581,7 @@ mod tests {
 
     #[test]
     fn refuses_model_list_for_cloud_provider() {
+        let _gate = ai_test_gate();
         let server = MockServer::spawn(vec![RESPONSE_HEAD.to_string()], Duration::ZERO);
         let resolver = FixedResolver {
             addresses: vec![SocketAddr::from(([127, 0, 0, 1], server.port))],
@@ -578,6 +596,7 @@ mod tests {
 
     #[test]
     fn marks_missing_model_as_unavailable() {
+        let _gate = ai_test_gate();
         let payload = "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 44\r\nConnection: close\r\n\r\n{\"error\":\"model 'demo' not found\"}        ";
         let server = MockServer::spawn(vec![payload.to_string()], Duration::ZERO);
         let resolver = FixedResolver {
@@ -599,6 +618,7 @@ mod tests {
 
     #[test]
     fn marks_ollama_chat_rejection_as_model_unavailable() {
+        let _gate = ai_test_gate();
         let body = r#"{"error":"\"bge-m3:latest\" does not support chat"}"#;
         let payload = format!(
             "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -625,12 +645,14 @@ mod tests {
 
     #[test]
     fn times_out_when_stream_goes_silent() {
+        let _gate = ai_test_gate();
+        // mock 间隔 1s：给 50ms 读超时留足 20 倍裕量，DONE 不会抢在超时前到达
         let server = MockServer::spawn(
             vec![
                 RESPONSE_HEAD.to_string(),
                 "data: [DONE]\n\n".to_string(),
             ],
-            Duration::from_millis(300),
+            Duration::from_millis(1000),
         );
         let resolver = FixedResolver {
             addresses: vec![SocketAddr::from(([127, 0, 0, 1], server.port))],

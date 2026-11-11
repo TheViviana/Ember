@@ -102,6 +102,8 @@ export const CanvasNodeView = memo(function CanvasNodeView({
         onCommitText(node.id, draft);
       }}
       onKeyDown={(event) => {
+        // IME 组合态的 Esc 是取消候选词，不得把半截拼音提交为节点内容
+        if (event.nativeEvent.isComposing) return;
         if (event.key === 'Escape') {
           event.preventDefault();
           onCommitText(node.id, draft);
