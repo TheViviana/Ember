@@ -3,6 +3,7 @@ import type { DocId } from '#doc-model';
 import type { CommandDescriptor } from '../../kernel/types.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
 import { useKernel } from '../kernel-provider.tsx';
+import { paletteWindow } from '../components/list-window.ts';
 import { editorArgsFor, filterCommands, scopeLabel } from './palette.ts';
 import styles from './CommandPalette.module.css';
 
@@ -24,17 +25,26 @@ export const CommandPalette = ({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  /** 以绝对位置为键的已渲染行引用：虚拟窗口外的位置没有节点 */
+  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
 
   const visible = useMemo(() => filterCommands(commands, query), [commands, query]);
   const activeIndex = visible.length === 0 ? 0 : Math.min(index, visible.length - 1);
+  const windowRange = useMemo(
+    () => paletteWindow(visible.length, activeIndex),
+    [visible.length, activeIndex],
+  );
+  const rendered = useMemo(
+    () => visible.slice(windowRange.start, windowRange.end),
+    [visible, windowRange],
+  );
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
   useEffect(() => {
-    itemRefs.current[activeIndex]?.scrollIntoView({ block: 'nearest' });
+    itemRefs.current.get(activeIndex)?.scrollIntoView({ block: 'nearest' });
   }, [activeIndex]);
 
   const run = async (command: CommandDescriptor): Promise<void> => {
@@ -120,32 +130,36 @@ export const CommandPalette = ({
           <p className={styles.empty}>没有匹配的命令</p>
         ) : (
           <ul className={styles.list} id="command-palette-list" role="listbox" aria-label="可执行命令">
-            {visible.map((command, position) => (
-              <li key={String(command.id)}>
-                <button
-                  ref={(node) => {
-                    itemRefs.current[position] = node;
-                  }}
-                  id={`command-${String(command.id)}`}
-                  type="button"
-                  role="option"
-                  aria-selected={position === activeIndex}
-                  className={position === activeIndex ? `${styles.item} ${styles.itemActive}` : styles.item}
-                  onMouseEnter={() => {
-                    setIndex(position);
-                  }}
-                  onClick={() => {
-                    void run(command);
-                  }}
-                >
-                  <span className={styles.itemTitle}>{command.title}</span>
-                  <span className={styles.itemMeta}>
-                    <span className={styles.scope}>{scopeLabel(command.scope)}</span>
-                    <span className={styles.id}>{String(command.id)}</span>
-                  </span>
-                </button>
-              </li>
-            ))}
+            {rendered.map((command, offset) => {
+              const position = windowRange.start + offset;
+              return (
+                <li key={String(command.id)}>
+                  <button
+                    ref={(node) => {
+                      if (node === null) itemRefs.current.delete(position);
+                      else itemRefs.current.set(position, node);
+                    }}
+                    id={`command-${String(command.id)}`}
+                    type="button"
+                    role="option"
+                    aria-selected={position === activeIndex}
+                    className={position === activeIndex ? `${styles.item} ${styles.itemActive}` : styles.item}
+                    onMouseEnter={() => {
+                      setIndex(position);
+                    }}
+                    onClick={() => {
+                      void run(command);
+                    }}
+                  >
+                    <span className={styles.itemTitle}>{command.title}</span>
+                    <span className={styles.itemMeta}>
+                      <span className={styles.scope}>{scopeLabel(command.scope)}</span>
+                      <span className={styles.id}>{String(command.id)}</span>
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
         {error !== null ? <p className={styles.error}>{error}</p> : null}

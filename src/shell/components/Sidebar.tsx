@@ -1,6 +1,7 @@
-import { useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { DocId } from '#doc-model';
 import type { CapabilityState, CommandDescriptor, DocMeta } from '../../kernel/types.ts';
+import { clampVisible, growVisible, SIDEBAR_INITIAL } from './list-window.ts';
 import styles from './Sidebar.module.css';
 
 export interface SidebarProps {
@@ -50,6 +51,31 @@ export const Sidebar = ({
 }: SidebarProps): ReactElement => {
   const activeCount = capabilities.filter((state) => state.active).length;
   const [collapsed, setCollapsed] = useState<ReadonlySet<SectionKey>>(() => new Set());
+  // 文档列表分批渲染：行高可变（标题+路径两行），不做逐行窗口计算，
+  // 只渲染前 N 项 + 哨兵，滚到底部按块增长——数千文档时 DOM 规模有界
+  const [visibleDocs, setVisibleDocs] = useState(SIDEBAR_INITIAL);
+  const sentinelRef = useRef<HTMLLIElement | null>(null);
+  const hasMoreDocs = documents.length > visibleDocs;
+
+  useEffect(() => {
+    // 列表刷新/收缩时把可见数夹回合法区间（刷新后 identity 变化 → 重置也在此触发之外）
+    setVisibleDocs((current) => clampVisible(current, documents.length));
+  }, [documents]);
+
+  useEffect(() => {
+    if (!hasMoreDocs) return;
+    const node = sentinelRef.current;
+    if (node === null) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setVisibleDocs((current) => growVisible(current, documents.length));
+      }
+    });
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+    };
+  }, [hasMoreDocs, documents.length, visibleDocs]);
 
   const toggle = (key: SectionKey): void => {
     setCollapsed((previous) => {
@@ -146,7 +172,7 @@ export const Sidebar = ({
                 <p className={styles.sectionNote}>库内还没有带合法 id 的文档</p>
               ) : null}
               <ul className={styles.items}>
-                {documents.map((meta) => (
+                {documents.slice(0, visibleDocs).map((meta) => (
                   <li key={String(meta.id)}>
                     <button
                       type="button"
@@ -160,6 +186,11 @@ export const Sidebar = ({
                     </button>
                   </li>
                 ))}
+                {hasMoreDocs ? (
+                  <li className={styles.itemNote} ref={sentinelRef} aria-hidden="true">
+                    滚动加载更多…
+                  </li>
+                ) : null}
               </ul>
             </>
           )}

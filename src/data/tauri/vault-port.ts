@@ -67,9 +67,18 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
   watch: (listener) => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    void listen<{ kind: VaultFileEvent['kind']; path: string }>('vault://changed', (event) => {
-      listener({ kind: event.payload.kind, path: unsafeVaultPath(event.payload.path) });
-    })
+    void listen<{ kind: VaultFileEvent['kind']; path: string; from?: string }>(
+      'vault://changed',
+      (event) => {
+        listener({
+          kind: event.payload.kind,
+          path: unsafeVaultPath(event.payload.path),
+          ...(event.payload.from === undefined
+            ? {}
+            : { from: unsafeVaultPath(event.payload.from) }),
+        });
+      },
+    )
       .then((fn) => {
         if (disposed) {
           fn();

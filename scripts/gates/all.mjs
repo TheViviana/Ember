@@ -2,6 +2,7 @@ import { DEFAULT_ROOT } from './lib.mjs';
 import { scanBans } from './bans.mjs';
 import { findCycles } from './cycles.mjs';
 import { checkLayers } from './layers.mjs';
+import { checkCsp } from './csp.mjs';
 
 const root = process.argv.includes('--root')
   ? process.argv[process.argv.indexOf('--root') + 1]
@@ -11,6 +12,7 @@ const results = [
   { name: 'cycles', violations: findCycles(root).map((cycle) => ({ detail: cycle.join(' → ') })) },
   { name: 'layers', violations: checkLayers(root) },
   { name: 'bans', violations: scanBans(root) },
+  { name: 'csp', violations: checkCsp(root) },
 ];
 
 let failed = 0;

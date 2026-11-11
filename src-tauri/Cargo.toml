@@ -23,3 +23,5 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "native-tls"] }
 # 流式取消的 select! 竞速与轮询定时器（reqwest 传递依赖已带 tokio，显式声明宏与 time 特性）
 tokio = { version = "1.54", default-features = false, features = ["macros", "time"] }
+# ulid 的熵回退（macOS 走 getentropy 系统调用）；版本已在依赖树中，零新增下载
+getrandom = "0.4"

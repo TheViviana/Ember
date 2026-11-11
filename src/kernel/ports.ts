@@ -10,8 +10,10 @@ import type {
 } from './types.ts';
 
 export interface VaultFileEvent {
-  readonly kind: 'created' | 'changed' | 'removed';
+  readonly kind: 'created' | 'changed' | 'removed' | 'renamed';
   readonly path: VaultPath;
+  /** 仅 kind === 'renamed' 携带：重命名前的原路径 */
+  readonly from?: VaultPath;
 }
 
 /**

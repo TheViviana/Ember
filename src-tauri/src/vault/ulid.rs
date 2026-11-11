@@ -27,17 +27,25 @@ pub fn is_ulid(value: &str) -> bool {
 
 fn random_bytes() -> [u8; 10] {
     let mut buffer = [0u8; 10];
-    if let Ok(mut file) = File::open("/dev/urandom") {
-        if file.read_exact(&mut buffer).is_ok() {
-            return buffer;
-        }
+    // 首选 /dev/urandom；不可用走 getrandom（macOS 为 getentropy 系统调用，
+    // 修复原「时间戳+计数器」回退的跨进程碰撞隐患）；两者都失败才退化为
+    // 时间戳+计数器（仅剩同进程内不重复保证，记入日志便于排查）。
+    if File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut buffer))
+        .is_ok()
+    {
+        return buffer;
     }
-    // 退化路径：时间戳与进程内计数器混合，保证同进程内连续调用不会重复。
+    if getrandom::fill(&mut buffer).is_ok() {
+        return buffer;
+    }
     let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = clock::now_ms() as u128 * 1_000_000 + counter as u128;
     buffer.copy_from_slice(&nanos.to_be_bytes()[6..16]);
+    eprintln!("ULID 熵源不可用，退化使用时间戳+计数器（跨进程可能碰撞）");
     buffer
 }
+
 
 fn encode(bytes: &[u8; 16]) -> String {
     let value = u128::from_be_bytes(*bytes);
@@ -47,4 +55,17 @@ fn encode(bytes: &[u8; 16]) -> String {
         *slot = ALPHABET[((value >> shift) & 0x1f) as usize];
     }
     output.iter().map(|byte| *byte as char).collect()
+}
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn generated_ids_are_unique_and_valid() {
+        let ids: HashSet<String> = (0..10_000).map(|_| generate()).collect();
+        assert_eq!(ids.len(), 10_000, "连续 1 万次生成不得重复");
+        assert!(ids.iter().all(|id| is_ulid(id)));
+    }
 }
