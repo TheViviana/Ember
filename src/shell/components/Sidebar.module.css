@@ -1,0 +1,251 @@
+.sidebar {
+  width: var(--sidebar-width);
+  flex: 0 0 var(--sidebar-width);
+  /* 浮层高度随内容自适应，最长不超过所在容器（上方由 SidebarDock 用 max-height 夹住） */
+  max-height: 100%;
+  /* 不支持 backdrop-filter 时回退为不透明侧栏 */
+  background: var(--ember-bg-sidebar);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 侧栏下方是不透明画布，窗口 vibrancy 无法穿透，用 backdrop-filter 模糊画布内容 */
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .sidebar {
+    background: var(--ember-glass-sidebar);
+    -webkit-backdrop-filter: blur(var(--ember-glass-blur)) saturate(var(--ember-glass-saturate));
+    backdrop-filter: blur(var(--ember-glass-blur)) saturate(var(--ember-glass-saturate));
+  }
+}
+
+.header {
+  height: 44px;
+  flex: 0 0 auto;
+  padding: 0 var(--space-lg);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.headerIcon {
+  color: var(--ember-text-primary);
+  font-size: var(--text-base);
+}
+
+.headerLabel {
+  font-size: var(--text-md);
+  font-family: var(--font-body);
+  font-weight: 600;
+  color: var(--ember-text-primary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.nav {
+  /* 内容少时按内容高度撑开；内容超出时只有这里滚动，footer 始终可见 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-md);
+}
+
+.section {
+  margin-bottom: var(--space-xl);
+}
+
+.section:last-child {
+  margin-bottom: 0;
+}
+
+/* 分组标题整行可点击折叠，chevron 指示展开状态 */
+.sectionToggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  margin-bottom: var(--space-xs);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-muted);
+  font-family: var(--font-body);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.sectionToggle:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-secondary);
+}
+
+.sectionToggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ember-border-focus);
+}
+
+.sectionIcon {
+  font-size: var(--text-sm);
+  color: var(--ember-text-muted);
+}
+
+.sectionTitle {
+  font-size: var(--text-sm);
+  font-family: var(--font-body);
+  font-weight: 500;
+  color: inherit;
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.chevron {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  color: var(--ember-text-muted);
+  transform: rotate(90deg);
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.chevron[data-collapsed='true'] {
+  transform: rotate(0deg);
+}
+
+.sectionNote {
+  padding: 0 var(--space-md) var(--space-sm);
+  font-size: var(--text-xs);
+  font-family: var(--font-body);
+  color: var(--ember-text-muted);
+}
+
+.sectionError {
+  padding: 0 var(--space-md) var(--space-sm);
+  font-size: var(--text-xs);
+  font-family: var(--font-body);
+  color: var(--ember-danger);
+}
+
+.items {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 6px var(--space-sm);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--ember-text-secondary);
+  font-size: var(--text-md);
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+  text-align: left;
+}
+
+.item:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ember-border-focus);
+}
+
+.itemActive {
+  background: var(--ember-bg-selected);
+  color: var(--ember-text-primary);
+}
+
+.staticItem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 6px var(--space-sm);
+}
+
+.staticItemRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: 6px var(--space-sm);
+}
+
+.itemLabel {
+  font-size: var(--text-md);
+  color: inherit;
+}
+
+.itemNote {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  font-family: var(--font-body);
+  color: var(--ember-text-muted);
+}
+
+.badge {
+  margin-left: auto;
+  font-size: var(--text-2xs);
+  font-family: var(--font-body);
+  color: var(--ember-text-secondary);
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--ember-primary-tint-soft);
+  border: 1px solid var(--ember-border);
+}
+
+.badgeOn {
+  color: var(--ember-success);
+  background: var(--ember-success-tint);
+  border-color: var(--ember-success-border);
+}
+
+.badgeOff {
+  color: var(--ember-text-muted);
+  background: transparent;
+  border-color: var(--ember-border);
+}
+
+.footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: var(--space-md) var(--space-lg);
+  border-top: 1px solid var(--ember-border-subtle);
+}
+
+.footerIcon {
+  font-size: var(--text-sm);
+  color: var(--ember-warning);
+  margin-right: var(--space-sm);
+}
+
+.footerText {
+  font-size: var(--text-xs);
+  font-family: var(--font-body);
+  color: var(--ember-text-muted);
+}

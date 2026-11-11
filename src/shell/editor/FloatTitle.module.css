@@ -1,0 +1,173 @@
+.bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-sm) var(--space-md);
+}
+
+.titleSlot {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.titleButton {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  /* 标题既可拖动浮窗（移动超过阈值），也可单击改名（未移动） */
+  cursor: grab;
+}
+
+/* 未编辑时看起来就是标题：只变文字亮度，不出现输入框或底色 */
+.titleButton:hover {
+  color: var(--ember-text-accent);
+}
+
+.titleButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ember-border-focus);
+}
+
+.head {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tail {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.placeholder {
+  color: var(--ember-text-muted);
+  font-weight: 400;
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-xs) var(--space-sm);
+  /* 编辑态才出现淡淡的一圈提示，不再用高对比输入框 */
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-sm);
+  outline: none;
+  background: var(--ember-primary-tint-weak);
+  color: var(--ember-text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+}
+
+.input:focus {
+  border-color: var(--ember-border);
+}
+
+.reading {
+  flex: 0 0 auto;
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-muted);
+  white-space: nowrap;
+}
+
+.status {
+  flex: 0 0 auto;
+  padding: 1px var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-full);
+  background: var(--ember-primary-tint-weak);
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+  white-space: nowrap;
+  color: var(--ember-text-secondary);
+}
+
+.status_ok {
+  border-color: var(--ember-success-border);
+  background: var(--ember-success-tint);
+  color: var(--ember-success);
+}
+
+.status_pending {
+  border-color: var(--ember-warning);
+  background: var(--ember-primary-tint-weak);
+  color: var(--ember-warning);
+}
+
+.status_alert {
+  border-color: var(--ember-danger);
+  background: var(--ember-danger-glow);
+  color: var(--ember-danger);
+}
+
+/* 专注模式开关：与关闭按钮同尺寸，图标用文字符号避免新增图标资产 */
+.focus {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-size: var(--text-base);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.focus:hover,
+.focus[aria-pressed='true'] {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.close {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-size: var(--text-md);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.close:hover {
+  border-color: transparent;
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}

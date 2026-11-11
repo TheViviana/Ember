@@ -1,0 +1,4 @@
+{
+  "gate": "cycles",
+  "rows": [{ "rule": "cycle", "file": "src/a.ts" }]
+}

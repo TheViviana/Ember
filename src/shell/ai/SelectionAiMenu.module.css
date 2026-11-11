@@ -1,0 +1,35 @@
+.menu {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.item {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  background: transparent;
+  color: var(--ember-text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.item:hover:not(:disabled) {
+  background: var(--ember-primary-tint-soft);
+  color: var(--ember-primary);
+}
+
+.item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

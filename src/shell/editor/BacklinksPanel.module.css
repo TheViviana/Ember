@@ -1,0 +1,191 @@
+/* 反向链接：折叠按钮贴内容区右下角，展开为浮层卡片，不占正文宽度 */
+.dock {
+  position: absolute;
+  right: var(--space-xs);
+  bottom: var(--space-xs);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-xs);
+}
+
+.toggle {
+  height: 22px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--ember-bg-elevated);
+  color: var(--ember-text-muted);
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.toggle:hover {
+  border-color: var(--ember-border-strong);
+  color: var(--ember-text-primary);
+}
+
+.toggle[aria-expanded='true'] {
+  border-color: var(--ember-border-strong);
+  color: var(--ember-text-accent);
+}
+
+.panel {
+  width: 272px;
+  max-height: min(56vh, 420px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-primary);
+}
+
+.temporary {
+  flex: 0 0 auto;
+  padding: 0 var(--space-xs);
+  border: 1px dashed var(--ember-border);
+  border-radius: var(--radius-sm);
+  color: var(--ember-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+}
+
+.close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-muted);
+  font-size: var(--text-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.hint {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-muted);
+}
+
+.body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.empty {
+  margin: 0;
+  padding: var(--space-xs) 0;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+}
+
+.list,
+.hits {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.groupTitle {
+  width: 100%;
+  padding: 2px var(--space-xs);
+  overflow: hidden;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.groupTitle:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-accent);
+}
+
+.hit {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  padding: 1px var(--space-xs);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hit:hover {
+  background: var(--ember-bg-hover);
+}
+
+.line {
+  flex: 0 0 auto;
+  min-width: 18px;
+  color: var(--ember-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  text-align: right;
+}
+
+.raw {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ember-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

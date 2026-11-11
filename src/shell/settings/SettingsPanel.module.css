@@ -1,0 +1,442 @@
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: var(--layer-menu);
+  /* 浮窗不压暗画布：点击空白处仍然关闭，Esc / × 同样有效 */
+  background: transparent;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 浮在画布上的设置窗：圆角、阴影、可拖动标题栏，与文章浮窗同一套观感 */
+.panel {
+  position: fixed;
+  left: 0;
+  top: 0;
+  max-width: calc(100vw - var(--space-xl));
+  max-height: calc(100vh - var(--space-xl));
+  background: var(--ember-bg-base);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+}
+
+.panel[data-ready='false'] {
+  opacity: 0;
+}
+
+.moving {
+  user-select: none;
+}
+
+.header {
+  flex: 0 0 auto;
+  padding: var(--space-lg) var(--space-xl);
+  border-bottom: 1px solid var(--ember-border);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+  cursor: grab;
+  touch-action: none;
+}
+
+.moving .header {
+  cursor: grabbing;
+}
+
+.eyebrow {
+  margin: 0 0 var(--space-xs);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ember-text-muted);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--ember-text-primary);
+}
+
+.close {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ember-text-secondary);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-lg);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.close:hover {
+  color: var(--ember-text-primary);
+  border-color: transparent;
+  background: var(--ember-bg-hover);
+}
+
+/* 左类目 + 右内容：两列各自滚动，切换类目不改变浮窗位置 */
+.body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.nav {
+  flex: 0 0 132px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-md);
+  border-right: 1px solid var(--ember-border-subtle);
+  overflow-y: auto;
+}
+
+.navItem {
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.navItem:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.navItem:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ember-primary-tint-soft);
+}
+
+.navItemActive {
+  background: var(--ember-bg-hover);
+  border-color: var(--ember-border-focus);
+  color: var(--ember-text-primary);
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--space-lg) var(--space-xl) var(--space-2xl);
+}
+
+.section {
+  margin-bottom: var(--space-md);
+  padding: var(--space-lg);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--ember-bg-surface);
+}
+
+.sectionTitle {
+  margin: 0 0 var(--space-sm);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ember-text-primary);
+}
+
+.note {
+  margin: 0 0 var(--space-md);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-muted);
+}
+
+.error {
+  margin: 0 0 var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--ember-danger-border);
+  border-radius: var(--radius-md);
+  background: var(--ember-danger-tint);
+  color: var(--ember-danger);
+  font-size: var(--text-xs);
+}
+
+.options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+}
+
+.option {
+  flex: 1 1 120px;
+  padding: var(--space-md);
+  background: var(--ember-bg-base);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-md);
+  color: var(--ember-text-secondary);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.option:hover:not(:disabled) {
+  border-color: var(--ember-border-strong);
+  background: var(--ember-bg-hover);
+}
+
+.option:disabled {
+  cursor: default;
+}
+
+.optionActive {
+  border-color: var(--ember-border-focus);
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+  box-shadow: 0 0 0 1px var(--ember-primary-tint-soft) inset;
+}
+
+.optionTitle {
+  font-size: var(--text-sm);
+}
+
+.optionHint {
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+}
+
+/* AI 配置表单：单列字段，输入框与设置面板同一套暗色描边 */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+}
+
+.fieldLabel {
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+}
+
+.input {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--ember-border-input);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-deep);
+  color: var(--ember-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.input::placeholder {
+  color: var(--ember-text-muted);
+  font-family: var(--font-body);
+}
+
+.input:focus-visible {
+  outline: none;
+  border-color: var(--ember-border-focus);
+  box-shadow: 0 0 0 3px var(--ember-primary-tint-soft);
+}
+
+/* 模型下拉 + 刷新：下拉沿用输入框描边，只补原生控件在暗色下的底色 */
+.modelRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.modelRow select {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.modelRow select:disabled {
+  color: var(--ember-text-muted);
+  cursor: default;
+}
+
+.modelRow option {
+  background: var(--ember-bg-deep);
+  color: var(--ember-text-primary);
+}
+
+.refresh {
+  flex: 0 0 auto;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-base);
+  color: var(--ember-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.refresh:hover:not(:disabled) {
+  border-color: var(--ember-border-strong);
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.refresh:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 保存 / 测试按钮：沿用选项卡片外观，改成居中排布 */
+.action {
+  align-items: center;
+  text-align: center;
+}
+
+.switchRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--text-sm);
+  color: var(--ember-text-secondary);
+  cursor: pointer;
+}
+
+.switchRow > span {
+  white-space: nowrap;
+}
+
+/* 原生 checkbox 改成胶囊开关：纯 CSS，不改组件结构 */
+.switchRow input[type='checkbox'] {
+  position: relative;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--ember-border-input);
+  border-radius: var(--radius-full);
+  background: var(--ember-bg-deep);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.switchRow input[type='checkbox']::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  background: var(--ember-text-secondary);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.switchRow input[type='checkbox']:checked {
+  border-color: var(--ember-success);
+  background: var(--ember-success);
+}
+
+.switchRow input[type='checkbox']:checked::before {
+  background: var(--ember-text-primary);
+  transform: translateX(14px);
+}
+
+.switchRow input[type='checkbox']:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ember-primary-tint-soft);
+}
+
+.switchRow input[type='checkbox']:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.capabilityRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-sm) 0;
+  border-bottom: 1px solid var(--ember-border-subtle);
+}
+
+.capabilityText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.capabilityName {
+  font-size: var(--text-sm);
+  color: var(--ember-text-primary);
+}
+
+.capabilityDesc {
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+}
+
+.about {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  font-size: var(--text-sm);
+}
+
+.about div {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.about dt {
+  color: var(--ember-text-muted);
+}
+
+.about dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  color: var(--ember-text-secondary);
+  word-break: break-all;
+  text-align: right;
+}

@@ -1,0 +1,120 @@
+/* 命令面板：居中浮层，不改变页面布局；z-index 与工具面板同为菜单层 */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--layer-menu) + 2);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14vh;
+  background: var(--ember-overlay-scrim);
+}
+
+.palette {
+  width: min(560px, 86vw);
+  max-height: 62vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-lg);
+  background: var(--ember-menu-bg);
+  box-shadow: var(--shadow-lg);
+}
+
+.input {
+  flex-shrink: 0;
+  height: 42px;
+  padding: 0 var(--space-md);
+  border: 0;
+  border-bottom: 1px solid var(--ember-border-subtle);
+  background: transparent;
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  color: var(--ember-text-primary);
+}
+
+.input::placeholder {
+  color: var(--ember-text-muted);
+}
+
+.input:focus-visible {
+  outline: none;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-xs);
+  overflow-y: auto;
+}
+
+.item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.itemActive {
+  background: var(--ember-bg-hover);
+}
+
+.itemTitle {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ember-text-primary);
+}
+
+.itemMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+}
+
+.scope {
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-secondary);
+}
+
+.id {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-muted);
+}
+
+.empty {
+  margin: 0;
+  padding: var(--space-lg) var(--space-md);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+}
+
+.error {
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  border-top: 1px solid var(--ember-border-subtle);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-danger);
+}
+
+.foot {
+  flex-shrink: 0;
+  padding: var(--space-xs) var(--space-md);
+  border-top: 1px solid var(--ember-border-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-muted);
+}

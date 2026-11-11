@@ -1,0 +1,197 @@
+use std::fs;
+use std::path::PathBuf;
+
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use serde::Serialize;
+use tauri::{LogicalPosition, LogicalSize, State, Window};
+
+use crate::error::{VaultError, VaultResult};
+use crate::vault::{atomic, media, paths, ulid, Vault};
+
+pub mod ai;
+
+/// 无边框窗口的自绘缩放：一次 IPC 同时落位置与尺寸，避免两帧撕裂。
+/// macOS 上 `startResizeDragging` 是 `NotSupported` 且错误被运行时吞掉，因此缩放必须走这里。
+#[tauri::command]
+pub fn window_resize_frame(
+    window: Window,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    window
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|error| error.to_string())?;
+    window
+        .set_size(LogicalSize::new(width.max(1.0), height.max(1.0)))
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct VaultIdentity {
+    #[serde(rename = "vaultId")]
+    vault_id: String,
+    readonly: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileStat {
+    mtime: String,
+    size: u64,
+}
+
+/// vault 文档读入上限：整文件 + base64（×4/3）都驻留内存，超限拒绝而非读入
+const MAX_VAULT_READ_BYTES: u64 = 32 * 1024 * 1024;
+/// ui.json 是机器本地小文件，远超实际需要的载荷直接拒绝
+const MAX_MACHINE_UI_BYTES: usize = 1024 * 1024;
+
+fn identity_of(vault: &Vault) -> VaultIdentity {
+    VaultIdentity {
+        vault_id: vault.id().to_string(),
+        readonly: vault.readonly(),
+    }
+}
+
+/// 前端启动第一步：拿库身份与只读标志（只读标志来自库锁获取结果）。
+#[tauri::command]
+pub fn vault_identity(vault: State<'_, Vault>) -> VaultIdentity {
+    identity_of(&vault)
+}
+
+/// 幂等的初始化入口：`Vault::open` 已在启动时创建 settings.json。
+#[tauri::command]
+pub fn vault_init(vault: State<'_, Vault>) -> VaultResult<VaultIdentity> {
+    Ok(identity_of(&vault))
+}
+
+/// 字节以 base64 过 IPC；文件不存在返回 null。
+#[tauri::command]
+pub async fn vault_read(vault: State<'_, Vault>, path: String) -> VaultResult<Option<String>> {
+    // stat 先行：外部塞进库里的超大文件不读入内存
+    if let Some((_, size)) = vault.stat(&path)? {
+        if size > MAX_VAULT_READ_BYTES {
+            return Err(VaultError::Encoding(format!(
+                "文件超过读入上限 {} MB：{path}",
+                MAX_VAULT_READ_BYTES / (1024 * 1024)
+            )));
+        }
+    }
+    Ok(vault.read(&path)?.map(|bytes| STANDARD.encode(bytes)))
+}
+
+#[tauri::command]
+pub async fn vault_write(
+    vault: State<'_, Vault>,
+    path: String,
+    data: String,
+    intent: String,
+) -> VaultResult<()> {
+    let bytes = STANDARD
+        .decode(data.as_bytes())
+        .map_err(|error| VaultError::Encoding(error.to_string()))?;
+    vault.write(&path, &bytes, &intent)
+}
+
+#[tauri::command]
+pub async fn vault_remove(vault: State<'_, Vault>, path: String) -> VaultResult<()> {
+    vault.remove(&path)
+}
+
+#[tauri::command]
+pub async fn vault_rename(vault: State<'_, Vault>, from: String, to: String) -> VaultResult<()> {
+    vault.rename(&from, &to)
+}
+
+#[tauri::command]
+pub async fn vault_list(vault: State<'_, Vault>) -> VaultResult<Vec<String>> {
+    vault.list()
+}
+
+#[tauri::command]
+pub async fn vault_stat(vault: State<'_, Vault>, path: String) -> VaultResult<Option<FileStat>> {
+    Ok(vault
+        .stat(&path)?
+        .map(|(mtime, size)| FileStat { mtime, size }))
+}
+
+/// 图库清单：`media/` 下所有合法图片，相对路径字典序。
+#[tauri::command]
+pub async fn asset_list(vault: State<'_, Vault>) -> VaultResult<Vec<media::AssetEntry>> {
+    media::list(&vault)
+}
+
+/// 读单张图库图片，字节以 base64 过 IPC；只接受 `media/` 下的资产路径。
+#[tauri::command]
+pub async fn asset_read(vault: State<'_, Vault>, path: String) -> VaultResult<media::AssetData> {
+    media::read(&vault, &path)
+}
+
+/// 导入图片：校验白名单类型 / magic bytes / 20 MB 上限，按 sha256 内容寻址去重。
+#[tauri::command]
+pub async fn asset_save(
+    vault: State<'_, Vault>,
+    data: String,
+    mime: String,
+) -> VaultResult<media::AssetSaved> {
+    // 解码前按 base64 长度（×3/4）估算：被攻破的 renderer 传超大载荷时先拒绝，不做解码
+    if (data.len() as u64) * 3 / 4 > media::MAX_ASSET_BYTES {
+        return Err(VaultError::Encoding(format!(
+            "图片超过 {} MB 上限",
+            media::MAX_ASSET_BYTES / (1024 * 1024)
+        )));
+    }
+    let bytes = STANDARD
+        .decode(data.as_bytes())
+        .map_err(|error| VaultError::Encoding(error.to_string()))?;
+    media::save(&vault, &bytes, &mime)
+}
+
+/// 机器标识与库锁共用 `machine-id` 文件，保证 ui.json 落在同一台机器的目录下。
+fn machine_id() -> VaultResult<String> {
+    let dir = paths::app_support_dir();
+    let file = dir.join("machine-id");
+    if let Ok(text) = fs::read_to_string(&file) {
+        let trimmed = text.trim();
+        if ulid::is_ulid(trimmed) {
+            return Ok(trimmed.to_string());
+        }
+    }
+    fs::create_dir_all(&dir)?;
+    let id = ulid::generate();
+    atomic::write_atomic(&file, id.as_bytes())?;
+    Ok(id)
+}
+
+/// `~/Library/Application Support/Ember/machines/<machineId>/ui.json`，绝不写进库目录。
+fn machine_ui_file() -> VaultResult<PathBuf> {
+    let dir = paths::app_support_dir().join("machines").join(machine_id()?);
+    Ok(dir.join("ui.json"))
+}
+
+/// 读取机器本地 UI 状态；文件不存在返回 null。
+#[tauri::command]
+pub async fn machine_ui_read() -> VaultResult<Option<String>> {
+    let file = machine_ui_file()?;
+    match fs::read_to_string(&file) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 原子写入机器本地 UI 状态；先校验载荷大小与 JSON，避免把半截内容落盘。
+#[tauri::command]
+pub async fn machine_ui_write(data: String) -> VaultResult<()> {
+    if data.len() > MAX_MACHINE_UI_BYTES {
+        return Err(VaultError::Encoding(format!(
+            "ui.json 载荷超过 {} KB 上限",
+            MAX_MACHINE_UI_BYTES / 1024
+        )));
+    }
+    let _: serde_json::Value = serde_json::from_str(&data)?;
+    let file = machine_ui_file()?;
+    atomic::write_atomic(&file, data.as_bytes())
+}

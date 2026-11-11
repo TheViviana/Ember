@@ -1,0 +1,50 @@
+use std::fs::File;
+use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::vault::clock;
+
+const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// 生成 26 字符 ULID（Crockford Base32）。不引入额外 crate：48 位毫秒时间戳 + 80 位随机数。
+pub fn generate() -> String {
+    generate_at(clock::now_ms())
+}
+
+pub fn generate_at(millis: u64) -> String {
+    let mut bytes = [0u8; 16];
+    bytes[0..6].copy_from_slice(&millis.to_be_bytes()[2..8]);
+    bytes[6..16].copy_from_slice(&random_bytes());
+    encode(&bytes)
+}
+
+/// 规范要求库身份是 26 字符 ULID；这里只校验字符集与长度，不做时间戳解析。
+pub fn is_ulid(value: &str) -> bool {
+    value.len() == 26 && value.bytes().all(|byte| ALPHABET.contains(&byte))
+}
+
+fn random_bytes() -> [u8; 10] {
+    let mut buffer = [0u8; 10];
+    if let Ok(mut file) = File::open("/dev/urandom") {
+        if file.read_exact(&mut buffer).is_ok() {
+            return buffer;
+        }
+    }
+    // 退化路径：时间戳与进程内计数器混合，保证同进程内连续调用不会重复。
+    let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = clock::now_ms() as u128 * 1_000_000 + counter as u128;
+    buffer.copy_from_slice(&nanos.to_be_bytes()[6..16]);
+    buffer
+}
+
+fn encode(bytes: &[u8; 16]) -> String {
+    let value = u128::from_be_bytes(*bytes);
+    let mut output = [ALPHABET[0]; 26];
+    for (index, slot) in output.iter_mut().enumerate() {
+        let shift = 5 * (25 - index);
+        *slot = ALPHABET[((value >> shift) & 0x1f) as usize];
+    }
+    output.iter().map(|byte| *byte as char).collect()
+}

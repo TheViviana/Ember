@@ -1,0 +1,19 @@
+/* 阅读态：只组合既有 token，不新增 CSS 变量 */
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.column {
+  width: 100%;
+  margin: 0 auto;
+  padding: var(--space-lg) var(--space-md) var(--space-xl);
+}
+
+/* MarkdownView 自带 overflow:auto；阅读模式统一交给外层滚动容器，
+ * 用两级类名提高优先级，避免 CSS Module 打包顺序影响覆盖结果。 */
+.scroll .article {
+  overflow: visible;
+}

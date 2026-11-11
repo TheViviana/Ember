@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ember</title>
+    <style>
+      /* 透明窗口首帧兜底：应用脚本执行前先铺不透明底色，避免闪出桌面 */
+      html,
+      body {
+        background: #0a0a0a;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/shell/main.tsx"></script>
+  </body>
+</html>

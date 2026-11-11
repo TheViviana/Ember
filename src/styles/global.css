@@ -1,0 +1,72 @@
+/* ============================================================
+ * Ember 全局基础层
+ * 只做重置、根节点尺寸、滚动条、背景网格；组件样式一律走 CSS Modules。
+ * 设计变量全部来自 tokens.css（本地字体，无远程资源）。
+ * ============================================================ */
+
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: 400;
+  line-height: var(--leading-normal);
+  color: var(--ember-text-primary);
+  background: var(--ember-bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 透明窗口：React 首帧绘制完成后再撤掉不透明底，避免启动瞬间闪出桌面。
+ * html 的底色会铺满整个视口并盖住窗口 vibrancy，必须一并撤掉。 */
+html[data-vibrancy='on'] {
+  background: transparent;
+}
+
+html[data-vibrancy='on'] body {
+  background: transparent;
+}
+
+/* 画布细网格由无限画布自绘（见 src/shell/canvas/CanvasSurface.module.css） */
+
+::selection {
+  background: var(--ember-primary);
+  color: var(--ember-text-on-accent);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: var(--radius-full);
+  background-clip: content-box;
+  background-color: var(--ember-border-strong);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ember-border-focus);
+}

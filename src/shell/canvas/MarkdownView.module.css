@@ -1,0 +1,184 @@
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  overflow: auto;
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-primary);
+}
+
+.heading {
+  margin: 0;
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  color: var(--ember-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.heading1 {
+  font-size: var(--text-xl);
+}
+
+.heading2 {
+  font-size: var(--text-lg);
+}
+
+.heading3 {
+  font-size: var(--text-base);
+}
+
+.heading4,
+.heading5,
+.heading6 {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  letter-spacing: 0;
+  color: var(--ember-text-secondary);
+}
+
+.paragraph {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.inlineCode {
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-sm);
+  background: var(--ember-primary-tint-soft);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.codeBlock {
+  max-width: 100%;
+  margin: 0;
+  padding: var(--space-sm);
+  overflow: auto;
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-deep);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.codeBlock code {
+  font-family: inherit;
+  white-space: pre;
+}
+
+.list {
+  margin: 0;
+  padding-left: var(--space-lg);
+}
+
+.quote {
+  margin: 0;
+  padding-left: var(--space-sm);
+  border-left: 2px solid var(--ember-border-strong);
+  color: var(--ember-text-secondary);
+}
+
+.rule {
+  width: 100%;
+  margin: 0;
+  border: none;
+  border-top: 1px solid var(--ember-border-subtle);
+}
+
+.link {
+  color: var(--ember-text-accent);
+  text-decoration: underline;
+}
+
+/* 阅读态双链：保持行内，外观接近链接但语义是按钮 */
+.wiki {
+  display: inline;
+  margin: 0;
+  padding: 0 2px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--ember-primary-tint-soft);
+  color: var(--ember-text-accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.wiki:hover {
+  background: var(--ember-bg-hover);
+}
+
+/* ---------- 数学公式 ---------- */
+.mathInline {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: baseline;
+}
+
+.mathBlock {
+  max-width: 100%;
+  margin: var(--space-xs) 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+
+.mathError {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--ember-danger-border);
+  border-radius: var(--radius-sm);
+  background: var(--ember-danger-tint);
+  text-align: left;
+}
+
+.mathErrorTex {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ember-text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mathErrorNote {
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-danger);
+}
+
+/* ---------- GFM 表格 ---------- */
+.tableWrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.table th,
+.table td {
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--ember-border-subtle);
+  vertical-align: top;
+}
+
+.table th {
+  background: var(--ember-bg-elevated);
+  color: var(--ember-text-primary);
+  font-weight: 600;
+}
+
+.table td {
+  color: var(--ember-text-secondary);
+}

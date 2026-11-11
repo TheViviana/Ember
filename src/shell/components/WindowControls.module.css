@@ -1,0 +1,32 @@
+.controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-right: var(--space-lg);
+}
+
+.light {
+  width: var(--window-control-size);
+  height: var(--window-control-size);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: filter var(--duration-fast) var(--ease-out);
+}
+
+.light:hover {
+  filter: brightness(1.25);
+}
+
+.close {
+  background: var(--ember-traffic-close);
+}
+
+.minimize {
+  background: var(--ember-traffic-minimize);
+}
+
+.zoom {
+  background: var(--ember-traffic-zoom);
+}

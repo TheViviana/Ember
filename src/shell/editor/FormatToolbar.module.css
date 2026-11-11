@@ -1,0 +1,65 @@
+/* 格式工具栏：只组合既有 token，不新增 CSS 变量。
+ * 高度与浮窗标题栏的紧凑控件一致，避免在 360px 最小宽度下换行。 */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 var(--space-sm);
+  /* 与正文的分界交给色阶与一层短阴影，不再压一条实心线 */
+  background: var(--ember-bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1;
+  color: var(--ember-text-secondary);
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--ember-border-subtle);
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.button[aria-pressed='true'] {
+  border-color: var(--ember-border-focus);
+  background: var(--ember-primary-tint-strong);
+  color: var(--ember-text-primary);
+}
+
+.button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ember-border-focus);
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 把「阅读」推到行尾，不改变按钮组间距 */
+.spacer {
+  flex: 1 1 auto;
+}
+
+.divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 14px;
+  margin: 0 var(--space-xs);
+  background: var(--ember-border-subtle);
+}

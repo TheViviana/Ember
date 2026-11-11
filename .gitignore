@@ -1,0 +1,23 @@
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+
+# 环境变量文件：Vite 会自动加载，密钥一旦写入就会随提交泄露
+.env
+.env.*
+!.env.example
+
+# 本仓库被当作 vault 打开时的库状态：settings/canvas/锁/journal 不该进版本控制
+.workbench/
+
+src-tauri/target/
+src-tauri/gen/
+
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+.DS_Store
+Thumbs.db

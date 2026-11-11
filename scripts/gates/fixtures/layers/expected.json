@@ -1,0 +1,9 @@
+{
+  "gate": "layers",
+  "rows": [
+    { "rule": "forbidden-external", "file": "src/capabilities/evil/index.ts" },
+    { "rule": "capability-cross-import", "file": "src/capabilities/other/index.ts" },
+    { "rule": "forbidden-external", "file": "packages/doc-model/src/index.ts" },
+    { "rule": "forbidden-internal", "file": "src/kernel/index.ts" }
+  ]
+}

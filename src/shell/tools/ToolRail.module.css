@@ -1,0 +1,316 @@
+/* 左下角唯一横排：紧跟侧栏启动图标之后，所有入口与浮窗胶囊都在这一行。
+ * 位置与侧栏开合无关：左侧固定 12 + 横排尺寸 + 8，纵向中心线与启动图标一致。 */
+.rail {
+  position: absolute;
+  left: calc(var(--space-md) + var(--tool-rail-size) + var(--space-sm));
+  /* 状态栏改为贴底浮层后不再占布局高，横排上移一个状态栏高度，保持与改动前同一视觉位置 */
+  bottom: calc(var(--space-md) + var(--statusbar-height));
+  height: var(--tool-rail-size);
+  z-index: calc(var(--layer-menu) - 2);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* 每个入口一槽：面板相对自己的按钮定位，两个面板不会叠在同一处 */
+.slot {
+  position: relative;
+  display: flex;
+}
+
+.entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  height: 28px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-full);
+  background: var(--ember-bg-glass);
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  color: var(--ember-text-secondary);
+  cursor: pointer;
+}
+
+.entry:hover,
+.entry[aria-expanded='true'] {
+  border-color: var(--ember-border-focus);
+  color: var(--ember-text-primary);
+}
+
+.entry:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ember-border-focus);
+}
+
+.badge {
+  min-width: 16px;
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-full);
+  background: var(--ember-primary-tint-strong);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 16px;
+  text-align: center;
+  color: var(--ember-text-primary);
+}
+
+.panel {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--space-sm));
+  width: 360px;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  padding: var(--space-md);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-lg);
+  background: var(--ember-menu-bg);
+  box-shadow: var(--shadow-lg);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xs);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ember-text-primary);
+}
+
+.close {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1;
+  color: var(--ember-text-muted);
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.note,
+.empty {
+  margin: 0 0 var(--space-sm);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-muted);
+}
+
+.empty {
+  margin-bottom: 0;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-sm);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item:hover {
+  border-color: var(--ember-border-strong);
+  background: var(--ember-bg-hover);
+}
+
+.itemTitle {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ember-text-primary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.itemSummary {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.itemPath {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 番茄钟 ---------- */
+
+.pomoRunningLabel {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  font-variant-numeric: tabular-nums;
+}
+
+.pomoGrid {
+  display: flex;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.pomoField {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-surface);
+}
+
+.pomoLabel {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-secondary);
+}
+
+.pomoNumber {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-muted);
+}
+
+.pomoInput {
+  width: 44px;
+  height: 24px;
+  padding: 0 var(--space-xs);
+  border: 1px solid var(--ember-border-input);
+  border-radius: var(--radius-sm);
+  background: var(--ember-bg-base);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ember-text-primary);
+  text-align: right;
+}
+
+.pomoInput:focus-visible {
+  outline: none;
+  border-color: var(--ember-border-focus);
+}
+
+.presets {
+  display: flex;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-sm);
+}
+
+.preset,
+.secondary {
+  height: 24px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-full);
+  background: transparent;
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-secondary);
+  cursor: pointer;
+}
+
+.preset:hover,
+.secondary:hover {
+  border-color: var(--ember-border-focus);
+  color: var(--ember-text-primary);
+}
+
+.presetActive {
+  border-color: var(--ember-border-focus);
+  background: var(--ember-primary-tint-strong);
+  color: var(--ember-text-primary);
+}
+
+.pomoStatus {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-surface);
+}
+
+.pomoStatusText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pomoSegment {
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-secondary);
+}
+
+.pomoRemaining {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+  color: var(--ember-text-primary);
+}
+
+.primary {
+  width: 100%;
+  height: 28px;
+  margin-bottom: var(--space-sm);
+  border: 1px solid var(--ember-primary);
+  border-radius: var(--radius-md);
+  background: var(--ember-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-on-accent);
+  cursor: pointer;
+}
+
+.primary:hover {
+  background: var(--ember-text-secondary);
+  border-color: var(--ember-text-secondary);
+}

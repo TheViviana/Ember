@@ -1,0 +1,367 @@
+/* 外层只负责定位与连接锚点；内层 .node 保留排版与裁剪 */
+.shell {
+  --anchor-size: 10px;
+  --anchor-size-hover: 12px;
+  --anchor-hit: 16px;
+  --anchor-inset: 4px;
+  --resize-handle: 10px;
+  --resize-hit: 16px;
+
+  position: absolute;
+  left: var(--node-x);
+  top: var(--node-y);
+  width: var(--node-w);
+  height: var(--node-h);
+}
+
+.node {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  overflow: hidden;
+  background: var(--ember-node-bg);
+  border: 1px solid var(--node-accent, var(--ember-node-border));
+  border-radius: var(--ember-node-radius);
+  box-shadow: var(--ember-node-shadow);
+  color: var(--ember-text-primary);
+  cursor: default;
+}
+
+/* 节点类型：普通文本 = 青色边框；文档 = 蓝色边框。
+ * 放在 data-color 之后声明，保证类型边框不被历史 meta.color 覆盖。 */
+.node.note {
+  background: var(--ember-node-bg-note);
+  border-color: var(--ember-node-border-note);
+}
+
+.node.doc {
+  background: var(--ember-node-bg);
+  border-color: var(--ember-node-border-doc);
+}
+
+/* 锚点：尺寸按 --viewport-scale（= 1 / zoom）换算，屏幕上恒为 10/12px，热区恒为 16px */
+.anchorLeft,
+.anchorRight {
+  position: absolute;
+  top: 50%;
+  width: calc(var(--anchor-hit) * var(--viewport-scale));
+  height: calc(var(--anchor-hit) * var(--viewport-scale));
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-full);
+  transform: translate(-50%, -50%);
+  cursor: crosshair;
+  opacity: 0.55;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.anchorLeft {
+  left: calc(var(--anchor-inset) * var(--viewport-scale) * -1);
+}
+
+.anchorRight {
+  left: calc(100% + var(--anchor-inset) * var(--viewport-scale));
+}
+
+.anchorLeft::after,
+.anchorRight::after {
+  content: '';
+  width: calc(var(--anchor-size) * var(--viewport-scale));
+  height: calc(var(--anchor-size) * var(--viewport-scale));
+  border: 1px solid var(--ember-node-border-active);
+  border-radius: var(--radius-full);
+  background: var(--ember-node-bg);
+  transition:
+    width var(--duration-fast) var(--ease-out),
+    height var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.shell:hover .anchorLeft,
+.shell:hover .anchorRight {
+  opacity: 1;
+}
+
+.anchorLeft:hover::after,
+.anchorRight:hover::after {
+  width: calc(var(--anchor-size-hover) * var(--viewport-scale));
+  height: calc(var(--anchor-size-hover) * var(--viewport-scale));
+  background: var(--ember-primary);
+  box-shadow: var(--glow-soft);
+}
+
+.shell[data-editing='true'] .anchorLeft,
+.shell[data-editing='true'] .anchorRight {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 四角缩放手柄：外层 16px 热区，内层 10px 方块；均按 --viewport-scale 换算，屏幕尺寸恒定 */
+.resize {
+  position: absolute;
+  width: calc(var(--resize-hit) * var(--viewport-scale));
+  height: calc(var(--resize-hit) * var(--viewport-scale));
+  display: grid;
+  place-items: center;
+  transform: translate(-50%, -50%);
+}
+
+/* 可视部分默认完全透明：四角常驻的边框环在深色节点上像装饰，读起来像"选中态"。
+ * 热区（--resize-hit）不受影响，指针进入某个角时才露出一个 L 形角标，
+ * 配合光标形状（nwse/nesw-resize）说明"这里可以拖"。 */
+.resize::after {
+  content: '';
+  width: calc(var(--resize-handle) * var(--viewport-scale));
+  height: calc(var(--resize-handle) * var(--viewport-scale));
+  border: 0 solid var(--ember-node-border-active);
+  background: transparent;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.resize:hover::after {
+  opacity: 1;
+}
+
+.resize[data-corner='nw']::after {
+  border-top-width: 1px;
+  border-left-width: 1px;
+}
+
+.resize[data-corner='ne']::after {
+  border-top-width: 1px;
+  border-right-width: 1px;
+}
+
+.resize[data-corner='sw']::after {
+  border-bottom-width: 1px;
+  border-left-width: 1px;
+}
+
+.resize[data-corner='se']::after {
+  border-bottom-width: 1px;
+  border-right-width: 1px;
+}
+
+.resize[data-corner='nw'] {
+  left: 0;
+  top: 0;
+  cursor: nwse-resize;
+}
+
+.resize[data-corner='ne'] {
+  left: 100%;
+  top: 0;
+  cursor: nesw-resize;
+}
+
+.resize[data-corner='sw'] {
+  left: 0;
+  top: 100%;
+  cursor: nesw-resize;
+}
+
+.resize[data-corner='se'] {
+  left: 100%;
+  top: 100%;
+  cursor: nwse-resize;
+}
+
+.shell[data-editing='true'] .resize {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 拖动连线时的目标高亮 */
+.connectTarget {
+  outline: 1px dashed var(--ember-node-border-active);
+  outline-offset: 2px;
+  border-radius: var(--ember-node-radius);
+}
+
+.selected {
+  border-color: var(--ember-node-border-active);
+  box-shadow:
+    var(--ember-node-shadow),
+    0 0 0 1px var(--ember-node-border-active);
+}
+
+.node.note.selected {
+  border-color: var(--ember-node-border-note-active);
+  box-shadow:
+    var(--ember-node-shadow),
+    0 0 0 1px var(--ember-node-border-note-active);
+}
+
+.node.doc.selected {
+  border-color: var(--ember-node-border-doc-active);
+  box-shadow:
+    var(--ember-node-shadow),
+    0 0 0 1px var(--ember-node-border-doc-active);
+}
+
+/* 右键菜单写入的 meta.color → 边框色；选中态优先级高于颜色 */
+.shell[data-color='primary'] {
+  --node-accent: var(--ember-primary);
+}
+
+.shell[data-color='secondary'] {
+  --node-accent: var(--ember-secondary);
+}
+
+.shell[data-color='success'] {
+  --node-accent: var(--ember-success);
+}
+
+.shell[data-color='warning'] {
+  --node-accent: var(--ember-warning);
+}
+
+.shell[data-color='danger'] {
+  --node-accent: var(--ember-danger);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-base);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 文档类型图标：与文字徽标同尺寸的方形小图标，蓝色描边，不只靠颜色区分 */
+.kind {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 20px;
+  border: 1px solid var(--ember-node-border-doc);
+  border-radius: var(--radius-sm);
+  background: var(--ember-primary-tint-weak);
+  color: var(--ember-node-kicker);
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* 胶囊标签：字号与正文同级，多标签自动换行，不横向溢出 */
+.tag {
+  max-width: 100%;
+  padding: 1px var(--space-sm);
+  overflow-wrap: anywhere;
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-full);
+  background: var(--ember-primary-tint-soft);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-secondary);
+}
+
+/* meta.color → 浅色底；选中态只用边框强调，不覆盖标签底色 */
+.shell[data-color='secondary'] .tag {
+  border-color: var(--ember-secondary-border);
+  background: var(--ember-secondary-tint);
+}
+
+.shell[data-color='success'] .tag {
+  border-color: var(--ember-success-border);
+  background: var(--ember-success-tint);
+}
+
+.shell[data-color='warning'] .tag {
+  border-color: var(--ember-warning-border);
+  background: var(--ember-warning-tint);
+}
+
+.shell[data-color='danger'] .tag {
+  border-color: var(--ember-danger-border);
+  background: var(--ember-danger-tint);
+}
+
+.summary {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-secondary);
+}
+
+.noteBody {
+  flex: 1;
+  min-height: 0;
+}
+
+.noteHint {
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-muted);
+}
+
+.area {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-primary);
+}
+
+.group {
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--ember-group-bg);
+  border: 1px dashed var(--ember-group-border);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.groupTitle {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ember-text-secondary);
+}
+
+.groupArea {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  letter-spacing: 0;
+  color: var(--ember-text-primary);
+}

@@ -1,0 +1,258 @@
+/* ============================================================
+ * Ember Design Tokens — 唯一 CSS 变量源
+ * 视觉基准：/Applications/Agents Anywhere.app（实机截图见 docs/style-reference/）
+ *
+ * 约束：
+ * 1. 组件只允许引用本文件的变量，不得写裸色值 / 裸间距 / 裸圆角 / 裸字号。
+ * 2. 字体为随包分发的本地 woff2（public/fonts），运行期不发起任何外域请求。
+ * 3. 如需新增档位，先在本文件定义并注释语义，再到 src/shell/theme/tokens.ts 同步。
+ * ============================================================ */
+
+/* ---------- 本地字体（SIL OFL 1.1，许可见 public/fonts/LICENSE-*.txt） ----------
+ * Geist 为可变字体（wght 轴），一个文件覆盖 400 / 500 / 600 等字重；
+ * Roboto 为可变字体，一个文件覆盖下方声明的字重区间；
+ * Anonymous Pro 为静态字体，400 / 700 各一份。中文交给系统字体回退。 */
+@font-face {
+  font-family: 'Geist';
+  src: url('/fonts/geist-sans-variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Roboto';
+  src: url('/fonts/roboto-latin.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Anonymous Pro';
+  src: url('/fonts/anonymous-pro-latin-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Anonymous Pro';
+  src: url('/fonts/anonymous-pro-latin-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* ---------- 品牌色（参照 Agents Anywhere：单色主色 + 语义色） ---------- */
+  --ember-primary: #e5e5e5;
+  --ember-primary-glow: rgba(255, 255, 255, 0.14);
+  --ember-secondary: #a1a1a1;
+  --ember-secondary-glow: rgba(255, 255, 255, 0.1);
+
+  /* ---------- 语义色（截图取样） ---------- */
+  --ember-success: #00bd7d;
+  --ember-success-glow: rgba(0, 189, 125, 0.22);
+  --ember-warning: #fcb500;
+  --ember-warning-glow: rgba(252, 181, 0, 0.22);
+  --ember-danger: #ff6568;
+  --ember-danger-glow: rgba(255, 101, 104, 0.22);
+  --ember-info: #2c7fff;
+
+  /* ---------- 深色背景分层 ---------- */
+  --ember-bg-deep: #050505;
+  --ember-bg-base: #0a0a0a;
+  --ember-bg-surface: #171717;
+  --ember-bg-elevated: #1f1f1f;
+  --ember-bg-glass: rgba(23, 23, 23, 0.86);
+  --ember-bg-sidebar: #1f1f1f;
+  --ember-bg-menu: #1f1f1f;
+  --ember-bg-hover: rgba(255, 255, 255, 0.08);
+  --ember-bg-selected: rgba(255, 255, 255, 0.1);
+
+  /* ---------- 边框与分隔 ---------- */
+  --ember-border: rgba(255, 255, 255, 0.1);
+  --ember-border-subtle: rgba(255, 255, 255, 0.06);
+  --ember-border-strong: rgba(255, 255, 255, 0.16);
+  --ember-border-input: rgba(255, 255, 255, 0.15);
+  --ember-border-focus: rgba(255, 255, 255, 0.35);
+  --ember-border-glow: rgba(255, 255, 255, 0.35);
+  --ember-shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55);
+
+  /* ---------- 文字层级 ---------- */
+  --ember-text-primary: #fafafa;
+  --ember-text-secondary: #a1a1a1;
+  --ember-text-muted: #737373;
+  --ember-text-accent: #fafafa;
+  --ember-text-on-accent: #171717;
+
+  /* ---------- 交互叠层（中性白透明档位，避免组件出现裸 rgba） ---------- */
+  --ember-primary-tint-weak: rgba(255, 255, 255, 0.03);
+  --ember-primary-tint-soft: rgba(255, 255, 255, 0.06);
+  --ember-primary-tint-strong: rgba(255, 255, 255, 0.12);
+  --ember-secondary-tint: rgba(255, 255, 255, 0.06);
+  --ember-secondary-border: rgba(255, 255, 255, 0.14);
+  --ember-success-tint: rgba(0, 189, 125, 0.12);
+  --ember-success-border: rgba(0, 189, 125, 0.32);
+  --ember-warning-tint: rgba(252, 181, 0, 0.12);
+  --ember-warning-border: rgba(252, 181, 0, 0.32);
+  --ember-danger-tint: rgba(255, 101, 104, 0.12);
+  --ember-danger-border: rgba(255, 101, 104, 0.32);
+
+  /* ---------- 字体栈（显示 / 正文 / 等宽） ----------
+   * Geist 为主字体（可变字重，覆盖 400/500/600），Roboto 保留为回退；
+   * 中文交给系统字体回退，不引入中文字体。 */
+  --font-display: 'Geist', 'Roboto', -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
+  --font-body: 'Geist', 'Roboto', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', sans-serif;
+  --font-mono: 'Anonymous Pro', 'SF Mono', 'Fira Code', 'PingFang SC', monospace;
+
+  /* ---------- 字号（派生档位，10–48px） ---------- */
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+  --text-display: 48px;
+
+  /* ---------- 行高与字距 ---------- */
+  --leading-tight: 1.25;
+  --leading-normal: 1.55;
+  --tracking-wide: 0.02em;
+  --tracking-wider: 0.04em;
+  --tracking-widest: 0.08em;
+
+  /* ---------- 间距（4/8/12/16/24/32） ---------- */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-2xl: 32px;
+
+  /* ---------- 圆角（6/8/12/16/9999） ---------- */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* ---------- 阴影与发光 ---------- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55);
+  --glow-primary: 0 0 0 1px rgba(255, 255, 255, 0.1);
+  --glow-secondary: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --glow-soft: 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --glow-mark: 0 0 0 1px rgba(255, 255, 255, 0.1);
+
+  /* ---------- 过渡 ---------- */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --duration-fast: 120ms;
+  --duration-base: 160ms;
+  --duration-slow: 240ms;
+
+  /* ---------- 布局尺寸 ---------- */
+  --sidebar-width: 250px;
+  --topbar-height: 52px;
+  --tabs-height: 38px;
+  --statusbar-height: 28px;
+
+  /* ---------- 窗口底色（无边框窗口的纯黑画布底） ---------- */
+  --ember-bg-void: #000000;
+
+  /* ---------- 无限画布 ---------- */
+  --ember-canvas-bg: #0a0a0a;
+  --ember-canvas-grid: rgba(255, 255, 255, 0.035);
+  --ember-canvas-grid-major: rgba(255, 255, 255, 0.06);
+  --ember-canvas-grid-gap: 32px;
+  --ember-node-bg: #171717;
+  --ember-node-bg-note: #1c1c1c;
+  --ember-node-radius: 12px;
+  --ember-node-border: rgba(255, 255, 255, 0.1);
+  --ember-node-border-active: rgba(255, 255, 255, 0.55);
+  /* 节点类型色：不只靠颜色，也靠文档图标区分（见 CanvasNodeView） */
+  --ember-node-border-note: rgba(34, 211, 238, 0.55);
+  --ember-node-border-note-active: #22d3ee;
+  --ember-node-border-doc: rgba(44, 127, 255, 0.55);
+  --ember-node-border-doc-active: #2c7fff;
+  --ember-node-kicker: #2c7fff;
+  --ember-node-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --ember-edge: rgba(255, 255, 255, 0.22);
+  --ember-edge-active: #e5e5e5;
+  --ember-edge-width: 1.5px;
+  /* 连线命中区在屏幕上的宽度：SVG 内需除以 zoom 保持手感一致 */
+  --ember-edge-hit-width: 14px;
+  --ember-edge-label-halo: 4px;
+  --ember-marquee-fill: rgba(255, 255, 255, 0.08);
+  --ember-marquee-border: rgba(255, 255, 255, 0.4);
+  --ember-group-bg: rgba(255, 255, 255, 0.02);
+  --ember-group-border: rgba(255, 255, 255, 0.12);
+
+  /* ---------- 右键菜单与浮层 ---------- */
+  --ember-menu-bg: #1f1f1f;
+  --ember-menu-hover: rgba(255, 255, 255, 0.08);
+  --ember-menu-separator: rgba(255, 255, 255, 0.08);
+  --ember-overlay-scrim: rgba(0, 0, 0, 0.5);
+  --menu-width: 220px;
+  --menu-item-height: 30px;
+  --float-width: 560px;
+  --float-height: 420px;
+  /* 浮窗尺寸下限与缩放手柄热区（热区不随内容缩放，保证 ≥12 屏幕像素） */
+  --float-min-width: 480px;
+  --float-min-height: 320px;
+  --float-resize-hit: 16px;
+
+  /* ---------- 侧栏自动隐藏 ---------- */
+  --sidebar-rail-width: 4px;
+  --sidebar-peek-zone: 8px;
+  /* 热区起始偏移：最外侧 --window-resize-grip 全高归窗口缩放（与右边缘对称），
+   * 侧栏热区从该偏移之后开始（6–14px），两者不重叠。 */
+  --sidebar-peek-start: var(--window-resize-grip);
+  /* 热区上下留白：让出窗口左缘上下两段给缩放热区，中段整段用于滑出侧栏 */
+  --sidebar-peek-inset: 96px;
+  --sidebar-peek-delay: 120ms;
+
+  /* ---------- 无边框窗口 ---------- */
+  --window-control-size: 12px;
+  --window-controls-inset: 14px;
+  --window-resize-grip: 6px;
+  --window-radius: 12px;
+  /* 自绘交通灯沿用 macOS 系统色，保证与其它应用观感一致 */
+  --ember-traffic-close: #ff5f57;
+  --ember-traffic-minimize: #febc2e;
+  --ember-traffic-zoom: #28c840;
+
+  /* ---------- 毛玻璃 ----------
+   * 顶栏：窗口级 vibrancy（NSVisualEffectView）透出桌面模糊；
+   * 侧栏：画布在 DOM 中位于侧栏下方，窗口 vibrancy 穿不过来，改用 backdrop-filter 模糊画布。
+   */
+  --ember-glass-topbar: rgba(10, 10, 10, 0.62);
+  --ember-glass-sidebar: rgba(31, 31, 31, 0.72);
+  --ember-glass-blur: 24px;
+  --ember-glass-saturate: 140%;
+
+  /* ---------- 层级（禁止组件里写裸 z-index） ---------- */
+  --layer-canvas: 1;
+  --layer-sidebar: 40;
+  --layer-float: 50;
+  --layer-menu: 60;
+  --layer-chrome: 70;
+}
+
+/* 系统「降低透明度」开启时强制不透明，避免半透明层降低可读性 */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --ember-glass-topbar: #0a0a0a;
+    --ember-glass-sidebar: #1f1f1f;
+    --ember-glass-blur: 0px;
+    --ember-glass-saturate: 100%;
+  }
+}
+

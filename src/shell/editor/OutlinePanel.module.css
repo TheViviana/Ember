@@ -1,0 +1,111 @@
+/* 点列贴在内容区右缘的 padding 里：absolute，不占正文宽度。
+   所有点共用一条竖线，轨道因此可以收窄到 14px；
+   垂直居中，轨道最多占可用列高的 2.5/4（62.5%），超出只在轨道内滚动。 */
+.dock {
+  position: absolute;
+  top: 50%;
+  right: var(--space-xs);
+  width: 14px;
+  height: 62.5%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.track {
+  position: relative;
+  display: flex;
+  flex: 1 1 0%;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: flex-start;
+  gap: 1px;
+  width: 100%;
+  min-height: 0;
+  max-height: 100%;
+  padding: var(--space-xs) 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  pointer-events: auto;
+}
+
+.track::-webkit-scrollbar {
+  display: none;
+}
+
+.dotButton {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 12px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+}
+
+/* 所有层级共用同一尺寸与同一列；层级信息只出现在提示框首行 */
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--ember-text-muted);
+  opacity: 0.55;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    opacity var(--duration-fast) var(--ease-out);
+}
+
+.dotButton:hover .dot {
+  background: var(--ember-text-primary);
+  opacity: 1;
+}
+
+/* 当前视口所在标题：同直径空心环，只靠描边与悬停的实心点区分 */
+.dotButton[data-active='true'] .dot {
+  background: transparent;
+  opacity: 1;
+  box-shadow: inset 0 0 0 2px var(--ember-text-accent);
+}
+
+.dotButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ember-border-focus);
+}
+
+/* 悬停/聚焦提示：浮在点列左侧，可折行，不截断 */
+.tip {
+  position: absolute;
+  right: calc(100% + var(--space-sm));
+  transform: translateY(-50%);
+  width: max-content;
+  max-width: 220px;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--ember-bg-elevated);
+  box-shadow: var(--shadow-sm);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-secondary);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+/* 层级不进点列，放在提示框首行，零占位成本 */
+.tipMeta {
+  display: block;
+  margin-bottom: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  color: var(--ember-text-muted);
+}

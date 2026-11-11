@@ -1,0 +1,192 @@
+.zone {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+}
+
+.headerRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+}
+
+.tagList {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.empty {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+}
+
+.pill {
+  min-width: 28px;
+  max-width: 60%;
+  padding: 1px var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-full);
+  background: var(--ember-primary-tint-weak);
+  color: var(--ember-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: text;
+}
+
+.pill:hover {
+  border-color: var(--ember-border-strong);
+  color: var(--ember-text-primary);
+}
+
+.editor {
+  display: inline-flex;
+  align-items: center;
+  max-width: 60%;
+  padding: 0 var(--space-xs) 0 var(--space-sm);
+  border: 1px solid var(--ember-border-focus);
+  border-radius: var(--radius-full);
+  background: var(--ember-bg-surface);
+}
+
+.tagInput {
+  min-width: 28px;
+  padding: 1px 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ember-text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.tagInput::placeholder {
+  color: var(--ember-text-muted);
+}
+
+.remove {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--ember-text-muted);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.remove:hover {
+  color: var(--ember-danger);
+}
+
+.add {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--ember-border);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--ember-text-muted);
+  font-size: var(--text-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.add:hover {
+  border-color: var(--ember-border-strong);
+  color: var(--ember-text-accent);
+}
+
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  padding-left: var(--space-xs);
+}
+
+.suggestion {
+  max-width: 60%;
+  padding: 0 var(--space-sm);
+  border: 1px dashed var(--ember-border);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.suggestion:hover {
+  border-color: var(--ember-border-strong);
+  color: var(--ember-text-primary);
+}
+
+.summaryToggle {
+  flex: 0 0 auto;
+  padding: var(--space-xs) 0;
+  border: none;
+  background: transparent;
+  color: var(--ember-text-muted);
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  letter-spacing: 0;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.summaryToggle:hover {
+  color: var(--ember-text-accent);
+}
+
+.summaryWrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.summaryInput {
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--ember-border-input);
+  border-radius: var(--radius-md);
+  outline: none;
+  resize: vertical;
+  background: var(--ember-bg-surface);
+  color: var(--ember-text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.summaryInput:focus {
+  border-color: var(--ember-border-focus);
+  box-shadow: 0 0 0 3px var(--ember-primary-tint-soft);
+}
+
+.hint {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-muted);
+}

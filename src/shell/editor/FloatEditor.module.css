@@ -1,0 +1,250 @@
+.float {
+  position: absolute;
+  left: var(--float-left, auto);
+  top: var(--float-top, auto);
+  right: var(--float-right, var(--space-xl));
+  bottom: var(--float-bottom, calc(var(--space-xl) + var(--statusbar-height)));
+  width: var(--float-w, var(--float-width));
+  height: var(--float-h, var(--float-height));
+  min-width: var(--float-min-width);
+  min-height: var(--float-min-height);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* 不画外边框、也不用 1px 高光描边：整个浮窗只靠三段色阶
+   * （标题区 elevated → 浮窗底色 surface → 正文 base）与深阴影撑结构 */
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--ember-bg-surface);
+  box-shadow: var(--shadow-lg);
+  z-index: var(--layer-float);
+}
+
+.resizing {
+  user-select: none;
+}
+
+.moving {
+  user-select: none;
+}
+
+/* ---------- 第一段：标题栏（整条可拖动） ---------- */
+.header {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  /* 标题区比浮窗底色亮一档；下缘只留一层短阴影过渡，不画分隔线 */
+  background: var(--ember-bg-elevated);
+  box-shadow: var(--shadow-sm);
+  cursor: grab;
+  touch-action: none;
+}
+
+.moving .header {
+  cursor: grabbing;
+}
+
+.notice {
+  margin: 0;
+  padding: var(--space-xs) var(--space-md);
+  border-top: 1px solid var(--ember-border-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+}
+
+.notice_ok {
+  color: var(--ember-text-accent);
+  background: var(--ember-primary-tint-weak);
+}
+
+.notice_pending {
+  color: var(--ember-warning);
+  background: var(--ember-primary-tint-weak);
+}
+
+.notice_alert {
+  color: var(--ember-danger);
+  background: var(--ember-primary-tint-weak);
+}
+
+/* ---------- 第三段：内容区 ---------- */
+.content {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.host > * {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 阅读态只隐藏编辑器；作者样式的 display:flex 会压过 UA 的 [hidden] */
+.host[hidden] {
+  display: none;
+}
+
+/* ---------- 双链解析提示：贴内容区底部，不新增段落 ---------- */
+.wikiPrompt {
+  position: absolute;
+  left: var(--space-md);
+  right: var(--space-md);
+  bottom: var(--space-md);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--ember-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.wikiHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.wikiTarget {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ember-text-accent);
+}
+
+.wikiClose {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-muted);
+  font-size: var(--text-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wikiClose:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.wikiText {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-secondary);
+}
+
+.wikiHint {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-muted);
+}
+
+.wikiList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  max-height: 140px;
+  overflow: auto;
+}
+
+.wikiCandidate {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-sm);
+  background: var(--ember-primary-tint-weak);
+  text-align: left;
+  cursor: pointer;
+}
+
+.wikiCandidate:hover {
+  border-color: var(--ember-border-strong);
+  background: var(--ember-bg-hover);
+}
+
+.wikiTitle {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-primary);
+}
+
+.wikiPath {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-muted);
+}
+
+/* ---------- 四角缩放手柄：热区 16px，四边不再响应 ---------- */
+.handle {
+  position: absolute;
+  touch-action: none;
+}
+
+.handle:hover {
+  background: var(--ember-bg-hover);
+}
+
+.handle[data-zone='nw'] {
+  top: 0;
+  left: 0;
+  width: var(--float-resize-hit);
+  height: var(--float-resize-hit);
+  border-top-left-radius: var(--radius-md);
+  cursor: nwse-resize;
+}
+
+.handle[data-zone='ne'] {
+  top: 0;
+  right: 0;
+  width: var(--float-resize-hit);
+  height: var(--float-resize-hit);
+  border-top-right-radius: var(--radius-md);
+  cursor: nesw-resize;
+}
+
+.handle[data-zone='sw'] {
+  bottom: 0;
+  left: 0;
+  width: var(--float-resize-hit);
+  height: var(--float-resize-hit);
+  border-bottom-left-radius: var(--radius-md);
+  cursor: nesw-resize;
+}
+
+.handle[data-zone='se'] {
+  bottom: 0;
+  right: 0;
+  width: var(--float-resize-hit);
+  height: var(--float-resize-hit);
+  border-bottom-right-radius: var(--radius-md);
+  cursor: nwse-resize;
+}

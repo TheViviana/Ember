@@ -1,0 +1,41 @@
+.root {
+  /* 左下角横排、侧栏启动器、状态条折叠按钮共用的结构尺寸。
+   * 取值 32px 与既有实现一致，只是把散落的字面量收成一处，视觉零变化。 */
+  --tool-rail-size: 32px;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  /* 窗口透明：根节点不铺底色，玻璃区才能透出窗口 vibrancy */
+  background: transparent;
+  border-radius: var(--window-radius);
+  overflow: hidden;
+}
+
+/* 专注模式：只隐藏外壳 chrome，浮窗本身与画布容器保持挂载。
+ * 顶栏/状态栏是根节点的直接子元素，其余 chrome 用各自的数据属性定位。 */
+.focusMode > header,
+.focusMode > footer {
+  display: none;
+}
+
+.focusMode [data-sidebar-dock],
+.focusMode [data-tool-rail],
+.focusMode [data-ai-panel] {
+  display: none;
+}
+
+.body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  background: var(--ember-bg-base);
+}

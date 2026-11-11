@@ -1,0 +1,14 @@
+/* 阅读态图片：只组合既有 token，不新增 CSS 变量 */
+.image {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  margin: var(--space-xs) 0;
+  border-radius: var(--radius-md);
+  object-fit: contain;
+}
+
+.fallback {
+  color: var(--ember-text-muted);
+  font-size: var(--text-sm);
+}

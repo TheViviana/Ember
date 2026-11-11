@@ -1,0 +1,75 @@
+.chrome {
+  position: fixed;
+  inset: 0;
+  z-index: var(--layer-chrome);
+  pointer-events: none;
+}
+
+.zone {
+  position: fixed;
+  pointer-events: auto;
+}
+
+.zone[data-zone='n'] {
+  top: 0;
+  left: var(--window-resize-grip);
+  right: var(--window-resize-grip);
+  height: var(--window-resize-grip);
+  cursor: ns-resize;
+}
+
+.zone[data-zone='s'] {
+  bottom: 0;
+  left: var(--window-resize-grip);
+  right: var(--window-resize-grip);
+  height: var(--window-resize-grip);
+  cursor: ns-resize;
+}
+
+.zone[data-zone='w'] {
+  left: 0;
+  top: var(--window-resize-grip);
+  bottom: var(--window-resize-grip);
+  width: var(--window-resize-grip);
+  cursor: ew-resize;
+}
+
+.zone[data-zone='e'] {
+  right: 0;
+  top: var(--window-resize-grip);
+  bottom: var(--window-resize-grip);
+  width: var(--window-resize-grip);
+  cursor: ew-resize;
+}
+
+.zone[data-zone='nw'] {
+  top: 0;
+  left: 0;
+  width: calc(var(--window-resize-grip) * 2);
+  height: calc(var(--window-resize-grip) * 2);
+  cursor: nwse-resize;
+}
+
+.zone[data-zone='ne'] {
+  top: 0;
+  right: 0;
+  width: calc(var(--window-resize-grip) * 2);
+  height: calc(var(--window-resize-grip) * 2);
+  cursor: nesw-resize;
+}
+
+.zone[data-zone='sw'] {
+  bottom: 0;
+  left: 0;
+  width: calc(var(--window-resize-grip) * 2);
+  height: calc(var(--window-resize-grip) * 2);
+  cursor: nesw-resize;
+}
+
+.zone[data-zone='se'] {
+  bottom: 0;
+  right: 0;
+  width: calc(var(--window-resize-grip) * 2);
+  height: calc(var(--window-resize-grip) * 2);
+  cursor: nwse-resize;
+}

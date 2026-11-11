@@ -1,0 +1,135 @@
+/* 状态栏不再是一条实色通栏：不占布局高度、无底色无边线，画布网格铺到窗口最底部；
+ * 折叠按钮与状态文字、右侧指标各自成为一颗贴底浮层胶囊，玻璃/圆角/阴影与顶栏两簇一致。 */
+.statusbar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--statusbar-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  /* 左内边距与左下角横排同一起点（--space-md = 12），折叠按钮宽度对齐启动图标 */
+  padding: 0 var(--space-lg) 0 var(--space-md);
+  background: transparent;
+  border-top: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+  /* 空白处不挡画布与浮窗；只有两簇胶囊接收指针 */
+  pointer-events: none;
+  z-index: calc(var(--layer-float) + 1);
+}
+
+.leftPill,
+.rightPill {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  height: calc(var(--statusbar-height) - var(--space-sm));
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-full);
+  background: var(--ember-glass-topbar);
+  box-shadow: var(--shadow-md);
+  pointer-events: auto;
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .leftPill,
+  .rightPill {
+    -webkit-backdrop-filter: blur(var(--ember-glass-blur)) saturate(var(--ember-glass-saturate));
+    backdrop-filter: blur(var(--ember-glass-blur)) saturate(var(--ember-glass-saturate));
+  }
+}
+
+/* 窗口变窄时两簇各自收缩裁切，宁可少显示一项指标也不重叠 */
+.leftPill,
+.rightPill {
+  min-width: 0;
+}
+
+.rightPill {
+  overflow: hidden;
+}
+
+.toggle {
+  flex: 0 0 auto;
+  width: var(--tool-rail-size);
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-muted);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.toggle:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-secondary);
+}
+
+.toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ember-border-focus);
+}
+
+.left,
+.right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.right {
+  margin-left: auto;
+}
+
+.sep {
+  color: var(--ember-border-strong);
+  font-size: var(--text-2xs);
+}
+
+.statusGroup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-full);
+  background: var(--ember-success);
+}
+
+.dotReadonly {
+  background: var(--ember-warning);
+}
+
+.metric {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.metric:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-secondary);
+}
+
+.metric strong {
+  color: var(--ember-text-secondary);
+  font-weight: 500;
+}

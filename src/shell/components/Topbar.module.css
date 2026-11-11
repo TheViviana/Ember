@@ -1,0 +1,135 @@
+.topbar {
+  /* 浮在画布之上，不再占据独立的一段窗口底色：画布网格一直铺到窗口顶端，
+   * 顶部只剩左右两簇浮层，中间空白透出画布，视觉上没有横贯全宽的长条。 */
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: var(--topbar-height);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0 var(--space-md);
+  /* 整条 header 仍是拖拽区（data-tauri-drag-region），中间空白也能按住拖窗口。 */
+  background: transparent;
+  z-index: calc(var(--layer-float) + 1);
+}
+
+/* 与底部浮起的胶囊同类：离窗口边缘留缝，靠圆角 + 阴影托起来，不画边框 */
+.group {
+  height: calc(100% - var(--space-sm) * 2);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0 var(--space-md);
+  border-radius: var(--radius-lg);
+  background: var(--ember-glass-topbar);
+  box-shadow: var(--shadow-md);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .group {
+    -webkit-backdrop-filter: blur(var(--ember-glass-blur)) saturate(var(--ember-glass-saturate));
+    backdrop-filter: blur(var(--ember-glass-blur)) saturate(var(--ember-glass-saturate));
+  }
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.logoMark {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: var(--ember-primary);
+  color: var(--ember-text-on-accent);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.logoText {
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--ember-text-primary);
+}
+
+.logoVersion {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-muted);
+  padding: 1px var(--space-xs);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--ember-border-subtle);
+  background: transparent;
+}
+
+.right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--ember-success);
+}
+
+.statusDotReadonly {
+  background: var(--ember-warning);
+}
+
+.statusText {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ember-text-secondary);
+}
+
+.statusTextReadonly {
+  color: var(--ember-warning);
+}
+
+.clock {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+  padding-left: var(--space-md);
+  border-left: 1px solid var(--ember-border-subtle);
+}
+
+.settings {
+  border: 1px solid var(--ember-border);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.settings:hover {
+  color: var(--ember-text-primary);
+  border-color: var(--ember-border-strong);
+  background: var(--ember-bg-hover);
+}
+
+.settingsActive {
+  color: var(--ember-text-primary);
+  border-color: var(--ember-border-strong);
+  background: var(--ember-bg-hover);
+}

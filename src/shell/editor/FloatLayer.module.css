@@ -1,0 +1,172 @@
+.stack {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--layer-float) + var(--stack-index, 0));
+  pointer-events: none;
+}
+
+.stack[data-focus-hidden='true'] {
+  display: none;
+}
+
+/* 专注遮罩：用画布底色盖住网格、节点与 HUD，浮窗仍在上层 */
+.focusBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--layer-float) - 1);
+  background: var(--ember-bg-base);
+}
+
+/* 包裹层只负责 z 序，不拦截画布手势；把指针事件还给浮窗本体 */
+.stack > :global([data-float-editor]) {
+  pointer-events: auto;
+}
+
+/* 当前最前窗阴影更重，被遮挡的窗口自然退后 */
+.stack[data-active='true'] > :global([data-float-editor]) {
+  box-shadow: var(--shadow-lg);
+}
+
+/* 浮窗胶囊不再自己定位：它是左下角横排的最后一个槽（见 ToolRail），
+ * 由 flex 顺序决定位置，前排放几个工具入口都不会被它顶偏。 */
+.switcher {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-xs);
+}
+
+.chip {
+  height: 26px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-full);
+  background: var(--ember-bg-glass);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  color: var(--ember-text-secondary);
+  cursor: pointer;
+}
+
+.chip:hover {
+  border-color: var(--ember-border-focus);
+  color: var(--ember-text-primary);
+}
+
+.list {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--space-sm));
+  width: 220px;
+  padding: var(--space-xs);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-lg);
+  background: var(--ember-menu-bg);
+  box-shadow: var(--shadow-lg);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  border-radius: var(--radius-md);
+}
+
+.row[data-current='true'] {
+  background: var(--ember-menu-hover);
+}
+
+.rowTitle {
+  flex: 1;
+  min-width: 0;
+  height: var(--menu-item-height);
+  padding: 0 var(--space-sm);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ember-text-primary);
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.rowClose {
+  flex: 0 0 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--ember-text-muted);
+  cursor: pointer;
+}
+
+.rowClose:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-danger);
+}
+
+.notice {
+  position: absolute;
+  top: var(--space-lg);
+  left: 50%;
+  z-index: calc(var(--layer-menu) - 1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  max-width: 520px;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-lg);
+  background: var(--ember-menu-bg);
+  box-shadow: var(--shadow-lg);
+  transform: translateX(-50%);
+}
+
+.noticeText {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ember-text-primary);
+}
+
+.noticeActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.primary,
+.secondary {
+  height: 26px;
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-md);
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.primary {
+  border: 1px solid var(--ember-primary);
+  background: var(--ember-primary);
+  color: var(--ember-text-on-accent);
+}
+
+.secondary {
+  border: 1px solid var(--ember-border);
+  background: transparent;
+  color: var(--ember-text-secondary);
+}
+
+.secondary:hover {
+  border-color: var(--ember-border-focus);
+  color: var(--ember-text-primary);
+}
