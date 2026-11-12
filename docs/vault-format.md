@@ -38,7 +38,7 @@
 │   ├── ai/memory.jsonl
 │   ├── ai/threads/<threadId>.json
 │   ├── .lock                    # 库锁，见 §7
-│   ├── .journal/                # 本库的 journal 镜像（可选，权威副本在 App Support）
+│   ├── .journal/                # 本库 journal（v1 权威位置，见 §6.2；App Support 副本为后续索引层预留）
 │   └── trash/<ULID>/            # 软删除副本（docs.remove 落点），见 §8.6
 ├── notes/                       # 任意用户目录结构，Ember 不干预
 │   └── 某文档.md
@@ -50,7 +50,7 @@
 ```
 ~/Library/Application Support/Ember/
 ├── index/<vaultHash>.sqlite     # 派生索引，可删可重建，见 §9
-├── journals/<vaultHash>.ndjson  # 写入 journal，见 §6
+├── journals/<vaultHash>.ndjson  # v1 未写入：后续索引层预留（见 §6.2）
 ├── machine-id                   # 机器标识（库锁与 machines 目录共用）
 ├── machines/<machineId>/
 │   └── ui.json                  # 机器本地 UI 状态，见 §8.7
@@ -59,7 +59,7 @@
 
 `[事实]` macOS 上 `Application Support` 随用户迁移，但不随库同步；这正是「机器状态」与「库状态」分家的原因。
 
-`[设计选择]` 忽略规则：`.workbench/`、`.` 开头的目录、`node_modules/`、`.git/` 不进入 Markdown 索引，但 `.workbench/` 的文件仍被 watcher 监听（用于画布/导图的并发检测）。
+`[设计选择]` 忽略规则：`.workbench/`、`.` 开头的目录、`node_modules/`、`.git/` 不进入 Markdown 索引；watcher 只监听库内 `.md` 文件，同样跳过 `.workbench/` 与所有点开头路径（含 `.lock`、`.journal/`），避免自我触发。
 
 ---
 
@@ -230,47 +230,53 @@ CREATE TABLE links (
 目标：崩溃只可能留下「旧内容」或「新内容」。
 
 1. 校验：目标路径在当前 vault 内、目标不是目录、未越过符号链接根。
-2. 在**目标同目录**创建临时文件 `.ember-tmp-<ULID>`（同目录保证 rename 在同一文件系统，`rename(2)` 才是原子的）。
+2. 在**目标同目录**创建隐藏临时文件 `.{原文件名}.ember-tmp-<纳秒时间戳>-<进程内自增计数>`（同目录保证 rename 在同一文件系统，`rename(2)` 才是原子的；文件名含 `.ember-tmp-` 供 §8.6 清扫识别）。
 3. 写入完整字节 → `write_all` → `fsync(temp_fd)` → `close`。
 4. `rename(temp, target)`（覆盖语义，POSIX 原子）。
 5. `fsync(target_dir)`（`[事实]` 不 fsync 目录，rename 的目录项可能在掉电后丢失）。
-6. 刷新索引对应文档行（写入内容 hash、mtime、size）。
+6. 写入返回后由索引层异步刷新对应文档行（内容 hash、mtime、size；kernel-contract D7）。
 
 权限与元数据：`[设计选择]` 新文件继承父目录 umask；替换已有文件时在 rename 前把原文件的权限位复制到临时文件，避免权限被重置。
 
 ### 6.2 journal 两阶段
 
-journal 是**追加写的 NDJSON**，路径 `~/Library/Application Support/Ember/journals/<vaultHash>.ndjson`。一行一个事件，全部字段为必填。
+journal 是**追加写的 NDJSON**，路径 `<vault>/.workbench/.journal/journal.ndjson`（v1 以此为准；App Support 副本是后续索引层预留，见 §2 的 `journals/` 行）。一行一个事件。
 
-事件 schema：
+事件 schema（`tx`、`phase`、`target`、`at` 必填；`temp` 在涉及临时文件的事务中出现，`kind` 仅在 `prepared` 出现）：
 
 ```json
-{"tx":"01JB8ZQ3K4M5N6P7Q8R9S0T1V2","phase":"prepared","docId":"01JB8ZQ3K4M5N6P7Q8R9S0T1V3","target":"notes/a.md","temp":"notes/.ember-tmp-01JB8ZQ3K4M5N6P7Q8R9S0T1V4","baseHash":"sha256:...","newHash":"sha256:...","kind":"update","at":"2026-11-11T03:40:12Z"}
-{"tx":"01JB8ZQ3K4M5N6P7Q8R9S0T1V2","phase":"committed","newHash":"sha256:...","at":"2026-11-11T03:40:12Z"}
+{"tx":"01JB8ZQ3K4M5N6P7Q8R9S0T1V2","phase":"prepared","target":"notes/a.md","temp":"notes/.a.md.ember-tmp-1762839612456789000-7","kind":"user","at":"2026-11-11T03:40:12Z"}
+{"tx":"01JB8ZQ3K4M5N6P7Q8R9S0T1V2","phase":"committed","target":"notes/a.md","temp":"notes/.a.md.ember-tmp-1762839612456789000-7","at":"2026-11-11T03:40:12Z"}
+{"tx":"01JB8ZQ3K4M5N6P7Q8R9S0T1V2","phase":"cleaned","target":"notes/a.md","temp":"notes/.a.md.ember-tmp-1762839612456789000-7","at":"2026-11-11T03:40:12Z"}
 ```
+
+`kind` 记录写入意图（`user` / `capability` / `migration` / `system`）。v1 不记录 `docId` 与内容 hash：journal 只用于判定事务是否完成，不作为内容恢复依据（§6.3）。
 
 阶段：
 
 | 阶段 | 磁盘动作 | 崩溃后的语义 |
 |---|---|---|
-| `prepared` | 临时文件已 fsync，journal 行已 fsync，目标**未**改变 | 可安全回滚：删临时文件 |
-| `committed` | rename + 目录 fsync 已完成，journal 行已 fsync | 新内容生效，只需清理 |
-| `cleaned` | 临时文件删除、索引已刷新 | 事务结束，可从 journal 裁剪 |
+| `prepared` | 临时文件已 fsync，journal 行已 fsync，目标**未**改变 | 可安全回滚：临时文件交给 §8.6 的 24h 孤儿清扫 |
+| `committed` | rename + 目录 fsync 已完成，journal 行已 fsync | 新内容生效 |
+| `cleaned` | 事务结束，临时文件已随 rename 消失（失败路径为显式删除） | 事务结束，可从 journal 裁剪 |
 
-写入顺序严格为：`temp fsync` → `prepared fsync` → `rename` → `dir fsync` → `committed fsync` → 更新索引 → `cleaned fsync`。
+写入顺序严格为：`temp fsync` → `prepared fsync` → `rename` → `dir fsync` → `committed fsync` → `cleaned fsync`；索引刷新在写入返回后由索引层异步完成（kernel-contract D7），不阻塞 `cleaned`。
 
-启动恢复算法：
+启动恢复算法（只诊断，不删除）：
 
-1. 读全部事件，按 `tx` 分组、按行序重放（幂等，见 I14）。
-2. 对「有 `prepared` 无 `committed`」的事务：若目标当前 hash 等于 `newHash`，说明 rename 已发生但 committed 未落盘 → 补记 `committed`；否则删除临时文件（若存在）→ 记 `cleaned`。
-3. 对「有 `committed` 无 `cleaned`」的事务：校验目标 hash；不匹配则说明提交后又被外部修改，**不回滚**，只刷新索引并记 `cleaned`。
-4. 清理超过 7 天的 `cleaned` 记录（压缩为快照行）。
+1. 读全部事件，按 `tx` 分组、按行序取最后阶段（幂等，见 I14）。
+2. 对「有 `prepared` 无 `committed`」的事务：rename 未发生或失败；临时文件不在恢复中删除，交给 §8.6 清扫。
+3. 对「有 `committed` 无 `cleaned`」的事务：只补记诊断，索引由后续对账刷新；不回滚、不校验内容 hash。
+4. 判定完毕后清空 journal（事务已全部判定）；写入路径上 journal 超过 **256 行**时即时压缩，只保留未结束事务。
+5. 完整落盘行解析失败 → 启动降级只读并保留现场（不 panic、不删除）；末尾无换行的半截行按断电撕裂丢弃。
+
+> 数值提示：journal 压缩阈值（256 行）以 `journal.rs` 常量为准，锁心跳与失效阈值（5s/30s）以 `lock.rs` 常量为准，改代码必须同步本文件。
 
 ### 6.3 journal 不做的事
 
 `[设计选择]` journal 不是撤销栈，也不是内容备份：
 
-- 不保存旧内容的完整副本（只保存 `baseHash`），因此不能从 journal 恢复被覆盖的内容——这是「禁止静默覆盖」由 §10 的冲突副本保证，而不是由 journal 保证。
+- 不保存旧内容、也不记录内容 hash，因此不能从 journal 恢复被覆盖的内容——「禁止静默覆盖」由 §10 的冲突副本保证，而不是由 journal 保证。
 - 不承担跨文档事务（v1 无多文档原子事务；批量操作逐文件提交，失败项单独报告）。
 
 ---
@@ -290,21 +296,22 @@ journal 是**追加写的 NDJSON**，路径 `~/Library/Application Support/Ember
 - 心跳：持有者每 5 秒刷新 `heartbeatAt`（重写整个文件 + rename）。
 - 失效判定：同一 `machineId` 且 pid 不存在 → 失效；任意机器上 `heartbeatAt` 超过 30 秒未更新 → 失效（跨机器共享库时以时间兜底）。
 - 写前校验：每次落盘前重读锁文件，要求 `pid`、`leaseToken`、`heartbeatAt` 三者与持有方内存值**完全一致**；任一不一致说明锁已被接管或心跳停摆，**立即转只读**并拒绝本次写入（正文写入与图片落盘都走同一道写闸）。
-- 失效后：新实例可以抢占，但**必须先完成 §6.2 的 journal 恢复**，且抢占动作写入 journal（`kind: "lock.takeover"`）以便审计。
+- 失效后：新实例可以抢占；接管成功并持有锁之后、任何写入之前，必须先完成 §6.2 的 journal 恢复。
   - 接管流程：先把 `.lock` 原子 `rename` 到 `.workbench/lock.takeover.<pid>.<leaseToken>.<序号>` 完成认领（序号区分同进程的并发认领），
     并发接管只有一个 `rename` 成功，其余按只读返回；认领后回读临时文件，与判定失效时读到的原始字节
     逐字节比较，内容已变说明期间有人写入了新锁，用硬链接原位放回（目标存在时原子失败，不覆盖新锁），
     确认是同一份后才创建新 `.lock`，`leaseToken` 在认领值上 `+1`。接管者在 `rename` 后、创建前崩溃时
     锁路径为空，后续实例可直接创建，不会留下永久不可用的库；临时副本留在 `.workbench/` 中不参与锁判定，
     超过 24 小时（与孤儿临时文件同一门槛）由启动清扫回收，正在进行的认领因认领时刷新过 mtime 而不会被误删。
-  - **实现状态（与上句有偏差）**：`Vault::open` 的顺序是 `ensure_identity` → `lock::acquire`（含接管）→ `journal::recover`，
-    即先拿锁再回放 journal；`lock.takeover` 审计记录尚未实现。写前校验（`pid` + `leaseToken` + `heartbeatAt`）已在
-    `lock.rs` 的 `verify_lease` 与 `Vault::begin_write` 落地，心跳线程发现锁文件 PID/代次不符时同样立即降级只读。
+  - **实现状态**：`Vault::open` 的顺序是 `ensure_identity` → `lock::acquire`（含接管）→ `journal::recover` → 惰性清扫；
+    只读观察者不执行恢复。写前校验（`pid` + `leaseToken` + `heartbeatAt`）已在 `lock.rs` 的 `verify_lease` 与
+    `Vault::begin_write` 落地，心跳线程发现锁文件 PID/代次不符时同样立即降级只读；`kind: "lock.takeover"` 审计记录
+    尚未实现（属已记录缺口，待后续版本补齐）。
 - 抢不到锁：以**只读观察者**模式打开库（可搜索、可渲染、不可写），UI 明确提示「库已被其它实例打开」。绝不降级为「写但不加锁」。
   - 只读判定分两层：启动态的 `readonly` 只在抢锁时确定，运行期接管后的 UI 提示**最多滞后一个心跳周期（5 秒）**；
     真正的拦截点是写闸里的写前校验，因此不会出现「提示仍可写、实际已双写」的窗口。
 
-`.lock` 与 `.journal/` 由 watcher 忽略，避免自我触发。
+watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock` 与 `.journal/`），避免自我触发。
 
 ---
 
@@ -459,8 +466,9 @@ journal 是**追加写的 NDJSON**，路径 `~/Library/Application Support/Ember
 ### 8.6 trash/<ULID>/ 与惰性清扫
 
 - `docs.remove` 的软删除副本落在 `.workbench/trash/<ULID>/<原文件名>`；副本 frontmatter 的 `id` **重写为新 ULID**，其余键原样保留——即使副本日后被移出 `.workbench/`，也不会与目录中的同 id 文档冲突。
-- 持锁实例启动且 journal 恢复成功后执行惰性清扫：副本目录 mtime 超过 **30 天** 整目录回收；全库孤儿 `.ember-tmp-` 临时文件（>24h、未登记 journal）一并回收。清扫只记日志不影响启动，mtime 不可读按保守不删处理。
-- 孤儿 temp 清扫跳过 `.workbench/` 内部：锁心跳与 journal 写入的瞬时 temp 也在那里，避免清扫与 rename 竞态。
+- 持锁实例启动且 journal 恢复成功后执行惰性清扫：副本目录 mtime 超过 **30 天** 整目录回收；全库孤儿 `.ember-tmp-` 临时文件（>24h）一并回收。清扫只记日志不影响启动，mtime 不可读按保守不删处理。
+- 孤儿 temp 清扫**覆盖** `.workbench/` 内部：锁心跳与 journal 的瞬时 temp 也在那里，24h 门槛远大于单次写入的存活时间，不会与 rename 竞态；`lock.takeover.*` 认领副本按同一门槛回收（§7）。
+- 数值提示：孤儿 temp（24h）与回收站（30 天）的保留期以 `vault/mod.rs` 常量为准，改代码必须同步本文件。
 
 ### 8.7 machines/<machineId>/ui.json（机器本地，不在库内）
 

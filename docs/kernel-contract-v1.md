@@ -189,7 +189,7 @@ export interface DocFilter {
 - **D1** `update`/`rename`/`remove` 的 `base` 与磁盘不一致时，必须走 diff3，不得直接覆盖（I2）。
 - **D2** `create` 遇到已存在的路径，必须抛 `path_exists`，不得覆盖。
 - **D3** `rename` 不改变 `id`、`created`、`updated`；只改路径与 frontmatter 中的显式 title 不受影响。
-- **D4** `remove` 默认移入 `.workbench/trash/<ULID>/`（软删除），硬删除只能经命令 `core.doc.purge`，且需要显式参数。
+- **D4** `remove` 默认移入 `.workbench/trash/<ULID>/`（软删除），硬删除只能经命令 `core.doc.purge`，且需要显式参数（v1 未实现：回收站只进不出，当前唯一回收路径是 vault-format §8.6 的 30 天惰性清扫；属已记录缺口，不是允许的现状）。
 - **D5** 所有返回值里的 `DocMeta.rev` 必须与磁盘实际内容对应；不允许返回「打算写入但未提交」的状态。
 - **D6** `read` 不做写入（adoption 不在这里发生）。
 - **D7** 任何写入完成后，索引刷新可以是异步的，但 `flush()` 返回后索引必须已对齐。
@@ -531,7 +531,7 @@ export interface EditorHost {
 不变量：
 
 - **E1** 装饰必须增量（I10）：`provide` 的实现必须读取 `update.changes`，用 `RangeSetBuilder` 或对旧 `RangeSet` 做 `map`，禁止每次 `EditorState.create`。
-- **E2** 编辑内容不直接落盘；保存是命令 `core.doc.save` 的职责，且必须带 `base` 修订。
+- **E2** 编辑内容不直接落盘；保存是命令 `core.doc.save` 的职责，且必须带 `base` 修订（v1 未实现 `core.doc.save` 命令：当前由编辑会话直接调用 `DocService.update`，入口在 `src/shell/editor/float-persist.ts`；属已记录缺口，不是允许的现状）。
 - **E3** `registerDecorationSlot` 的 `id` 在能力内唯一，冲突抛 `duplicate_slot`；停用能力时随 `Disposable` 移除。
 - **E4** 一个文档同一时刻只有一个 `EditorView`（v1 不做同屏分栏编辑）；`open` 幂等返回同一会话，`close` 后才释放。`extensions` / `slots` 是打开瞬间的快照，打开后再登记的扩展只影响后续会话。
 
