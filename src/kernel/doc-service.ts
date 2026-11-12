@@ -65,8 +65,12 @@ interface CatalogEntry {
   path: VaultPath;
   rev: number;
   hash: ContentHash;
-  /** 与 hash 对应的完整文件文本，供三方合并取 base */
+  /** 完整文件文本，canonical（LF、无 BOM）：编辑器正文与三方合并的 base 都用它 */
   text: string;
+  /** 磁盘上的字节风格，写回时原样恢复；create/refresh 从真实文件探测 */
+  style: FileStyle;
+  /** 严格 UTF-8 解码是否成功；false 时拒绝一切会重编码的写入 */
+  utf8Valid: boolean;
 }
 
 /** 上一成功提交前的内容快照：只给同 id 排队写入做三方合并，队列排空即清空 */
@@ -85,6 +89,63 @@ export interface DocServiceOptions {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: false });
+/** 严格解码只用于探测非 UTF-8：fatal 遇到非法序列直接抛，不会产生 U+FFFD */
+const strictDecoder = new TextDecoder('utf-8', { fatal: true });
+
+/**
+ * 磁盘文件的字节风格。目录里的 `text` 一律是 canonical（LF、无 BOM），
+ * 落盘时再按这里记录的风格还原，避免保存时静默改掉 BOM 或整篇行尾。
+ */
+interface FileStyle {
+  readonly bom: boolean;
+  readonly eol: 'lf' | 'crlf' | 'mixed';
+}
+
+const detectEol = (text: string): FileStyle['eol'] => {
+  const crlf = text.split('\r\n').length - 1;
+  const bareLf = text.split('\n').length - 1 - crlf;
+  // 混合行尾无法从单一正文反推逐行风格：按已知限制统一写回 LF
+  return crlf === 0 ? 'lf' : bareLf === 0 ? 'crlf' : 'mixed';
+};
+
+/** TextDecoder 默认会吞掉 BOM，因此 BOM 必须看原始字节，不能看解码后的字符串 */
+const hasUtf8Bom = (bytes: Uint8Array): boolean =>
+  bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+
+/** 从磁盘字节探测风格（bytes 判 BOM，text 判行尾） */
+const detectStyle = (bytes: Uint8Array, text: string): FileStyle => ({
+  bom: hasUtf8Bom(bytes),
+  eol: detectEol(text),
+});
+
+/** 字符串来源（create/导入）没有原始字节，只能从文本判断 BOM 与行尾 */
+const detectTextStyle = (text: string): FileStyle => ({
+  bom: text.startsWith('\uFEFF'),
+  eol: detectEol(text),
+});
+
+/** 目录与编辑器统一使用 canonical 文本：去掉 BOM、CRLF 归一为 LF */
+const canonicalText = (text: string): string =>
+  (text.startsWith('\uFEFF') ? text.slice(1) : text).replace(/\r\n/g, '\n');
+
+/**
+ * canonical → 落盘字节前的还原。`\r\n → \n` 先归一，再整篇换行，
+ * 避免三方合并残留的 `\r` 被二次转义成 `\r\r\n`。
+ */
+const applyStyle = (text: string, style: FileStyle): string => {
+  const canonical = canonicalText(text);
+  const styled = style.eol === 'crlf' ? canonical.replace(/\n/g, '\r\n') : canonical;
+  return style.bom ? `\uFEFF${styled}` : styled;
+};
+
+const isUtf8 = (bytes: Uint8Array): boolean => {
+  try {
+    strictDecoder.decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const toHex = (buffer: ArrayBuffer): string =>
   [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -267,8 +328,11 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       if (paths.ext(path).toLowerCase() !== '.md') continue;
       const bytes = await readBytes(path);
       if (bytes === null) continue;
-      const text = decoder.decode(bytes);
-      const parsed = parseDocText(text);
+      const rawText = decoder.decode(bytes);
+      const text = canonicalText(rawText);
+      const style = detectStyle(bytes, rawText);
+      const utf8Valid = isUtf8(bytes);
+      const parsed = parseDocText(rawText);
       const id = parsed.frontmatter.id === null ? null : asDocId(parsed.frontmatter.id);
       if (id === null) {
         if (parsed.frontmatterBroken) {
@@ -317,6 +381,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         existing.rev = rev;
         existing.hash = hash;
         existing.text = text;
+        existing.style = style;
+        existing.utf8Valid = utf8Valid;
         byPath.delete(String(oldPath));
         byPath.set(String(path), id);
         bumpVersion(String(id));
@@ -332,7 +398,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         continue;
       }
       const rev = existing === undefined ? 1 : existing.hash === hash ? existing.rev : existing.rev + 1;
-      entries.set(String(id), { id, path, rev, hash, text });
+      entries.set(String(id), { id, path, rev, hash, text, style, utf8Valid });
       byPath.set(String(path), id);
       bumpVersion(String(id));
       versionSnapshot.set(String(id), versions.get(String(id)) ?? 0);
@@ -374,14 +440,19 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
   };
 
   const commit = async (entry: CatalogEntry, text: string, intent: WriteOptions['intent']): Promise<CatalogEntry> => {
-    const bytes = encoder.encode(text);
+    // 唯一落盘收口：编辑器保存、AI 替换、冲突副本合并、撤销都从这里写。
+    // 入参是 canonical 文本，写前按文件既有风格还原 BOM 与行尾。
+    const canonical = canonicalText(text);
+    const bytes = encoder.encode(applyStyle(canonical, entry.style));
     await port.write(entry.path, bytes, intent);
+    // hash 必须按真实落盘字节算：base.hash 校验比较的是磁盘内容，
+    // 换成 canonical 文本的 hash 会让并发写入的过期判定整体失真。
     const hash = await hashBytes(bytes);
     // 入队时捕获的 entry 可能已被 refresh 替换：更新 map 中的当前对象，避免改到脱管副本
     const current = entries.get(String(entry.id)) ?? entry;
     // 记录写前快照：排队中的下一个写入者若仍以它为 base，可做三方合并而不是丢更新
     previousCommitted.set(String(entry.id), { hash: current.hash, text: current.text });
-    current.text = text;
+    current.text = canonical;
     current.hash = hash;
     current.rev += 1;
     bumpVersion(String(entry.id));
@@ -393,6 +464,12 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
     localText: string,
     intent: WriteOptions['intent'],
   ): Promise<ConflictCopy> => {
+    if (!entry.utf8Valid) {
+      // 副本会把原始字节重新编码：非 UTF-8 时同样拒绝，避免把损坏扩散到新文件
+      throw new EmberError('invalid_payload', '文件不是合法 UTF-8，拒绝写入冲突副本', {
+        path: String(entry.path),
+      });
+    }
     const parsed = parseDocText(localText);
     const copyIdValue = createUlid(now().getTime());
     const copyId = asDocId(copyIdValue);
@@ -403,7 +480,11 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       id: copyIdValue,
       ember: { ...parsed.frontmatter.ember, conflictOf: String(entry.id) },
     };
-    await port.write(copyPath, encoder.encode(composeDocText(frontmatter, parsed.body)), intent);
+    await port.write(
+      copyPath,
+      encoder.encode(applyStyle(composeDocText(frontmatter, parsed.body), entry.style)),
+      intent,
+    );
     events.emit('doc:conflict', { id: entry.id, copyId, copyPath });
     log.warn('写入冲突副本', { id: String(entry.id), copyPath: String(copyPath) });
     return { id: copyId, path: copyPath, of: entry.id };
@@ -416,13 +497,16 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
     const versionAtRead = versions.get(key) ?? 0;
     const bytes = await readBytes(entry.path);
     if (bytes === null) throw new EmberError('doc_not_found', `文件已消失：${String(entry.path)}`);
-    const text = decoder.decode(bytes);
+    const rawText = decoder.decode(bytes);
+    const text = canonicalText(rawText);
+    const style = detectStyle(bytes, rawText);
+    const utf8Valid = isUtf8(bytes);
     const hash = await hashBytes(bytes);
     if (hash !== entry.hash) {
       if (isBusy(entry.id)) {
         // 队列正在写同一 id：不能回写共享 entry（可能把队列刚推进的 rev/hash 打回旧值）。
         // 仅用刚读到的字节构造一次性快照返回；缓存交给队列在写完后更新。
-        const view: CatalogEntry = { id: entry.id, path: entry.path, rev: entry.rev, hash, text };
+        const view: CatalogEntry = { id: entry.id, path: entry.path, rev: entry.rev, hash, text, style, utf8Valid };
         return snapshotOf(view);
       }
       if ((versions.get(key) ?? 0) !== versionAtRead) {
@@ -435,6 +519,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       entry.rev += 1;
       entry.hash = hash;
       entry.text = text;
+      entry.style = style;
+      entry.utf8Valid = utf8Valid;
       bumpVersion(key);
     }
     return snapshotOf(entry);
@@ -491,11 +577,13 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         ember: {},
         extra: {},
       };
-      const text = composeDocText(frontmatter, input.text);
-      const bytes = encoder.encode(text);
+      // 导入等外部来源可能自带 BOM/CRLF：新文件保留其行尾风格，frontmatter 跟着同一风格写
+      const style = detectTextStyle(input.text);
+      const text = composeDocText(frontmatter, canonicalText(input.text));
+      const bytes = encoder.encode(applyStyle(text, style));
       await track(port.write(input.path, bytes, input.intent));
       const hash = await hashBytes(bytes);
-      const entry: CatalogEntry = { id, path: input.path, rev: 1, hash, text };
+      const entry: CatalogEntry = { id, path: input.path, rev: 1, hash, text, style, utf8Valid: true };
       entries.set(String(id), entry);
       byPath.set(String(input.path), id);
       bumpVersion(String(id));
@@ -510,7 +598,18 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         const entry = requireEntry(id);
         const bytes = await readBytes(entry.path);
         if (bytes === null) throw new EmberError('doc_not_found', `文件已消失：${String(entry.path)}`);
-        const diskText = decoder.decode(bytes);
+        if (!isUtf8(bytes)) {
+          // 解码有损：再编码会把非法序列永久替换成 U+FFFD。拒绝写入，文件保持一字节不动。
+          throw new EmberError('invalid_payload', '文件不是合法 UTF-8，保存会破坏原始字节，已拒绝写入', {
+            id: String(id),
+            path: String(entry.path),
+          });
+        }
+        const rawText = decoder.decode(bytes);
+        const diskText = canonicalText(rawText);
+        // 磁盘风格可能被外部改过：以本次读到的为准，保存后仍保持用户当前的行尾/BOM
+        entry.style = detectStyle(bytes, rawText);
+        entry.utf8Valid = true;
         const diskHash = await hashBytes(bytes);
         const parsed = parseDocText(diskText);
         const nextFrontmatter: Frontmatter = {

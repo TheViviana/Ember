@@ -12,7 +12,8 @@ const BLOCK = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
 
 /**
  * 按字节切分 frontmatter 与正文。
- * 不做语义重排，保证正文「逐字节保留」（vault-format §4.6）。
+ * 本函数不做语义重排，正文切片原样返回；BOM 与行尾风格由 doc-service 在写回时还原
+ * （vault-format §4.6：语义级保真，非字节级）。
  */
 export const splitFrontmatter = (text: string): FrontmatterSplit => {
   const hasBom = text.startsWith('\uFEFF');
