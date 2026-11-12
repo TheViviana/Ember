@@ -236,7 +236,7 @@ CREATE TABLE links (
 5. `fsync(target_dir)`（`[事实]` 不 fsync 目录，rename 的目录项可能在掉电后丢失）。
 6. 写入返回后由索引层异步刷新对应文档行（内容 hash、mtime、size；kernel-contract D7）。
 
-权限与元数据：`[设计选择]` 新文件继承父目录 umask；替换已有文件时在 rename 前把原文件的权限位复制到临时文件，避免权限被重置。
+权限与元数据：`[设计选择]` 新文件继承父目录 umask；替换已有文件时在 rename 前把原文件的权限位（含 setuid/setgid/sticky）复制到临时文件，避免权限被重置。复制失败（读取原文件元数据出错或设置临时文件权限失败）视为本次写入失败：临时文件被删除、目标保持旧内容，不降级为按 umask 新建。
 
 ### 6.2 journal 两阶段
 
