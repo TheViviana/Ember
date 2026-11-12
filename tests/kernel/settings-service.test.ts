@@ -220,3 +220,69 @@ void test('patch 落盘失败向调用方抛错，且不阻断后续 patch', asy
   const stored = JSON.parse(mem.dump()[SETTINGS] ?? '{}') as { ui: { defaultView: string } };
   assert.equal(stored.ui.defaultView, 'editor');
 });
+
+const createFailingService = (
+  mem: MemoryVault,
+  failures: number,
+): { service: ReturnType<typeof createSettingsService>; remaining: () => number } => {
+  let remaining = failures;
+  const port = {
+    ...mem.port,
+    write: (
+      path: Parameters<typeof mem.port.write>[0],
+      bytes: Uint8Array,
+      intent: Parameters<typeof mem.port.write>[2],
+    ) => {
+      if (remaining > 0) {
+        remaining -= 1;
+        return Promise.reject(new Error('disk full'));
+      }
+      return mem.port.write(path, bytes, intent);
+    },
+  };
+  const service = createSettingsService({
+    port,
+    paths: createPathTools(),
+    events: createEventBus(),
+    log: silentLog,
+    vaultId: newVaultId(),
+  });
+  return { service, remaining: () => remaining };
+};
+
+void test('正常路径 flush 等待落盘且不抛', async () => {
+  const { service } = setup();
+  await service.patch({ ui: { sidebar: 'off' } });
+  await service.flush();
+  await service.flush();
+});
+
+void test('flush 把写入失败抛一次，且不重复抛', async () => {
+  const mem = createMemoryVault();
+  const { service } = createFailingService(mem, 1);
+
+  await assert.rejects(service.patch({ ui: { sidebar: 'off' } }), /disk full/);
+  await assert.rejects(service.flush(), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /设置写入失败（ui）/);
+    assert.match(error.message, /disk full/);
+    return true;
+  });
+  // 抛完清空：第二次 flush 不再重复抛
+  await service.flush();
+});
+
+void test('flush 抛错后队列未被毒化：再次 patch 成功并落盘', async () => {
+  const mem = createMemoryVault();
+  const { service, remaining } = createFailingService(mem, 1);
+
+  await assert.rejects(service.patch({ ui: { sidebar: 'off' } }), /disk full/);
+  await assert.rejects(service.flush(), /设置写入失败/);
+  assert.equal(remaining(), 0);
+
+  const next = await service.patch({ ui: { defaultView: 'editor' } });
+  assert.equal(next.ui.defaultView, 'editor');
+  await service.flush();
+  const stored = JSON.parse(mem.dump()[SETTINGS] ?? '{}') as { ui: { defaultView: string } };
+  assert.equal(stored.ui.defaultView, 'editor');
+});

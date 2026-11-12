@@ -219,6 +219,11 @@ export interface SettingsService {
   read(): Promise<VaultSettings>;
   patch(patch: SettingsPatch): Promise<VaultSettings>;
   watch(listener: (next: VaultSettings) => void): Disposable;
+  /**
+   * 等待排队中的写入落盘；若自上次 flush 以来有写入失败，抛出一次后清空。
+   * 关窗阶段一必须调用它：只有会失败的 flush 才能拦住「磁盘是旧值」的关闭。
+   */
+  flush(): Promise<void>;
 }
 
 export interface KernelEnv {

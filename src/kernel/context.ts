@@ -92,6 +92,7 @@ export const scopeContext = (
     read: () => base.settings.read(),
     patch: (patch) => base.settings.patch(patch),
     watch: (listener) => track(base.settings.watch(listener)),
+    flush: () => base.settings.flush(),
   },
   events: {
     emit: (type, payload) => base.events.emit(type, payload),

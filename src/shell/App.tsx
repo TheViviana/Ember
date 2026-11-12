@@ -129,6 +129,7 @@ export const App = (): ReactElement => {
           flushers: [
             flushMachineUiWrites,
             flushFloatEditors,
+            () => kernel.settings.flush(),
             () => kernel.docs.flush(),
             () => kernel.canvas.flush(),
           ],

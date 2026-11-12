@@ -137,21 +137,18 @@ const mergePatch = (current: VaultSettings, patch: SettingsPatch): VaultSettings
   };
 };
 
-export interface SettingsServiceInternal extends SettingsService {
-  /** 等待排队中的写入落盘 */
-  flush(): Promise<void>;
-}
-
 /**
  * `.workbench/settings.json` 的唯一读写方（vault-format §8.1）。
  * 一次 patch = 一次原子写；写入串行排队，读缓存，只读模式拒绝写入。
  */
-export const createSettingsService = (options: SettingsServiceOptions): SettingsServiceInternal => {
+export const createSettingsService = (options: SettingsServiceOptions): SettingsService => {
   const path = options.paths.normalize(SETTINGS_PATH);
   const listeners = new Set<(next: VaultSettings) => void>();
   const now = options.now ?? ((): Date => new Date());
   let cached: VaultSettings | null = null;
   let writing: Promise<void> = Promise.resolve();
+  /** 自上次 flush 以来最近一次写入失败；flush 抛出一次后清空，不毒化队列 */
+  let lastFailure: EmberError | null = null;
 
   const fallback = (): VaultSettings =>
     defaultSettings(options.vaultId, options.vaultName ?? 'Ember Vault', now().toISOString());
@@ -209,10 +206,15 @@ export const createSettingsService = (options: SettingsServiceOptions): Settings
         publish(next);
         return next;
       });
-      // 失败不阻断队列：本次 patch 向调用方抛错，后续 patch/flush 照常推进。
+      // 失败不阻断队列：本次 patch 向调用方抛错，后续 patch 照常推进；
+      // 同时记下失败，让 flush 能把「队列已排空但没落盘」报给关窗流程。
+      const fields = Object.keys(patch).join(', ') || '空补丁';
       writing = chained.then(
         () => undefined,
-        () => undefined,
+        (error: unknown) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          lastFailure = new EmberError('io_failed', `设置写入失败（${fields}）：${detail}`);
+        },
       );
       return chained;
     },
@@ -226,6 +228,11 @@ export const createSettingsService = (options: SettingsServiceOptions): Settings
       } satisfies Disposable;
     },
 
-    flush: () => writing,
+    flush: async () => {
+      await writing;
+      const failure = lastFailure;
+      lastFailure = null;
+      if (failure !== null) throw failure;
+    },
   };
 };
