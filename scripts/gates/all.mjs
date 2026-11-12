@@ -10,7 +10,7 @@ const root = process.argv.includes('--root')
   : DEFAULT_ROOT;
 
 const results = [
-  { name: 'cycles', violations: findCycles(root).map((cycle) => ({ detail: cycle.join(' → ') })) },
+  { name: 'cycles', violations: findCycles(root) },
   { name: 'layers', violations: checkLayers(root) },
   { name: 'bans', violations: scanBans(root) },
   { name: 'size', violations: checkSize(root) },

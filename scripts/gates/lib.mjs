@@ -4,25 +4,58 @@ import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 /** 仓库根（scripts/gates/ 上两级） */
 export const DEFAULT_ROOT = resolve(new URL('../..', import.meta.url).pathname);
 
+/**
+ * 扫描充分性下限：空目录/路径给错/被清空/不可读时，0 违规不再等于通过。
+ * 数值按 2026-11 真实规模留 ~35% 余量（实测模块 146、边 303、bans 文件 242）。
+ * 结构调整导致下限不再成立时，必须同步修改这里并在 review 中可见。
+ */
+export const GATE_FLOORS = Object.freeze({
+  modules: 100,
+  classified: 95,
+  edges: 200,
+  'layer:shell': 40,
+  'layer:kernel': 6,
+  'layer:data': 4,
+  'layer:capabilities': 2,
+  'layer:assembly': 1,
+  'layer:pkg:doc-model': 6,
+  'layer:pkg:canvas-engine': 2,
+  bansFiles: 140,
+});
+
+/** 结构断言：必须存在、是目录、且至少含 1 个 .ts/.tsx */
+export const REQUIRED_DIRS = Object.freeze([
+  'src/kernel',
+  'src/shell',
+  'src/data',
+  'src/capabilities',
+  'packages/doc-model',
+  'packages/canvas-engine',
+]);
+
 const CODE_EXT = new Set(['.ts', '.tsx']);
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'target', 'gen', '.git']);
 
 export const toPosix = (p) => p.split(sep).join('/');
 
-/** 递归收集代码文件（跳过依赖、构建产物、隐藏目录） */
-export function walk(dir, result = []) {
+/**
+ * 递归收集代码文件（跳过依赖、构建产物、隐藏目录）。
+ * 读取失败不再静默吞掉：问题写入 problems，由门禁报 `gate-read`。
+ */
+export function walk(dir, result = [], problems = []) {
   const start = resolve(dir);
   let entries;
   try {
     entries = readdirSync(start, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    problems.push({ path: start, detail: `读取目录失败：${error.code ?? error.message}` });
     return result;
   }
   for (const entry of entries) {
     if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
     const full = join(start, entry.name);
     if (entry.isDirectory()) {
-      walk(full, result);
+      walk(full, result, problems);
     } else if (CODE_EXT.has(extname(entry.name))) {
       result.push(full);
     }
@@ -31,10 +64,79 @@ export function walk(dir, result = []) {
 }
 
 /** 收集参与分层的模块：src/** 与 packages/*\/src/** */
-export function listModules(root) {
+export function listModules(root, problems = []) {
   const base = resolve(root);
-  return [...walk(join(base, 'src')), ...walk(join(base, 'packages'))].sort();
+  return [...walk(join(base, 'src'), [], problems), ...walk(join(base, 'packages'), [], problems)].sort();
 }
+
+const gateViolation = (file, rule, detail) => ({ file, line: 0, rule, detail });
+
+/**
+ * 结构与充分性：root 必须存在且是目录；必需目录必须存在、是目录、
+ * 且至少含 1 个模块（该目录读取失败时只报 gate-read，不重复报缺失）。
+ */
+export const structureViolations = (root, modules, problems = []) => {
+  const abs = resolve(root);
+  try {
+    if (!statSync(abs).isDirectory()) {
+      return [gateViolation('.', 'gate-root', `${toPosix(abs)}：期望目录，实际是文件`)];
+    }
+  } catch (error) {
+    return [
+      gateViolation(
+        '.',
+        'gate-root',
+        `${toPosix(abs)}：期望存在的目录，实际无法访问（${error.code ?? error.message}）`,
+      ),
+    ];
+  }
+
+  const unreadable = problems.map((problem) => toPosix(relative(abs, problem.path)));
+  const violations = [];
+  for (const dir of REQUIRED_DIRS) {
+    try {
+      if (!statSync(join(abs, dir)).isDirectory()) {
+        violations.push(gateViolation(dir, 'gate-missing-dir', `${dir}：期望目录，实际不是目录`));
+        continue;
+      }
+    } catch (error) {
+      // 无权限不等同于缺失：已由 gate-read 报出，这里不重复、也不写成“缺失”
+      if (error.code === 'EACCES' || error.code === 'EPERM') continue;
+      violations.push(gateViolation(dir, 'gate-missing-dir', `${dir}：期望存在的目录，实际缺失`));
+      continue;
+    }
+    if (unreadable.some((path) => path === dir || path.startsWith(`${dir}/`))) continue;
+    const count = modules.filter((file) => {
+      const rel = toPosix(relative(abs, file));
+      return rel.startsWith(`${dir}/`);
+    }).length;
+    if (count === 0) {
+      violations.push(
+        gateViolation(dir, 'gate-missing-dir', `${dir}：期望至少 1 个 .ts/.tsx，实际 0 个`),
+      );
+    }
+  }
+  return violations;
+};
+
+/** 目录/文件读取失败 → gate-read（继续扫描其余部分，但仍以非 0 退出） */
+export const readViolations = (root, problems) =>
+  problems.map((problem) => {
+    const label = toPosix(relative(resolve(root), problem.path)) || '.';
+    return gateViolation(label, 'gate-read', `${label}：${problem.detail}`);
+  });
+
+/** 规模下限：低于期望才报；实际为 0 报 gate-empty，否则报 gate-floor，detail 统一写明指标/实际/期望 */
+export const floorViolations = (checks) =>
+  checks
+    .filter(({ actual, expected }) => actual < expected)
+    .map(({ metric, actual, expected }) =>
+      gateViolation(
+        '.',
+        actual === 0 ? 'gate-empty' : 'gate-floor',
+        `${metric}：实际 ${actual}，期望至少 ${expected}`,
+      ),
+    );
 
 const IMPORT_PATTERNS = [
   /(?<keyword>import|export)\s+(?<clause>[^'"();]*?)\bfrom\s*['"](?<spec>[^'"]+)['"]/g,

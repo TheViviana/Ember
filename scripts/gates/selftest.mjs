@@ -1,10 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkCsp } from './csp.mjs';
+import { scanBans } from './bans.mjs';
+import { findCycles } from './cycles.mjs';
+import { checkLayers } from './layers.mjs';
 import { stripRustComments } from './offline.mjs';
 import { checkSize, SIZE_LIMIT } from './size.mjs';
 
@@ -36,10 +39,56 @@ const countRows = (rows) => {
 
 let failures = 0;
 
+const tempRoots = [];
+const makeTempRoot = (prefix = 'ember-gate-tree-') => {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempRoots.push(dir);
+  return dir;
+};
+
+/** 合规树：6 个必需目录、101 个模块（≥100）、263 条相对 import（≥200）、41 个 .rs（共 142 文件） */
+const buildCompliantTree = (dir) => {
+  const modules = [];
+  const write = (rel, text) => {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), text);
+    if (rel.endsWith('.ts') || rel.endsWith('.tsx')) modules.push(rel);
+  };
+  const groups = [
+    ['src/shell', 79],
+    ['src/kernel', 6],
+    ['src/data', 4],
+    ['src/capabilities/core', 2],
+    ['src/capabilities/example-hello', 1],
+    ['packages/doc-model/src', 6],
+    ['packages/canvas-engine/src', 2],
+  ];
+  for (const [dirPath, count] of groups) {
+    for (let i = 0; i < count; i += 1) {
+      let source = '';
+      for (const back of [1, 2, 3]) {
+        if (i - back >= 0) source += `import { v${i - back} } from './m${i - back}';\n`;
+      }
+      write(`${dirPath}/m${i}.ts`, `${source}export const v${i} = ${i};\n`);
+    }
+  }
+  write('src/capabilities/index.ts', 'export const assembly = true;\n');
+  for (let i = 0; i < 41; i += 1) write(`src-tauri/stub${i}.rs`, '\n');
+  return modules;
+};
+
 for (const [name, script] of Object.entries(SCRIPTS)) {
   const fixtureRoot = join(here, 'fixtures', name);
   const expected = JSON.parse(readFileSync(join(fixtureRoot, 'expected.json'), 'utf8'));
-  const actual = runGate(script, fixtureRoot);
+  // fixture 只包含验证规则所需的最小文件；复制到临时合规树上补齐结构与规模，
+  // 这样“无多报”比较不会被 gate-* 充分性违规干扰。
+  const sandbox = makeTempRoot(`ember-gate-fixture-${name}-`);
+  cpSync(fixtureRoot, sandbox, {
+    recursive: true,
+    filter: (src) => !src.endsWith('expected.json'),
+  });
+  buildCompliantTree(sandbox);
+  const actual = runGate(script, sandbox);
   const expectedCounts = countRows(expected.rows);
   const actualCounts = countRows(actual.violations.map((v) => ({ file: v.file, rule: v.rule })));
 
@@ -364,5 +413,111 @@ if (realSize.length === 0) {
 
   rmSync(cspRoot, { recursive: true, force: true });
 }
+
+// 扫描充分性门禁：合成合规树 + 四类破坏，验证“0 违规不等于通过”
+{
+  const makeRoot = () => makeTempRoot();
+  const buildTree = buildCompliantTree;
+
+  const runGates = (root) => ({
+    cycles: findCycles(root),
+    layers: checkLayers(root),
+    bans: scanBans(root),
+  });
+
+  /** 逐 gate 断言命中指定规则；默认要求 cycles/layers/bans 三个都命中 */
+  const expectRule = (label, root, rule, gateNames = ['cycles', 'layers', 'bans']) => {
+    const results = runGates(root);
+    const missed = gateNames.filter(
+      (name) => !results[name].some((violation) => violation.rule === rule),
+    );
+    if (missed.length === 0) {
+      process.stdout.write(`✓ selftest:gate ${label}（${gateNames.join('/')} 命中 ${rule}）\n`);
+    } else {
+      failures += 1;
+      process.stdout.write(
+        `✗ selftest:gate ${label}：${missed.join('/')} 未命中 ${rule}，实际 ${JSON.stringify(results)}\n`,
+      );
+    }
+  };
+
+  const expectPass = (label, root) => {
+    const results = runGates(root);
+    const total = Object.values(results).reduce((sum, violations) => sum + violations.length, 0);
+    if (total === 0) {
+      process.stdout.write(`✓ selftest:gate ${label}\n`);
+    } else {
+      failures += 1;
+      process.stdout.write(`✗ selftest:gate ${label}：期望 0 违规，实际 ${JSON.stringify(results)}\n`);
+    }
+  };
+
+  expectRule('root 不存在必须失败', join(makeRoot(), 'does-not-exist'), 'gate-root');
+
+  const fileRoot = makeRoot();
+  writeFileSync(join(fileRoot, 'plain.txt'), 'x');
+  expectRule('root 是文件必须失败', join(fileRoot, 'plain.txt'), 'gate-root');
+
+  expectRule('空目录必须失败', makeRoot(), 'gate-missing-dir');
+
+  const missingKernel = makeRoot();
+  buildTree(missingKernel);
+  rmSync(join(missingKernel, 'src', 'kernel'), { recursive: true, force: true });
+  expectRule('必需目录被删除必须失败', missingKernel, 'gate-missing-dir');
+
+  const cleared = makeRoot();
+  buildTree(cleared);
+  rmSync(join(cleared, 'src'), { recursive: true, force: true });
+  expectRule('src 被清空必须失败', cleared, 'gate-floor');
+
+  const pruned = makeRoot();
+  const prunedModules = buildTree(pruned);
+  for (const rel of prunedModules.slice(20)) rmSync(join(pruned, rel));
+  expectRule('模块数低于下限必须失败', pruned, 'gate-floor');
+
+  const noShell = makeRoot();
+  buildTree(noShell);
+  rmSync(join(noShell, 'src', 'shell'), { recursive: true, force: true });
+  expectRule('shell 层被清空必须失败', noShell, 'gate-empty', ['layers']);
+
+  const noEdges = makeRoot();
+  for (const rel of buildTree(noEdges)) {
+    if (rel.endsWith('.ts')) writeFileSync(join(noEdges, rel), 'export const v = 0;\n');
+  }
+  expectRule('import 全被删除必须失败', noEdges, 'gate-empty', ['cycles', 'layers']);
+
+  const isRoot = process.getuid?.() === 0;
+  if (isRoot) {
+    process.stdout.write('✓ selftest:gate 不可读目录/文件用例已跳过（以 root 运行）\n');
+  } else {
+    const unreadableDir = makeRoot();
+    buildTree(unreadableDir);
+    const lockedDir = join(unreadableDir, 'packages', 'doc-model');
+    chmodSync(lockedDir, 0o000);
+    expectRule('必需目录不可读必须失败', unreadableDir, 'gate-read');
+    chmodSync(lockedDir, 0o755);
+
+    const unreadableFile = makeRoot();
+    buildTree(unreadableFile);
+    const lockedFile = join(unreadableFile, 'src', 'kernel', 'm0.ts');
+    chmodSync(lockedFile, 0o000);
+    expectRule('模块文件不可读必须失败', unreadableFile, 'gate-read');
+    chmodSync(lockedFile, 0o644);
+  }
+
+  expectPass('真实仓库通过', join(here, '..', '..'));
+
+  const legal = makeRoot();
+  buildTree(legal);
+  expectPass('合成合规树通过', legal);
+
+  const extended = makeRoot();
+  buildTree(extended);
+  mkdirSync(join(extended, 'packages', 'new-pkg', 'src'), { recursive: true });
+  writeFileSync(join(extended, 'packages', 'new-pkg', 'src', 'a.ts'), 'export const a = 1;\n');
+  expectPass('新增 packages 子包仍通过', extended);
+}
+
+for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });
 
 process.exit(failures === 0 ? 0 : 1);

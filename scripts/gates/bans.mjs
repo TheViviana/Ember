@@ -1,7 +1,15 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DEFAULT_ROOT, toPosix } from './lib.mjs';
+import {
+  DEFAULT_ROOT,
+  GATE_FLOORS,
+  floorViolations,
+  listModules,
+  readViolations,
+  structureViolations,
+  toPosix,
+} from './lib.mjs';
 
 const SCAN_EXT = new Set(['.ts', '.tsx', '.mjs', '.js', '.rs']);
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'target', 'gen', '.git', 'fixtures']);
@@ -19,35 +27,52 @@ export const BANNED_PATTERNS = [
   { rule: 'rust-suppress', re: new RegExp('#\\[expect\\('), hint: '禁止 Rust expect 属性' },
 ];
 
-function walk(dir, result = []) {
+function walk(dir, result = [], problems = []) {
   const start = resolve(dir);
   let entries;
   try {
     entries = readdirSync(start, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    problems.push({ path: start, detail: `读取目录失败：${error.code ?? error.message}` });
     return result;
   }
   for (const entry of entries) {
     if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
     const full = join(start, entry.name);
-    if (entry.isDirectory()) walk(full, result);
+    if (entry.isDirectory()) walk(full, result, problems);
     else if (SCAN_EXT.has(extname(entry.name))) result.push(full);
   }
   return result;
 }
 
-/** 扫描禁用项，返回 {file, line, rule, detail} */
+/**
+ * 扫描禁用项，返回 {file, line, rule, detail}。
+ * 同时校验扫描充分性：root 结构、读取失败与文件数下限都会变成非 0 退出。
+ */
 export function scanBans(root) {
-  const violations = [];
-  for (const file of walk(root).sort()) {
+  const problems = [];
+  const modules = listModules(root, problems);
+  const violations = structureViolations(root, modules, problems);
+  let scanned = 0;
+
+  for (const file of walk(root, [], problems).sort()) {
     let stat;
     try {
       stat = statSync(file);
-    } catch {
+    } catch (error) {
+      problems.push({ path: file, detail: `读取文件失败：${error.code ?? error.message}` });
       continue;
     }
     if (!stat.isFile()) continue;
-    const lines = readFileSync(file, 'utf8').split('\n');
+    let content;
+    try {
+      content = readFileSync(file, 'utf8');
+    } catch (error) {
+      problems.push({ path: file, detail: `读取文件失败：${error.code ?? error.message}` });
+      continue;
+    }
+    scanned += 1;
+    const lines = content.split('\n');
     for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i] ?? '';
       for (const { rule, re, hint } of BANNED_PATTERNS) {
@@ -62,6 +87,13 @@ export function scanBans(root) {
       }
     }
   }
+
+  violations.push(...readViolations(root, problems));
+  violations.push(
+    ...floorViolations([
+      { metric: 'bans 扫描文件数', actual: scanned, expected: GATE_FLOORS.bansFiles },
+    ]),
+  );
   return violations;
 }
 

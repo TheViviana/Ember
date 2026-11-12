@@ -2,31 +2,62 @@ import { relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   DEFAULT_ROOT,
+  GATE_FLOORS,
   extractImports,
+  floorViolations,
   listModules,
   readSource,
+  readViolations,
   resolveRelative,
+  structureViolations,
   toPosix,
 } from './lib.mjs';
 
-/** 构建模块依赖图：仅保留仓库内的相对依赖；纯类型边编译后消失，不计入运行期环 */
-function buildGraph(root) {
+/**
+ * 构建模块依赖图：仅保留仓库内的相对依赖；纯类型边编译后消失，不计入运行期环。
+ * 读取失败写入 problems，最终报 gate-read 而不是抛栈。
+ */
+function buildGraph(root, problems) {
   const graph = new Map();
-  for (const file of listModules(root)) {
+  let edges = 0;
+  for (const file of listModules(root, problems)) {
     const deps = [];
-    for (const { spec, typeOnly } of extractImports(readSource(file))) {
+    let source;
+    try {
+      source = readSource(file);
+    } catch (error) {
+      problems.push({ path: file, detail: `读取文件失败：${error.code ?? error.message}` });
+      graph.set(file, deps);
+      continue;
+    }
+    for (const { spec, typeOnly } of extractImports(source)) {
       if (typeOnly) continue;
       const target = resolveRelative(file, spec);
-      if (target !== null) deps.push(target);
+      if (target !== null) {
+        deps.push(target);
+        edges += 1;
+      }
     }
     graph.set(file, deps);
   }
-  return graph;
+  return { graph, edges };
 }
 
-/** DFS 找环，返回去重后的环（文件路径序列，首尾相同） */
+/** DFS 找环，返回去重后的环（文件路径序列，首尾相同）；同时校验扫描充分性 */
 export function findCycles(root) {
-  const graph = buildGraph(root);
+  const problems = [];
+  const { graph, edges } = buildGraph(root, problems);
+  const violations = [
+    ...structureViolations(root, [...graph.keys()], problems),
+    ...readViolations(root, problems),
+  ];
+  violations.push(
+    ...floorViolations([
+      { metric: '模块数', actual: graph.size, expected: GATE_FLOORS.modules },
+      { metric: '运行期相对 import 边', actual: edges, expected: GATE_FLOORS.edges },
+    ]),
+  );
+
   const state = new Map();
   const stack = [];
   const cycles = [];
@@ -60,7 +91,16 @@ export function findCycles(root) {
     if ((state.get(node) ?? 0) === 0) visit(node);
   }
 
-  return cycles.map((cycle) => cycle.map((file) => toPosix(relative(root, file))));
+  for (const cycle of cycles) {
+    const path = cycle.map((file) => toPosix(relative(root, file)));
+    violations.push({
+      file: path[0] ?? '.',
+      line: 0,
+      rule: 'cycle',
+      detail: path.join(' → '),
+    });
+  }
+  return violations;
 }
 
 function parseArgs(argv) {
@@ -76,21 +116,15 @@ function parseArgs(argv) {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const { root, json } = parseArgs(process.argv.slice(2));
-  const cycles = findCycles(root);
-  const violations = cycles.map((cycle) => ({
-    file: cycle[0],
-    line: 0,
-    rule: 'cycle',
-    detail: cycle.join(' → '),
-  }));
+  const violations = findCycles(root);
   if (json) {
     process.stdout.write(`${JSON.stringify({ gate: 'cycles', root, violations }, null, 2)}\n`);
   } else {
-    for (const cycle of cycles) process.stdout.write(`[cycle] ${cycle.join(' → ')}\n`);
+    for (const v of violations) process.stdout.write(`${v.file}:${v.line}  [${v.rule}] ${v.detail}\n`);
     process.stdout.write(
-      cycles.length === 0
+      violations.length === 0
         ? 'gate:cycles 通过：0 个模块环\n'
-        : `gate:cycles 失败：${cycles.length} 个模块环\n`,
+        : `gate:cycles 失败：${violations.length} 处问题\n`,
     );
   }
   process.exit(violations.length === 0 ? 0 : 1);
