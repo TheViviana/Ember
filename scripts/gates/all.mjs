@@ -3,6 +3,7 @@ import { scanBans } from './bans.mjs';
 import { findCycles } from './cycles.mjs';
 import { checkLayers } from './layers.mjs';
 import { checkCsp } from './csp.mjs';
+import { checkSize } from './size.mjs';
 
 const root = process.argv.includes('--root')
   ? process.argv[process.argv.indexOf('--root') + 1]
@@ -12,6 +13,7 @@ const results = [
   { name: 'cycles', violations: findCycles(root).map((cycle) => ({ detail: cycle.join(' → ') })) },
   { name: 'layers', violations: checkLayers(root) },
   { name: 'bans', violations: scanBans(root) },
+  { name: 'size', violations: checkSize(root) },
   { name: 'csp', violations: checkCsp(root) },
 ];
 

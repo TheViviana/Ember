@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripRustComments } from './offline.mjs';
+import { checkSize, SIZE_LIMIT } from './size.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS = { layers: 'layers.mjs', cycles: 'cycles.mjs', bans: 'bans.mjs' };
@@ -111,6 +113,58 @@ for (const testCase of rustCases) {
       `✗ selftest:rust ${testCase.name}：期望${testCase.shouldMatch ? '保留' : '剥离'}地址\n`,
     );
   }
+}
+
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'ember-gate-size-'));
+  const shellDir = join(tmp, 'src', 'shell');
+  mkdirSync(shellDir, { recursive: true });
+  writeFileSync(join(shellDir, 'big.ts'), 'const a = 1;\n'.repeat(SIZE_LIMIT + 1));
+  writeFileSync(join(shellDir, 'small.ts'), 'const b = 1;\n');
+
+  const over = checkSize(tmp, { whitelist: [] });
+  const hit = over.length === 1 && over[0].rule === 'size' && over[0].file === 'src/shell/big.ts';
+  if (hit) {
+    process.stdout.write(`✓ selftest:size 超限命中 ${SIZE_LIMIT + 1} 行文件\n`);
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:size 超限未按预期命中：${JSON.stringify(over)}\n`);
+  }
+
+  const passed = checkSize(tmp, {
+    whitelist: [{ file: 'src/shell/big.ts', reason: '自测豁免' }],
+  });
+  if (passed.length === 0) {
+    process.stdout.write('✓ selftest:size 白名单条目放行\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:size 白名单未放行：${JSON.stringify(passed)}\n`);
+  }
+
+  const stale = checkSize(tmp, {
+    whitelist: [
+      { file: 'src/shell/big.ts', reason: '自测豁免' },
+      { file: 'src/shell/small.ts', reason: '已拆分但忘记删除' },
+    ],
+  });
+  const staleHit = stale.length === 1 && stale[0].rule === 'size-stale';
+  if (staleHit) {
+    process.stdout.write('✓ selftest:size 过期豁免被报出\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:size 过期豁免未按预期报出：${JSON.stringify(stale)}\n`);
+  }
+
+  rmSync(tmp, { recursive: true, force: true });
+}
+
+const realSize = checkSize(join(here, '..', '..'));
+if (realSize.length === 0) {
+  process.stdout.write(`✓ selftest:真实树 size 0 违规（上限 ${SIZE_LIMIT} 行）\n`);
+} else {
+  failures += 1;
+  process.stdout.write(`✗ selftest:真实树 size 有 ${realSize.length} 条违规\n`);
+  for (const v of realSize) process.stdout.write(`  ${v.file}:${v.line} [${v.rule}] ${v.detail}\n`);
 }
 
 process.exit(failures === 0 ? 0 : 1);
