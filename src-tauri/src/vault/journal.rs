@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -168,8 +168,9 @@ pub fn write_with_journal(
     compact(root)
 }
 
-/// 按 `tx` 取最后一条事件判定结局：prepared 未提交则删临时文件（目标仍是完整旧内容）；
-/// committed 说明 rename 已生效，只需清理。
+/// 按 `tx` 取最后一条事件判定结局：只做诊断记录，**不执行任何删除**。
+/// 崩溃残留的临时文件（`.ember-tmp-`）交给启动清扫按 24h 年龄回收，
+/// 恢复路径因此不存在「伪造 journal 即可删文件」的能力。
 pub fn recover(root: &Path) -> VaultResult<usize> {
     let events = read_events(root)?;
     if events.is_empty() {
@@ -182,51 +183,24 @@ pub fn recover(root: &Path) -> VaultResult<usize> {
     }
 
     for event in last.values() {
-        let temp = match event.temp.as_deref().and_then(|value| temp_target(root, value)) {
-            Some(value) => value,
-            None => {
-                if event.temp.is_some() {
-                    eprintln!(
-                        "journal 事件的临时路径非法，跳过清理（宁留孤儿不删库外文件）：{:?}",
-                        event.temp
-                    );
-                }
-                continue;
-            }
-        };
-        match event.phase {
-            Phase::Prepared | Phase::Committed => match fs::remove_file(&temp) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            },
-            Phase::Cleaned => {}
+        if event.phase == Phase::Cleaned {
+            continue;
         }
+        // 未结束事务只记录现场（tx/target/temp），不据此改动磁盘：
+        // prepared 说明目标仍是旧内容、临时文件可能残留；committed 说明 rename 已生效。
+        // 两种情况的临时文件都由 housekeeping 统一回收。
+        eprintln!(
+            "journal 未结束事务：tx={} phase={:?} target={} temp={}",
+            event.tx,
+            event.phase,
+            event.target,
+            event.temp.as_deref().unwrap_or("")
+        );
     }
 
     // 全部事务已判定完毕，journal 可直接清空。
     atomic::write_atomic(&paths::journal_file(root), b"")?;
     Ok(last.len())
-}
-
-/// 校验 journal 事件里的临时文件路径：必须是库内相对路径（纯普通段）。
-/// journal 若被外部篡改，`root.join("/etc/x")` 会整体替换根路径构成任意文件删除，
-/// 因此绝对路径、`..`、反斜杠一律拒绝并跳过清理。
-fn temp_target(root: &Path, temp: &str) -> Option<PathBuf> {
-    use std::path::Component;
-
-    if temp.is_empty() || temp.starts_with('/') || temp.contains('\\') {
-        return None;
-    }
-    let mut path = root.to_path_buf();
-    for component in Path::new(temp).components() {
-        match component {
-            Component::Normal(segment) => path.push(segment),
-            Component::CurDir => {}
-            _ => return None,
-        }
-    }
-    Some(path)
 }
 
 fn compact(root: &Path) -> VaultResult<()> {
@@ -369,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_clears_journal_and_removes_leaked_temps() {
+    fn recover_clears_journal_without_deleting_leaked_temps() {
         let vault = TempVault::new();
         let temp = vault.root.join(".workbench").join(".t-prepared");
         fs::create_dir_all(temp.parent().unwrap()).unwrap();
@@ -392,7 +366,7 @@ mod tests {
         let recovered = recover(&vault.root).unwrap();
 
         assert_eq!(recovered, 2);
-        assert!(!temp.exists(), "prepared 事务的临时文件应被清理");
+        assert!(temp.exists(), "恢复路径没有删除能力，临时文件交给清扫回收");
         assert!(vault.journal_bytes().is_empty(), "恢复完毕 journal 应清空");
     }
 
@@ -424,5 +398,109 @@ mod tests {
         assert_eq!(recovered, 2, "非法 temp 的事件仍参与判定，只是跳过删除");
         assert!(evil.exists(), "库外文件不得被 journal 驱动的清理删除");
         fs::remove_file(&evil).unwrap();
+    }
+
+    #[test]
+    fn recover_must_not_delete_files_named_by_forged_events() {
+        let vault = TempVault::new();
+        fs::create_dir_all(vault.root.join("notes")).unwrap();
+        let doc = vault.root.join("notes").join("a.md");
+        fs::write(&doc, b"user content").unwrap();
+        // 伪造：temp 直接指向库内真实文档（旧实现会把它当作临时文件删掉）
+        vault.write_journal(&TempVault::line(
+            "tx1",
+            Phase::Prepared,
+            Some("notes/a.md"),
+        ));
+
+        let recovered = recover(&vault.root).unwrap();
+
+        assert_eq!(recovered, 1);
+        assert!(doc.exists(), "恢复流程不得删除任何文件");
+        assert!(vault.journal_bytes().is_empty(), "恢复完毕 journal 应清空");
+    }
+
+    #[test]
+    fn recover_keeps_crashed_write_temp_for_housekeeping() {
+        let vault = TempVault::new();
+        let target = vault.root.join("notes").join("a.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"old content").unwrap();
+
+        // 崩溃现场：临时文件已 fsync、prepared 行已落盘，rename 尚未发生。
+        let temp = atomic::prepare(&target, b"new content").unwrap();
+        let temp_relative = temp.relative_to(&vault.root).unwrap();
+        vault.write_journal(&TempVault::line("tx1", Phase::Prepared, Some(&temp_relative)));
+
+        assert_eq!(recover(&vault.root).unwrap(), 1);
+
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"old content",
+            "未提交的目标必须保持旧内容"
+        );
+        assert!(
+            temp.path.exists(),
+            "临时文件交给 housekeeping 回收，恢复路径不得删除"
+        );
+        assert!(vault.journal_bytes().is_empty());
+    }
+
+    #[test]
+    fn recover_leaves_temp_shaped_forged_paths_untouched() {
+        let vault = TempVault::new();
+        fs::create_dir_all(vault.root.join("notes")).unwrap();
+        // 即使名字完全符合 atomic 生成格式，恢复路径也不认领删除
+        let temp_shaped = vault.root.join("notes").join(".a.md.ember-tmp-1-1");
+        fs::write(&temp_shaped, b"stale temp").unwrap();
+        let mut bytes = TempVault::line(
+            "tx1",
+            Phase::Prepared,
+            Some("notes/.a.md.ember-tmp-1-1"),
+        );
+        bytes.extend(TempVault::line(
+            "tx2",
+            Phase::Committed,
+            Some("../ember-evil-journal.md"),
+        ));
+        vault.write_journal(&bytes);
+
+        let recovered = recover(&vault.root).unwrap();
+
+        assert_eq!(recovered, 2);
+        assert!(temp_shaped.exists(), "临时文件不归恢复路径删除");
+        assert!(vault.journal_bytes().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recover_does_not_delete_through_symlinked_forged_events() {
+        use std::os::unix::fs::symlink;
+
+        let vault = TempVault::new();
+        fs::create_dir_all(vault.root.join("notes")).unwrap();
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let victim = std::env::temp_dir().join(format!(
+            "ember-journal-victim-{}-{seq}.md",
+            std::process::id()
+        ));
+        fs::write(&victim, b"outside").unwrap();
+        let link = vault.root.join("notes").join("link.md");
+        symlink(&victim, &link).unwrap();
+        vault.write_journal(&TempVault::line(
+            "tx1",
+            Phase::Prepared,
+            Some("notes/link.md"),
+        ));
+
+        let recovered = recover(&vault.root).unwrap();
+
+        assert_eq!(recovered, 1);
+        assert!(
+            fs::symlink_metadata(&link).is_ok(),
+            "库内符号链接本身不得被删除"
+        );
+        assert_eq!(fs::read(&victim).unwrap(), b"outside", "库外目标不得被影响");
+        fs::remove_file(&victim).unwrap();
     }
 }
