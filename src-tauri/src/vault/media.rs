@@ -261,6 +261,10 @@ pub fn save(vault: &Vault, bytes: &[u8], mime: &str) -> VaultResult<AssetSaved> 
     let relative = format!("{MEDIA_DIR}/{}/{name}", &hash[..2]);
     let (absolute, normalized) = paths::resolve(vault.root(), &relative)?;
 
+    // 图片不走 journal，但落盘前同样要进写闸并做即时租约校验：
+    // ensure_writable 只反映心跳巡检结果，锁刚被接管时可能仍为 true。
+    // 闸放在去重判断之前，锁失守后连「命中已有图片」也不返回成功。
+    let _gate = vault.begin_write()?;
     if absolute.is_file() {
         return Ok(AssetSaved {
             path: normalized,
@@ -446,6 +450,7 @@ mod tests {
             machine_id: "01JFORGEDMACHINEID000000".to_string(),
             started_at: crate::vault::clock::now_iso8601(),
             heartbeat_at: crate::vault::clock::now_iso8601(),
+            lease_token: 1,
             app: "0.0.0".to_string(),
         };
         atomic::write_atomic(
@@ -460,6 +465,41 @@ mod tests {
         let error = save(&vault, PNG, "image/png").unwrap_err();
         assert!(matches!(error, VaultError::Readonly), "降级后图片落盘应被拒绝：{error}");
         assert!(list(&vault).unwrap().is_empty());
+    }
+
+    #[test]
+    fn save_fences_stale_holder_without_waiting_for_heartbeat() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        let first = save(&vault, PNG, "image/png").unwrap();
+
+        // 伪造外部租约：代次更大、心跳时间不是本实例写下的。
+        let forged = crate::vault::lock::LockPayload {
+            vault_id: vault.id().to_string(),
+            pid: 999_999_999,
+            machine_id: "01JFORGEDMACHINEID000000".to_string(),
+            started_at: crate::vault::clock::now_iso8601(),
+            heartbeat_at: crate::vault::clock::now_iso8601(),
+            lease_token: u64::MAX,
+            app: "0.0.0".to_string(),
+        };
+        atomic::write_atomic(
+            &paths::lock_file(&temp.root),
+            &serde_json::to_vec(&forged).unwrap(),
+        )
+        .unwrap();
+
+        // 不等心跳巡检：图片落盘前同样要过即时租约栅栏。
+        let error = save(&vault, JPEG, "image/jpeg").unwrap_err();
+        assert!(
+            matches!(error, VaultError::Readonly),
+            "租约失守后图片落盘必须立即被拒：{error}"
+        );
+        assert!(!vault.writable(), "栅栏命中后本实例应转只读");
+        let assets = list(&vault).unwrap();
+        assert_eq!(assets.len(), 1, "被拒的图片不得进入图库");
+        assert_eq!(assets[0].path, first.path);
+        assert_eq!(fs::read(temp.root.join(&first.path)).unwrap(), PNG);
     }
 
     #[test]

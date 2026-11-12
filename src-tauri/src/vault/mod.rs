@@ -10,7 +10,7 @@ pub mod watcher;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use crate::error::{VaultError, VaultResult};
@@ -112,10 +112,7 @@ impl Vault {
         self.ensure_writable()?;
         let (absolute, normalized) = paths::resolve(&self.root, relative)?;
         paths::ensure_not_reserved(&normalized)?;
-        let _gate = self
-            .write_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _gate = self.begin_write()?;
         journal::write_with_journal(&self.root, &normalized, &absolute, bytes, intent)
             .map_err(|error| with_path(error, &absolute))
     }
@@ -125,10 +122,7 @@ impl Vault {
         self.ensure_writable()?;
         let (absolute, normalized) = paths::resolve(&self.root, relative)?;
         paths::ensure_not_reserved(&normalized)?;
-        let _gate = self
-            .write_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _gate = self.begin_write()?;
         match fs::remove_file(&absolute) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -142,10 +136,7 @@ impl Vault {
         let (target, to_normalized) = paths::resolve(&self.root, to)?;
         paths::ensure_not_reserved(&from_normalized)?;
         paths::ensure_not_reserved(&to_normalized)?;
-        let _gate = self
-            .write_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _gate = self.begin_write()?;
         if !source.is_file() {
             return Err(VaultError::NotFound(from.to_string()));
         }
@@ -195,6 +186,43 @@ impl Vault {
             return Err(VaultError::Readonly);
         }
         Ok(())
+    }
+
+    /// 进入写入临界区：先拿 write_gate 串行化，再在闸内做即时租约校验。
+    ///
+    /// 所有落盘路径（正文 journal、删除、改名、图片）都必须经由此处，
+    /// 保证「校验租约」与「实际写盘」之间不被其它写操作插入。
+    /// 加锁顺序固定为 write_gate → `_lock`，心跳线程只碰锁文件不碰 write_gate，
+    /// 因此不存在反向嵌套。
+    pub(crate) fn begin_write(&self) -> VaultResult<MutexGuard<'_, ()>> {
+        let gate = self
+            .write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_lease()?;
+        Ok(gate)
+    }
+
+    /// 写闸内的租约栅栏：锁文件必须仍带本实例的 pid、租约代次与心跳时间。
+    ///
+    /// ensure_writable 依赖心跳线程每 5 秒巡检一次，锁刚被接管时存在一个心跳周期
+    /// 的漏洞；本函数在每次实际写盘前即时读锁文件，把该窗口压缩到一次读文件，
+    /// 校验失败立即置 write_health 为 false 并转只读。必须在持有 write_gate 时调用。
+    fn ensure_lease(&self) -> VaultResult<()> {
+        let guard = self
+            ._lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owned = guard
+            .as_ref()
+            .is_some_and(|lock| lock.verify_lease());
+        if owned {
+            return Ok(());
+        }
+        if let Some(health) = self.write_health.as_ref() {
+            health.store(false, Ordering::Relaxed);
+        }
+        Err(VaultError::Readonly)
     }
 }
 
@@ -513,6 +541,7 @@ mod tests {
             machine_id: "01JFORGEDMACHINEID000000".to_string(),
             started_at: clock::now_iso8601(),
             heartbeat_at: clock::now_iso8601(),
+            lease_token: 1,
             app: "0.0.0".to_string(),
         };
         atomic::write_atomic(
@@ -532,6 +561,44 @@ mod tests {
         assert_eq!(
             fs::read(temp.root.join("notes/a.md")).unwrap(),
             b"first"
+        );
+    }
+
+    #[test]
+    fn write_fences_stale_holder_without_waiting_for_heartbeat() {
+        let temp = TempVault::new();
+        temp.vault.write("notes/a.md", b"first", "user").unwrap();
+
+        // 另一实例已按 stale 抢锁：租约代次更大，心跳时间也不是本实例写下的。
+        let forged = lock::LockPayload {
+            vault_id: temp.vault.id().to_string(),
+            pid: 999_999_999,
+            machine_id: "01JFORGEDMACHINEID000000".to_string(),
+            started_at: clock::now_iso8601(),
+            heartbeat_at: clock::now_iso8601(),
+            lease_token: u64::MAX,
+            app: "0.0.0".to_string(),
+        };
+        atomic::write_atomic(
+            &paths::lock_file(&temp.root),
+            &serde_json::to_vec(&forged).unwrap(),
+        )
+        .unwrap();
+
+        // 不等心跳巡检：写闸内的租约栅栏必须当场拒绝，而不是靠 5 秒心跳。
+        let error = temp
+            .vault
+            .write("notes/a.md", b"second", "user")
+            .unwrap_err();
+        assert!(
+            matches!(error, VaultError::Readonly),
+            "租约被接管后写入必须立即被拒：{error}"
+        );
+        assert!(!temp.vault.writable(), "栅栏命中后本实例应转只读");
+        assert_eq!(
+            fs::read(temp.root.join("notes/a.md")).unwrap(),
+            b"first",
+            "被拒的写入不得落盘"
         );
     }
 
