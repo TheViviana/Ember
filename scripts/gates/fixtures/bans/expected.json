@@ -3,6 +3,7 @@
   "rows": [
     { "rule": "explicit-any", "file": "src/sample.ts" },
     { "rule": "ts-suppress", "file": "src/sample.ts" },
-    { "rule": "rust-suppress", "file": "src/sample.rs" }
+    { "rule": "rust-suppress", "file": "src/sample.rs" },
+    { "rule": "gate-unclassified", "file": "src/sample.ts" }
   ]
 }

@@ -9,6 +9,7 @@ import {
   readViolations,
   structureViolations,
   toPosix,
+  unclassifiedViolations,
 } from './lib.mjs';
 
 const SCAN_EXT = new Set(['.ts', '.tsx', '.mjs', '.js', '.rs']);
@@ -53,6 +54,7 @@ export function scanBans(root) {
   const problems = [];
   const modules = listModules(root, problems);
   const violations = structureViolations(root, modules, problems);
+  violations.push(...unclassifiedViolations(root, modules));
   let scanned = 0;
 
   for (const file of walk(root, [], problems).sort()) {

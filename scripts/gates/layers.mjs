@@ -3,29 +3,38 @@ import { pathToFileURL } from 'node:url';
 import {
   DEFAULT_ROOT,
   GATE_FLOORS,
+  aliasViolations,
   checkEdge,
   checkExternal,
   classify,
   extractImports,
   floorViolations,
   listModules,
+  loadAliasConfig,
   readSource,
   readViolations,
-  resolveRelative,
+  resolveSpecifier,
   structureViolations,
   toPosix,
+  unclassifiedViolations,
 } from './lib.mjs';
 
 /**
  * 跨层边界检查。
  * 挡的是：包层依赖 UI/运行时、能力绕过内核直连 Tauri 或文件系统、
- * 能力之间互相 import、内核反向依赖外壳。
- * 同时校验扫描充分性：空目录/路径给错/被清空时，0 违规不再等于通过。
+ * 能力之间互相 import、内核反向依赖外壳、未登记目录。
+ * 相对说明符与 `#` 别名统一经 resolveSpecifier 解析；别名解析成功后不再走外部依赖规则。
  */
 export function checkLayers(root) {
   const problems = [];
   const files = listModules(root, problems);
-  const violations = structureViolations(root, files, problems);
+  const moduleSet = new Set(files);
+  const aliases = loadAliasConfig(root);
+  const violations = [
+    ...aliases.violations,
+    ...structureViolations(root, files, problems),
+    ...unclassifiedViolations(root, files),
+  ];
 
   const layerCounts = new Map();
   let classified = 0;
@@ -45,20 +54,35 @@ export function checkLayers(root) {
       continue;
     }
     for (const { spec, line, typeOnly } of extractImports(source)) {
-      const target = resolveRelative(file, spec);
-      if (target !== null) {
+      const resolved = resolveSpecifier(file, spec, aliases);
+      if (resolved.kind === 'external') {
+        const external = checkExternal(from, spec);
+        if (external !== null) {
+          violations.push({ file: toPosix(relative(root, file)), line, ...external });
+        }
+        continue;
+      }
+      if (resolved.kind === 'alias') {
+        const bad = aliasViolations(root, file, line, spec, resolved, moduleSet);
+        if (bad.length > 0) {
+          violations.push(...bad);
+          continue;
+        }
         if (!typeOnly) edges += 1;
-        const to = classify(root, target);
-        if (to === null) continue;
+        const to = classify(root, resolved.target);
         const edge = checkEdge(from, to, spec);
         if (edge !== null) {
           violations.push({ file: toPosix(relative(root, file)), line, ...edge });
         }
         continue;
       }
-      const external = checkExternal(from, spec);
-      if (external !== null) {
-        violations.push({ file: toPosix(relative(root, file)), line, ...external });
+      if (resolved.target === null) continue;
+      if (!typeOnly) edges += 1;
+      const to = classify(root, resolved.target);
+      if (to === null) continue;
+      const edge = checkEdge(from, to, spec);
+      if (edge !== null) {
+        violations.push({ file: toPosix(relative(root, file)), line, ...edge });
       }
     }
   }
@@ -68,7 +92,7 @@ export function checkLayers(root) {
     ...floorViolations([
       { metric: '模块数', actual: files.length, expected: GATE_FLOORS.modules },
       { metric: '已分类模块数', actual: classified, expected: GATE_FLOORS.classified },
-      { metric: '运行期相对 import 边', actual: edges, expected: GATE_FLOORS.edges },
+      { metric: '运行期 import 边', actual: edges, expected: GATE_FLOORS.edges },
       ...Object.entries(GATE_FLOORS)
         .filter(([key]) => key.startsWith('layer:'))
         .map(([key, expected]) => {

@@ -3,24 +3,27 @@ import { pathToFileURL } from 'node:url';
 import {
   DEFAULT_ROOT,
   GATE_FLOORS,
+  aliasViolations,
   extractImports,
   floorViolations,
   listModules,
+  loadAliasConfig,
   readSource,
   readViolations,
-  resolveRelative,
+  resolveSpecifier,
   structureViolations,
   toPosix,
+  unclassifiedViolations,
 } from './lib.mjs';
 
 /**
- * 构建模块依赖图：仅保留仓库内的相对依赖；纯类型边编译后消失，不计入运行期环。
- * 读取失败写入 problems，最终报 gate-read 而不是抛栈。
+ * 构建模块依赖图：仅保留仓库内的依赖；纯类型边编译后消失，不计入运行期环。
+ * 相对说明符与 `#` 别名统一经 resolveSpecifier 解析；别名无法解析时报 gate-alias-unresolved。
  */
-function buildGraph(root, problems) {
+function buildGraph(root, files, moduleSet, aliases, problems, violations) {
   const graph = new Map();
   let edges = 0;
-  for (const file of listModules(root, problems)) {
+  for (const file of files) {
     const deps = [];
     let source;
     try {
@@ -30,31 +33,43 @@ function buildGraph(root, problems) {
       graph.set(file, deps);
       continue;
     }
-    for (const { spec, typeOnly } of extractImports(source)) {
+    for (const { spec, line, typeOnly } of extractImports(source)) {
       if (typeOnly) continue;
-      const target = resolveRelative(file, spec);
-      if (target !== null) {
-        deps.push(target);
-        edges += 1;
+      const resolved = resolveSpecifier(file, spec, aliases);
+      if (resolved.kind === 'external') continue;
+      if (resolved.kind === 'alias') {
+        const bad = aliasViolations(root, file, line, spec, resolved, moduleSet);
+        if (bad.length > 0) {
+          violations.push(...bad);
+          continue;
+        }
       }
+      if (resolved.target === null) continue;
+      deps.push(resolved.target);
+      edges += 1;
     }
     graph.set(file, deps);
   }
   return { graph, edges };
 }
 
-/** DFS 找环，返回去重后的环（文件路径序列，首尾相同）；同时校验扫描充分性 */
+/** DFS 找环；同时校验扫描充分性与别名解析 */
 export function findCycles(root) {
   const problems = [];
-  const { graph, edges } = buildGraph(root, problems);
+  const files = listModules(root, problems);
+  const moduleSet = new Set(files);
+  const aliases = loadAliasConfig(root);
   const violations = [
-    ...structureViolations(root, [...graph.keys()], problems),
-    ...readViolations(root, problems),
+    ...aliases.violations,
+    ...structureViolations(root, files, problems),
+    ...unclassifiedViolations(root, files),
   ];
+  const { graph, edges } = buildGraph(root, files, moduleSet, aliases, problems, violations);
+  violations.push(...readViolations(root, problems));
   violations.push(
     ...floorViolations([
       { metric: '模块数', actual: graph.size, expected: GATE_FLOORS.modules },
-      { metric: '运行期相对 import 边', actual: edges, expected: GATE_FLOORS.edges },
+      { metric: '运行期 import 边', actual: edges, expected: GATE_FLOORS.edges },
     ]),
   );
 

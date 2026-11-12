@@ -8,6 +8,7 @@ import { checkCsp } from './csp.mjs';
 import { scanBans } from './bans.mjs';
 import { findCycles } from './cycles.mjs';
 import { checkLayers } from './layers.mjs';
+import { LAYER_RULES, MODULE_EXEMPTIONS, MODULE_LAYOUT } from './lib.mjs';
 import { stripRustComments } from './offline.mjs';
 import { checkSize, SIZE_LIMIT } from './size.mjs';
 
@@ -74,7 +75,25 @@ const buildCompliantTree = (dir) => {
   }
   write('src/capabilities/index.ts', 'export const assembly = true;\n');
   for (let i = 0; i < 41; i += 1) write(`src-tauri/stub${i}.rs`, '\n');
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ name: 'gate-fixture', type: 'module', imports: {} }, null, 2),
+  );
+  writeFileSync(
+    join(dir, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { baseUrl: '.', paths: {} } }, null, 2),
+  );
   return modules;
+};
+
+/** 写别名配置：imports 为权威，paths 由同一份映射生成，保证不触发 gate-alias-drift */
+const writeAliasConfig = (dir, imports) => {
+  const paths = Object.fromEntries(Object.entries(imports).map(([key, value]) => [key, [value]]));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'gate-fixture', imports }, null, 2));
+  writeFileSync(
+    join(dir, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { baseUrl: '.', paths } }, null, 2),
+  );
 };
 
 for (const [name, script] of Object.entries(SCRIPTS)) {
@@ -515,7 +534,132 @@ if (realSize.length === 0) {
   buildTree(extended);
   mkdirSync(join(extended, 'packages', 'new-pkg', 'src'), { recursive: true });
   writeFileSync(join(extended, 'packages', 'new-pkg', 'src', 'a.ts'), 'export const a = 1;\n');
-  expectPass('新增 packages 子包仍通过', extended);
+  expectRule('新增未登记 packages 子包必须失败', extended, 'gate-unclassified');
+
+  // —— 别名解析与 fail-closed 分层 ——
+  const aliasCycle = makeRoot();
+  buildTree(aliasCycle);
+  writeAliasConfig(aliasCycle, { '#dm': './packages/doc-model/src/index.ts' });
+  writeFileSync(
+    join(aliasCycle, 'src', 'shell', 'a.ts'),
+    "import { dm } from '#dm';\nexport const a = dm;\n",
+  );
+  writeFileSync(
+    join(aliasCycle, 'packages', 'doc-model', 'src', 'index.ts'),
+    "import { a } from '../../../src/shell/a.ts';\nexport const dm = a;\n",
+  );
+  expectRule('别名表达的环必须被报出', aliasCycle, 'cycle', ['cycles']);
+
+  const relativeCycle = makeRoot();
+  buildTree(relativeCycle);
+  writeFileSync(
+    join(relativeCycle, 'src', 'shell', 'a.ts'),
+    "import { dm } from '../../packages/doc-model/src/index.ts';\nexport const a = dm;\n",
+  );
+  writeFileSync(
+    join(relativeCycle, 'packages', 'doc-model', 'src', 'index.ts'),
+    "import { a } from '../../../src/shell/a.ts';\nexport const dm = a;\n",
+  );
+  expectRule('同一环改成相对写法仍被报出', relativeCycle, 'cycle', ['cycles']);
+
+  const typeOnlyAlias = makeRoot();
+  buildTree(typeOnlyAlias);
+  writeAliasConfig(typeOnlyAlias, { '#dm': './packages/doc-model/src/index.ts' });
+  writeFileSync(
+    join(typeOnlyAlias, 'src', 'shell', 'a.ts'),
+    "import { dm } from '#dm';\nexport const a = dm;\n",
+  );
+  writeFileSync(
+    join(typeOnlyAlias, 'packages', 'doc-model', 'src', 'index.ts'),
+    "import type { a } from '../../../src/shell/a.ts';\nexport const dm = a;\n",
+  );
+  const typeCycles = findCycles(typeOnlyAlias);
+  if (typeCycles.length === 0) {
+    process.stdout.write('✓ selftest:gate 纯类型别名回边不计入环\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:gate 纯类型别名回边不计入环：${JSON.stringify(typeCycles)}\n`);
+  }
+
+  const aliasCrossLayer = makeRoot();
+  buildTree(aliasCrossLayer);
+  writeAliasConfig(aliasCrossLayer, { '#sh': './src/shell/m0.ts' });
+  writeFileSync(
+    join(aliasCrossLayer, 'src', 'kernel', 'm0.ts'),
+    "import { v0 as shellV0 } from '#sh';\nexport const k0 = shellV0;\n",
+  );
+  expectRule('kernel 经别名引用 shell 必须被拦下', aliasCrossLayer, 'forbidden-internal', ['layers']);
+
+  const pkgReverse = makeRoot();
+  buildTree(pkgReverse);
+  writeAliasConfig(pkgReverse, { '#sh': './src/shell/m0.ts' });
+  writeFileSync(
+    join(pkgReverse, 'packages', 'doc-model', 'src', 'index.ts'),
+    "import { v0 } from '#sh';\nexport const dm = v0;\n",
+  );
+  expectRule('包层反向依赖 shell 必须失败', pkgReverse, 'forbidden-internal', ['layers']);
+
+  const unknownDir = makeRoot();
+  buildTree(unknownDir);
+  mkdirSync(join(unknownDir, 'src', 'styles'), { recursive: true });
+  writeFileSync(join(unknownDir, 'src', 'styles', 'x.ts'), 'export const x = 1;\n');
+  expectRule('新增未登记 src 目录必须失败', unknownDir, 'gate-unclassified');
+
+  const badAlias = makeRoot();
+  buildTree(badAlias);
+  writeFileSync(
+    join(badAlias, 'src', 'shell', 'bad.ts'),
+    "import { x } from '#nope';\nexport const b = x;\n",
+  );
+  expectRule('未知别名必须失败', badAlias, 'gate-alias-unresolved', ['cycles', 'layers']);
+
+  const drift = makeRoot();
+  buildTree(drift);
+  writeAliasConfig(drift, { '#dm': './packages/doc-model/src/index.ts' });
+  writeFileSync(
+    join(drift, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { baseUrl: '.', paths: {} } }, null, 2),
+  );
+  expectRule('imports 与 tsconfig paths 不一致必须失败', drift, 'gate-alias-drift', [
+    'cycles',
+    'layers',
+  ]);
+
+  const legalAlias = makeRoot();
+  buildTree(legalAlias);
+  writeAliasConfig(legalAlias, { '#dm': './packages/doc-model/src/index.ts' });
+  writeFileSync(join(legalAlias, 'packages', 'doc-model', 'src', 'index.ts'), 'export const v0 = 0;\n');
+  for (const rel of ['src/shell/m1.ts', 'src/kernel/m1.ts', 'src/data/m1.ts', 'src/capabilities/core/m1.ts']) {
+    writeFileSync(join(legalAlias, rel), "import { v0 } from '#dm';\nexport const x = v0;\n");
+  }
+  expectPass('合法别名方向通过', legalAlias);
+
+  const wildcardAlias = makeRoot();
+  buildTree(wildcardAlias);
+  writeAliasConfig(wildcardAlias, { '#dm/*': './packages/doc-model/src/*.ts' });
+  writeFileSync(
+    join(wildcardAlias, 'src', 'shell', 'm1.ts'),
+    "import { v0 } from '#dm/m1';\nexport const x = v0;\n",
+  );
+  expectPass('通配别名可解析且方向合法通过', wildcardAlias);
+}
+
+{
+  const badExemptions = MODULE_EXEMPTIONS.filter(
+    (entry) =>
+      !entry.file.endsWith('.d.ts') ||
+      typeof entry.reason !== 'string' ||
+      entry.reason.trim().length === 0,
+  );
+  const missingRules = MODULE_LAYOUT.filter((entry) => LAYER_RULES[entry.layer] === undefined);
+  if (badExemptions.length === 0 && missingRules.length === 0) {
+    process.stdout.write('✓ selftest:gate 登记表仅豁免 .d.ts 且层规则齐全\n');
+  } else {
+    failures += 1;
+    process.stdout.write(
+      `✗ selftest:gate 登记表校验失败：豁免 ${JSON.stringify(badExemptions)}，缺规则 ${JSON.stringify(missingRules)}\n`,
+    );
+  }
 }
 
 for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });

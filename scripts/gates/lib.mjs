@@ -33,6 +33,26 @@ export const REQUIRED_DIRS = Object.freeze([
   'packages/canvas-engine',
 ]);
 
+/**
+ * 模块目录登记表（有序，支持目录前缀与精确文件）。
+ * 未登记目录一律 `gate-unclassified`：新增 src 子目录或 packages 子包必须先登记。
+ * tests/ 不参与模块扫描（listModules 只走 src 与 packages），因此这里也不登记。
+ */
+export const MODULE_LAYOUT = Object.freeze([
+  { prefix: 'packages/doc-model/', layer: 'pkg:doc-model' },
+  { prefix: 'packages/canvas-engine/', layer: 'pkg:canvas-engine' },
+  { exact: 'src/capabilities/index.ts', layer: 'assembly' },
+  { prefix: 'src/capabilities/', layer: 'capabilities', capabilityFromSegment: true },
+  { prefix: 'src/kernel/', layer: 'kernel' },
+  { prefix: 'src/data/', layer: 'data' },
+  { prefix: 'src/shell/', layer: 'shell' },
+]);
+
+/** 精确文件豁免：只接受 *.d.ts（无运行期依赖的声明文件），且必须写清 reason */
+export const MODULE_EXEMPTIONS = Object.freeze([
+  { file: 'src/vite-env.d.ts', reason: 'Vite 客户端类型声明，无 import/export' },
+]);
+
 const CODE_EXT = new Set(['.ts', '.tsx']);
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'target', 'gen', '.git']);
 
@@ -186,10 +206,7 @@ export function extractImports(source) {
   return found;
 }
 
-/** 仅解析相对说明符，返回绝对文件路径 */
-export function resolveRelative(fromFile, spec) {
-  if (!spec.startsWith('.')) return null;
-  const base = resolve(dirname(fromFile), spec);
+const probeModule = (base) => {
   const candidates = [base, `${base}.ts`, `${base}.tsx`, join(base, 'index.ts'), join(base, 'index.tsx')];
   for (const candidate of candidates) {
     try {
@@ -199,28 +216,204 @@ export function resolveRelative(fromFile, spec) {
     }
   }
   return null;
+};
+
+/** 仅解析相对说明符，返回绝对文件路径 */
+export function resolveRelative(fromFile, spec) {
+  if (!spec.startsWith('.')) return null;
+  return probeModule(resolve(dirname(fromFile), spec));
+}
+
+const readJsonFile = (file) => {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * 加载别名映射：package.json#imports 为权威（运行期真实解析），
+ * tsconfig.json#paths 仅做一致性校验，不一致报 gate-alias-drift。
+ * 支持精确键与 `#foo/*` 最长前缀通配；目标统一解析为绝对路径。
+ */
+export function loadAliasConfig(root) {
+  const base = resolve(root);
+  const pkg = readJsonFile(join(base, 'package.json'));
+  const tsconfig = readJsonFile(join(base, 'tsconfig.json'));
+  const imports =
+    typeof pkg?.imports === 'object' && pkg.imports !== null ? pkg.imports : {};
+  const compilerOptions =
+    typeof tsconfig?.compilerOptions === 'object' && tsconfig.compilerOptions !== null
+      ? tsconfig.compilerOptions
+      : {};
+  const paths =
+    typeof compilerOptions.paths === 'object' && compilerOptions.paths !== null
+      ? compilerOptions.paths
+      : {};
+  const baseUrl = typeof compilerOptions.baseUrl === 'string' ? compilerOptions.baseUrl : '.';
+
+  const entries = [];
+  for (const [key, value] of Object.entries(imports)) {
+    if (typeof value !== 'string') continue;
+    entries.push({ key, target: resolve(base, value) });
+  }
+
+  const pathEntries = new Map();
+  for (const [key, values] of Object.entries(paths)) {
+    if (!Array.isArray(values)) continue;
+    pathEntries.set(
+      key,
+      values
+        .filter((value) => typeof value === 'string')
+        .map((value) => resolve(base, baseUrl, value)),
+    );
+  }
+
+  const violations = [];
+  const keys = [...new Set([...entries.map((entry) => entry.key), ...pathEntries.keys()])].sort();
+  for (const key of keys) {
+    const imported = entries.find((entry) => entry.key === key);
+    const tsTargets = pathEntries.get(key) ?? [];
+    if (imported === undefined) {
+      violations.push(
+        gateViolation(
+          '.',
+          'gate-alias-drift',
+          `${key}：期望在 package.json#imports 登记，实际只在 tsconfig paths 中出现`,
+        ),
+      );
+      continue;
+    }
+    if (tsTargets.length === 0) {
+      violations.push(
+        gateViolation(
+          '.',
+          'gate-alias-drift',
+          `${key}：期望在 tsconfig paths 登记，实际缺失（package.json 指向 ${toPosix(relative(base, imported.target))}）`,
+        ),
+      );
+      continue;
+    }
+    if (tsTargets[0] !== imported.target) {
+      violations.push(
+        gateViolation(
+          '.',
+          'gate-alias-drift',
+          `${key}：package.json 目标 ${toPosix(relative(base, imported.target))}，tsconfig 目标 ${toPosix(relative(base, tsTargets[0]))}`,
+        ),
+      );
+    }
+  }
+
+  const resolveAlias = (spec) => {
+    const exact = entries.find((entry) => entry.key === spec);
+    if (exact !== undefined) return exact.target;
+    let best = null;
+    for (const entry of entries) {
+      const star = entry.key.indexOf('*');
+      if (star < 0) continue;
+      const prefix = entry.key.slice(0, star);
+      const suffix = entry.key.slice(star + 1);
+      if (!spec.startsWith(prefix) || !spec.endsWith(suffix)) continue;
+      if (spec.length < prefix.length + suffix.length) continue;
+      if (best === null || prefix.length > best.prefix.length) {
+        best = { prefix, suffix, target: entry.target };
+      }
+    }
+    if (best === null) return null;
+    const middle = spec.slice(best.prefix.length, spec.length - best.suffix.length);
+    return best.target.replace('*', middle);
+  };
+
+  return { resolve: resolveAlias, violations };
 }
 
 /**
- * 分层判定。
- * 返回 { layer, capability } 或 null（不参与边界的文件）。
+ * 统一说明符解析：relative 保持原逻辑，alias 走 imports 映射，其它视为 external。
+ * 目标统一为绝对路径；解析失败时 target 为 null 并给出 reason。
+ */
+export function resolveSpecifier(fromFile, spec, aliases) {
+  if (spec.startsWith('#')) {
+    const mapped = aliases.resolve(spec);
+    if (mapped === null) return { kind: 'alias', target: null, reason: '无映射' };
+    const target = probeModule(mapped);
+    return { kind: 'alias', target, reason: target === null ? '目标文件不存在' : null };
+  }
+  if (spec.startsWith('.')) {
+    return { kind: 'relative', target: resolveRelative(fromFile, spec), reason: null };
+  }
+  return { kind: 'external', target: null, reason: null };
+}
+
+/** 校验别名目标：必须位于仓库内、在模块清单中且已登记分层；否则报 gate-alias-unresolved */
+export function aliasViolations(root, file, line, spec, resolved, moduleSet) {
+  const fail = (detail) => [
+    {
+      file: toPosix(relative(resolve(root), file)),
+      line,
+      rule: 'gate-alias-unresolved',
+      detail: `${spec}：${detail}`,
+    },
+  ];
+  if (resolved.target === null) {
+    return fail(`期望解析到仓库内模块，实际${resolved.reason ?? '无法解析'}`);
+  }
+  const targetRel = toPosix(relative(resolve(root), resolved.target));
+  if (targetRel.startsWith('..') || targetRel.split('/').includes('node_modules')) {
+    return fail(`期望仓库内模块，实际指向 ${targetRel}`);
+  }
+  if (!moduleSet.has(resolved.target)) {
+    return fail(`期望目标是受扫描的 .ts/.tsx 模块，实际 ${targetRel} 不在模块清单`);
+  }
+  if (classify(root, resolved.target) === null) {
+    return fail(`期望目标是已登记分层的模块，实际 ${targetRel} 未登记`);
+  }
+  return [];
+}
+
+/**
+ * 分层判定（按 MODULE_LAYOUT 登记表）。
+ * 返回 { layer, capability } 或 null（未登记且不在豁免表中的文件）。
  */
 export function classify(root, absolutePath) {
   const rel = toPosix(relative(root, absolutePath));
-  if (rel.startsWith('packages/doc-model/')) return { layer: 'pkg:doc-model', capability: null };
-  if (rel.startsWith('packages/canvas-engine/')) return { layer: 'pkg:canvas-engine', capability: null };
-  if (rel === 'src/capabilities/index.ts') return { layer: 'assembly', capability: null };
-  if (rel.startsWith('src/capabilities/core/')) return { layer: 'capabilities', capability: 'core' };
-  if (rel.startsWith('src/capabilities/')) {
-    const segment = rel.slice('src/capabilities/'.length).split('/')[0];
-    return { layer: 'capabilities', capability: segment ?? null };
+  for (const entry of MODULE_LAYOUT) {
+    if (entry.exact !== undefined) {
+      if (rel === entry.exact) return { layer: entry.layer, capability: null };
+      continue;
+    }
+    if (!rel.startsWith(entry.prefix)) continue;
+    if (entry.capabilityFromSegment === true) {
+      const segment = rel.slice(entry.prefix.length).split('/')[0];
+      return { layer: entry.layer, capability: segment ?? null };
+    }
+    return { layer: entry.layer, capability: null };
   }
-  if (rel.startsWith('src/kernel/')) return { layer: 'kernel', capability: null };
-  if (rel.startsWith('src/data/')) return { layer: 'data', capability: null };
-  if (rel.startsWith('src/shell/')) return { layer: 'shell', capability: null };
-  if (rel.startsWith('tests/')) return { layer: 'tests', capability: null };
   return null;
 }
+
+const LAYOUT_HINT = MODULE_LAYOUT.filter((entry) => entry.prefix !== undefined)
+  .map((entry) => entry.prefix.replace(/\/$/, ''))
+  .join('|');
+
+const isExempt = (rel) => MODULE_EXEMPTIONS.some((entry) => entry.file === rel);
+
+/** 未登记目录 → gate-unclassified（三 gate 共用；豁免文件不报） */
+export const unclassifiedViolations = (root, modules) =>
+  modules
+    .filter((file) => {
+      const rel = toPosix(relative(root, file));
+      return !isExempt(rel) && classify(root, file) === null;
+    })
+    .map((file) => {
+      const rel = toPosix(relative(root, file));
+      return gateViolation(
+        rel,
+        'gate-unclassified',
+        `${rel}：期望位于已登记目录（${LAYOUT_HINT}），实际未登记`,
+      );
+    });
 
 const NODE_BUILTIN = /^(?:node:|fs$|path$|fs\/promises$|os$|crypto$|url$|child_process$)/;
 const TAURI = /^@tauri-apps\//;
@@ -230,11 +423,11 @@ const STATE_LIBS = /^(?:zustand|@tanstack\/)/;
 /** 各层的外部依赖禁令与内部层禁令 */
 export const LAYER_RULES = {
   'pkg:doc-model': {
-    denyLayers: [],
+    denyLayers: ['shell', 'data', 'kernel', 'capabilities', 'assembly', 'tests'],
     denyExternal: [REACT, TAURI, NODE_BUILTIN, STATE_LIBS, /^@codemirror\//],
   },
   'pkg:canvas-engine': {
-    denyLayers: [],
+    denyLayers: ['shell', 'data', 'kernel', 'capabilities', 'assembly', 'tests'],
     denyExternal: [REACT, TAURI, NODE_BUILTIN, STATE_LIBS, /^@codemirror\//],
   },
   kernel: {
@@ -254,7 +447,6 @@ export const LAYER_RULES = {
     denyExternal: [],
   },
   shell: { denyLayers: [], denyExternal: [] },
-  tests: { denyLayers: [], denyExternal: [] },
 };
 
 /**

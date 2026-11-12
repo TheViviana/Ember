@@ -1,4 +1,9 @@
 {
   "gate": "cycles",
-  "rows": [{ "rule": "cycle", "file": "src/a.ts" }]
+  "rows": [
+    { "rule": "cycle", "file": "src/a.ts" },
+    { "rule": "gate-unclassified", "file": "src/a.ts" },
+    { "rule": "gate-unclassified", "file": "src/b.ts" },
+    { "rule": "gate-unclassified", "file": "src/c.ts" }
+  ]
 }
