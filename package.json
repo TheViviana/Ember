@@ -29,7 +29,8 @@
     "check:offline": "node scripts/gates/offline.mjs",
     "check:runtime": "node scripts/gates/runtime-network.mjs",
     "check:network": "pnpm run build && pnpm run check:offline && pnpm run check:runtime",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run gate && pnpm run check:network && pnpm run test"
+    "check:gates": "pnpm run gate && pnpm run gate:selftest",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run check:gates && pnpm run test && pnpm run check:network"
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.4",

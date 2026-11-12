@@ -11,9 +11,12 @@ pnpm install      # 安装依赖
 pnpm dev          # 启动 Web 前端（Vite）
 pnpm tauri dev    # 启动桌面端
 pnpm check        # 提交前完整检查
+pnpm check:gates  # 只跑架构门禁与门禁自检
 ```
 
-`pnpm check` 依次执行：TypeScript 类型检查 → ESLint → 架构门禁（循环依赖、分层、禁用项、shell 层体积、CSP）→ 构建 + 离线/运行期零外域检查 → Node 测试。Rust 侧单独运行 `cargo test --offline` 与 `cargo clippy --offline --all-targets -- -D warnings`（工作目录 `src-tauri/`）。
+`pnpm check` 依次执行：TypeScript 类型检查 → ESLint → 架构门禁（循环依赖、分层、禁用项、shell 层体积、CSP）与门禁自检 → Node 测试 → 构建 + 离线/运行期零外域检查。Rust 侧单独运行 `cargo test --offline` 与 `cargo clippy --offline --all-targets -- -D warnings`（工作目录 `src-tauri/`）。
+
+仓库当前未配置 CI：没有远端仓库，且 `check:runtime` 依赖本机 Chromium 与图形环境，无法在通用 CI 上稳定运行。
 
 ## 规范源
 
