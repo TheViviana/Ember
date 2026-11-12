@@ -29,8 +29,8 @@
 |---|---|---|---|
 | **I1** | 所有磁盘写入必须经 `doc-service`。能力、UI 不得直接调用 `invoke`、`fs`、`fetch` 写文件。 | 绕过 journal / 冲突检测 / 索引刷新 | `gate:layers`（capabilities 禁止 `@tauri-apps`、`node:*`）+ code review |
 | **I2** | 每次写入必须携带 `WriteOptions.base`（`rev` + `hash`）；不匹配即走三方合并，**不存在 force 分支**。 | 静默覆盖用户内容 | 类型系统（`base` 必填）+ review |
-| **I3** | 索引是派生数据：只有 `index-service` 写索引；删除 sqlite 后必须能重建出等价状态。 | 索引变成第二真相源 | 索引 schema 无私有时刻状态；重建测试 |
-| **I4** | 文档身份 = frontmatter `id`；重命名不改变 `id`，不改变任何链接边。 | 引用断裂 | 索引存储 `target_id` 而非路径 |
+| **I3** | 索引是派生数据：只有 `index-service` 写索引；删除 sqlite 后必须能重建出等价状态。**v1 未实现**：没有任何索引写入方，生产注入占位端口，`index-service` 除 `watch` 外全部抛 `index_unavailable`。 | 索引变成第二真相源 | **待索引接入后生效**：v1 不存在索引，也没有重建测试；本行当前无检测手段 |
+| **I4** | 文档身份 = frontmatter `id`；重命名不改变 `id`，不改变任何链接边。 | 引用断裂 | `doc-service.rename` 不改 `id`（D3）；「索引存储 `target_id` 而非路径」的部分待索引接入后生效——v1 无索引边可检 |
 | **I5** | 所有用户意图（斜杠、菜单、快捷键、能力动作）必须注册为 `Command` 并经 `command-bus` 执行。 | 行为不可发现、不可撤销、不可测试 | `CommandBus.list()` 是 UI 唯一行为来源 |
 | **I6** | `KernelContext` 对内置能力与外部能力完全一致，无隐藏字段。 | 生态与内核分叉 | 契约测试：内置能力只 import 契约类型 |
 | **I7** | 能力持有的资源必须包成 `Disposable`，停用后不得残留监听/定时器。 | 内存泄漏、重复执行 | 停用后 `watch` 计数归零 |
