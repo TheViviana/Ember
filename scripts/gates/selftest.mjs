@@ -96,6 +96,15 @@ const writeAliasConfig = (dir, imports) => {
   );
 };
 
+/** 写多候选 paths：用于验证 drift 只比较“首个存在的候选” */
+const writePathsConfig = (dir, imports, paths) => {
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'gate-fixture', imports }, null, 2));
+  writeFileSync(
+    join(dir, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { baseUrl: '.', paths } }, null, 2),
+  );
+};
+
 for (const [name, script] of Object.entries(SCRIPTS)) {
   const fixtureRoot = join(here, 'fixtures', name);
   const expected = JSON.parse(readFileSync(join(fixtureRoot, 'expected.json'), 'utf8'));
@@ -642,6 +651,55 @@ if (realSize.length === 0) {
     "import { v0 } from '#dm/m1';\nexport const x = v0;\n",
   );
   expectPass('通配别名可解析且方向合法通过', wildcardAlias);
+
+  // —— 配置损坏必须单独报错，不再退化成 drift/unresolved ——
+  const brokenPkg = makeRoot();
+  buildTree(brokenPkg);
+  writeFileSync(join(brokenPkg, 'package.json'), '{"imports": {');
+  expectRule('package.json 损坏必须失败', brokenPkg, 'gate-alias-config', ['cycles', 'layers']);
+
+  const noTsconfig = makeRoot();
+  buildTree(noTsconfig);
+  rmSync(join(noTsconfig, 'tsconfig.json'));
+  expectRule('tsconfig.json 缺失必须失败', noTsconfig, 'gate-alias-config', ['cycles', 'layers']);
+
+  const noPkg = makeRoot();
+  buildTree(noPkg);
+  rmSync(join(noPkg, 'package.json'));
+  expectRule('package.json 缺失必须失败', noPkg, 'gate-alias-config', ['cycles', 'layers']);
+
+  // —— drift 只比较“首个存在的候选” ——
+  const driftSecond = makeRoot();
+  buildTree(driftSecond);
+  writePathsConfig(
+    driftSecond,
+    { '#dm': './packages/doc-model/src/index.ts' },
+    { '#dm': ['./packages/doc-model/src/missing.ts', './packages/doc-model/src/index.ts'] },
+  );
+  writeFileSync(join(driftSecond, 'packages', 'doc-model', 'src', 'index.ts'), 'export const v0 = 0;\n');
+  expectPass('首候选不存在、次候选一致不报 drift', driftSecond);
+
+  const driftExisting = makeRoot();
+  buildTree(driftExisting);
+  writePathsConfig(
+    driftExisting,
+    { '#dm': './packages/doc-model/src/index.ts' },
+    { '#dm': ['./packages/doc-model/src/other.ts', './packages/doc-model/src/index.ts'] },
+  );
+  writeFileSync(join(driftExisting, 'packages', 'doc-model', 'src', 'index.ts'), 'export const v0 = 0;\n');
+  writeFileSync(join(driftExisting, 'packages', 'doc-model', 'src', 'other.ts'), 'export const other = 1;\n');
+  expectRule('首候选存在且不同仍然 drift', driftExisting, 'gate-alias-drift', ['cycles', 'layers']);
+
+  const driftExtra = makeRoot();
+  buildTree(driftExtra);
+  writePathsConfig(
+    driftExtra,
+    { '#dm': './packages/doc-model/src/index.ts' },
+    { '#dm': ['./packages/doc-model/src/index.ts', './packages/doc-model/src/other.ts'] },
+  );
+  writeFileSync(join(driftExtra, 'packages', 'doc-model', 'src', 'index.ts'), 'export const v0 = 0;\n');
+  writeFileSync(join(driftExtra, 'packages', 'doc-model', 'src', 'other.ts'), 'export const other = 1;\n');
+  expectPass('首候选正确时不因多余候选报 drift', driftExtra);
 }
 
 {

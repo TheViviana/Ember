@@ -224,11 +224,26 @@ export function resolveRelative(fromFile, spec) {
   return probeModule(resolve(dirname(fromFile), spec));
 }
 
+/**
+ * 读取并解析 JSON 配置，返回 { value, problem }。
+ * problem 为 null 表示成功；否则给出可直接拼进 detail 的原因。
+ * 失败时 value 为 null，调用方降级为空映射并上报 gate-alias-config。
+ */
 const readJsonFile = (file) => {
+  let text;
   try {
-    return JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    return null;
+    text = readFileSync(file, 'utf8');
+  } catch (error) {
+    const code = error.code ?? error.message;
+    return {
+      value: null,
+      problem: code === 'ENOENT' ? '文件不存在（ENOENT）' : `读取失败（${code}）`,
+    };
+  }
+  try {
+    return { value: JSON.parse(text), problem: null };
+  } catch (error) {
+    return { value: null, problem: `JSON 解析失败（${error.message}）` };
   }
 };
 
@@ -236,16 +251,35 @@ const readJsonFile = (file) => {
  * 加载别名映射：package.json#imports 为权威（运行期真实解析），
  * tsconfig.json#paths 仅做一致性校验，不一致报 gate-alias-drift。
  * 支持精确键与 `#foo/*` 最长前缀通配；目标统一解析为绝对路径。
+ *
+ * 注意：别名还有第三处同名映射 vite.config.ts#resolve.alias（仅 Vite 使用）。
+ * 门禁不解析构建配置，因此不校验该文件；增删改别名时必须人工同步三处。
+ * gate:selftest 只断言 imports 的键名出现在 vite.config.ts 中，不比对目标路径。
  */
 export function loadAliasConfig(root) {
   const base = resolve(root);
   const pkg = readJsonFile(join(base, 'package.json'));
   const tsconfig = readJsonFile(join(base, 'tsconfig.json'));
+  const violations = [];
+  for (const [label, result] of [
+    ['package.json', pkg],
+    ['tsconfig.json', tsconfig],
+  ]) {
+    if (result.problem !== null) {
+      violations.push(
+        gateViolation(
+          label,
+          'gate-alias-config',
+          `${label}：期望可读且为合法 JSON，实际${result.problem}`,
+        ),
+      );
+    }
+  }
   const imports =
-    typeof pkg?.imports === 'object' && pkg.imports !== null ? pkg.imports : {};
+    typeof pkg.value?.imports === 'object' && pkg.value.imports !== null ? pkg.value.imports : {};
   const compilerOptions =
-    typeof tsconfig?.compilerOptions === 'object' && tsconfig.compilerOptions !== null
-      ? tsconfig.compilerOptions
+    typeof tsconfig.value?.compilerOptions === 'object' && tsconfig.value.compilerOptions !== null
+      ? tsconfig.value.compilerOptions
       : {};
   const paths =
     typeof compilerOptions.paths === 'object' && compilerOptions.paths !== null
@@ -270,7 +304,6 @@ export function loadAliasConfig(root) {
     );
   }
 
-  const violations = [];
   const keys = [...new Set([...entries.map((entry) => entry.key), ...pathEntries.keys()])].sort();
   for (const key of keys) {
     const imported = entries.find((entry) => entry.key === key);
@@ -295,12 +328,19 @@ export function loadAliasConfig(root) {
       );
       continue;
     }
-    if (tsTargets[0] !== imported.target) {
+    // TS 会按顺序试到第一个能解析的候选；拿它和 imports 比较才反映真实解析结果。
+    // 通配符键的候选含 '*'，永远探测不到，回退首项（行为与逐项比较前一致）。
+    const existingIndex = tsTargets.findIndex((candidate) => probeModule(candidate) !== null);
+    const targetIndex = existingIndex === -1 ? 0 : existingIndex;
+    const tsTarget = tsTargets[targetIndex];
+    if (tsTarget !== imported.target) {
+      const position =
+        tsTargets.length > 1 ? `（第 ${targetIndex + 1}/${tsTargets.length} 项候选）` : '';
       violations.push(
         gateViolation(
           '.',
           'gate-alias-drift',
-          `${key}：package.json 目标 ${toPosix(relative(base, imported.target))}，tsconfig 目标 ${toPosix(relative(base, tsTargets[0]))}`,
+          `${key}：package.json 目标 ${toPosix(relative(base, imported.target))}，tsconfig 目标 ${toPosix(relative(base, tsTarget))}${position}`,
         ),
       );
     }
