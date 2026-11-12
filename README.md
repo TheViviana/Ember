@@ -18,6 +18,8 @@ pnpm check:gates  # 只跑架构门禁与门禁自检
 
 仓库当前未配置 CI：没有远端仓库，且 `check:runtime` 依赖本机 Chromium 与图形环境，无法在通用 CI 上稳定运行。
 
+`check:offline` 按字面量扫描源码与 `dist`：只识别文本中直接出现的 `http(s)://` 与协议相对地址。运行期拼出来的地址（scheme/host 分段拼接、环境变量、动态 `import()`、配置读取）不在覆盖范围；这类动态地址由 `check:runtime` 的启动期抓包与功能自身的地址校验兜底（参见 [docs/ai-panel.md](docs/ai-panel.md)）。
+
 ## 规范源
 
 - [docs/kernel-contract-v1.md](docs/kernel-contract-v1.md)：内核与各能力之间的唯一契约源。

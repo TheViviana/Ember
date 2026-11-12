@@ -440,7 +440,9 @@ function main() {
   );
 
   const failed = result.violations.length > 0;
-  process.stdout.write(failed ? 'gate:offline 失败\n' : 'gate:offline 通过：运行期零外域引用\n');
+  process.stdout.write(
+    failed ? 'gate:offline 失败\n' : 'gate:offline 通过：源码与产物中零字面量外域引用（动态拼接地址不在覆盖范围）\n',
+  );
   process.exit(failed ? 1 : 0);
 }
 
