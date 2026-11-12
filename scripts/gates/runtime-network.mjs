@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DEFAULT_ROOT } from './lib.mjs';
 
 /**
@@ -17,6 +19,13 @@ const PREVIEW_PORT = 4173;
 const DEBUG_PORT = 9333;
 const AUDIT_URL = `http://127.0.0.1:${PREVIEW_PORT}/`;
 const WAIT_AFTER_LOAD_MS = 2500;
+/** 每个无外部信号的等待点都必须有上限：超时判失败，绝不靠「反正不会卡」 */
+const WS_OPEN_TIMEOUT_MS = 10000;
+const CDP_COMMAND_TIMEOUT_MS = 10000;
+const HTTP_TIMEOUT_MS = 10000;
+const OVERALL_TIMEOUT_MS = 60000;
+/** 端口预检的超时：本地连不上就是没人监听，不需要等太久 */
+const PORT_PROBE_TIMEOUT_MS = 1000;
 /**
  * 固定复用同一个 user-data-dir：
  * 每次 mkdtemp 换新路径时，Chromium 把「临时签名 + 新档案」当成另一个软件，
@@ -42,6 +51,62 @@ async function waitFor(label, predicate, timeoutMs = 20000) {
   }
   throw new Error(`${label} 启动超时`);
 }
+
+/** 给任意 Promise 套一个硬上限；超时文案必须带调用点，才能判断卡在哪一步 */
+export async function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}：${timeoutMs}ms 内未完成`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 启动期失败的分类：只表达「环境不满足」，不含检查本身的判定 */
+export function classifyStartupFailure({ stage, code = null, signal = null }) {
+  const exit = code !== null ? `code=${code}` : signal !== null ? `signal=${signal}` : '退出原因未知';
+  switch (stage) {
+    case 'port-preview':
+      return `环境不满足（端口 ${PREVIEW_PORT} 已被占用，vite preview 无法启动）`;
+    case 'port-debug':
+      return `环境不满足（端口 ${DEBUG_PORT} 已被占用，可能连到其他 Chromium 实例）`;
+    case 'preview':
+      return `环境不满足（vite preview 提前退出，${exit}；请确认 dist 与端口）`;
+    case 'chromium':
+      return `环境不满足（Chromium 提前退出，${exit}）`;
+    default:
+      return `环境不满足（启动失败，${exit}）`;
+  }
+}
+
+/** 端口已被占用时继续跑，会连到别人的服务；必须在 spawn 之前拦住 */
+const portInUse = (port) =>
+  new Promise((resolveProbe) => {
+    const probe = connect({ port, host: '127.0.0.1' });
+    const finish = (value) => {
+      probe.destroy();
+      resolveProbe(value);
+    };
+    probe.once('connect', () => finish(true));
+    probe.once('error', () => finish(false));
+    probe.setTimeout(PORT_PROBE_TIMEOUT_MS, () => finish(false));
+  });
+
+/** 子进程提前退出时立刻失败，而不是等固定超时 */
+const guardChildExit = (child, stage) => {
+  let rejectChild = () => {};
+  const promise = new Promise((_, reject) => {
+    rejectChild = reject;
+  });
+  const onExit = (code, signal) => rejectChild(new Error(classifyStartupFailure({ stage, code, signal })));
+  child.once('exit', onExit);
+  // 正常收尾后子进程退出是预期行为，不能让这个 promise 变成未处理拒绝
+  promise.catch(() => {});
+  return { promise, stop: () => child.removeListener('exit', onExit) };
+};
 
 function findChromium() {
   const cacheRoot = join(process.env.HOME ?? '', 'Library', 'Caches', 'ms-playwright');
@@ -87,15 +152,23 @@ class CdpSession {
       }
       for (const listener of this.listeners) listener(message);
     });
+    // 浏览器崩溃或主动断开时，排队中的命令必须立刻失败，而不是等各自的计时器
+    socket.addEventListener('close', () => this.failAll(new Error('CDP WebSocket 已关闭')));
   }
 
-  send(method, params = {}) {
+  failAll(error) {
+    for (const entry of this.pending.values()) entry.reject(error);
+    this.pending.clear();
+  }
+
+  send(method, params = {}, timeoutMs = CDP_COMMAND_TIMEOUT_MS) {
     const id = this.nextId;
     this.nextId += 1;
-    return new Promise((resolve, reject) => {
+    const answered = new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       this.socket.send(JSON.stringify({ id, method, params }));
     });
+    return withTimeout(answered, timeoutMs, `CDP 命令 ${method}`);
   }
 
   on(listener) {
@@ -114,21 +187,45 @@ async function main() {
     process.exit(1);
   }
 
+  if (await portInUse(PREVIEW_PORT)) {
+    process.stdout.write(`✗ runtime-network：${classifyStartupFailure({ stage: 'port-preview' })}\n`);
+    process.exit(1);
+  }
+  if (await portInUse(DEBUG_PORT)) {
+    process.stdout.write(`✗ runtime-network：${classifyStartupFailure({ stage: 'port-debug' })}\n`);
+    process.exit(1);
+  }
+
   const userDataDir = join(tmpdir(), PROFILE_DIR_NAME);
   mkdirSync(userDataDir, { recursive: true });
   const preview = spawn(join(DEFAULT_ROOT, 'node_modules', '.bin', 'vite'), ['preview', '--port', String(PREVIEW_PORT), '--strictPort'], {
     cwd: DEFAULT_ROOT,
     stdio: 'ignore',
   });
+  const previewGuard = guardChildExit(preview, 'preview');
   let browser = null;
+  let browserGuard = null;
   let socket = null;
   const requests = [];
+  // 兜底：任何未预料的挂起都在 60s 内结束，绝不留下卡死的进程
+  const watchdog = setTimeout(() => {
+    process.stdout.write(
+      `✗ runtime-network：检查失败（整体超过 ${OVERALL_TIMEOUT_MS / 1000}s，已终止浏览器与 preview）\n`,
+    );
+    if (browser !== null) browser.kill('SIGKILL');
+    preview.kill('SIGKILL');
+    process.exit(1);
+  }, OVERALL_TIMEOUT_MS);
 
   try {
-    await waitFor('vite preview', async () => {
-      const response = await fetch(AUDIT_URL);
-      return response.ok ? true : null;
-    });
+    await Promise.race([
+      waitFor('vite preview', async () => {
+        const response = await fetch(AUDIT_URL, { signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+        return response.ok ? true : null;
+      }),
+      previewGuard.promise,
+    ]);
+    previewGuard.stop();
 
     browser = spawn(
       chromium,
@@ -153,18 +250,33 @@ async function main() {
       { stdio: 'ignore' },
     );
 
-    await waitFor('Chromium 调试端口', async () => {
-      const response = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/version`);
-      return response.ok ? true : null;
-    });
+    browserGuard = guardChildExit(browser, 'chromium');
 
-    const created = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/new?about:blank`, { method: 'PUT' });
+    await Promise.race([
+      waitFor('Chromium 调试端口', async () => {
+        const response = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/version`, {
+          signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+        });
+        return response.ok ? true : null;
+      }),
+      browserGuard.promise,
+    ]);
+
+    const created = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/new?about:blank`, {
+      method: 'PUT',
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    });
     const target = await created.json();
     socket = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      socket.addEventListener('open', resolve, { once: true });
-      socket.addEventListener('error', () => reject(new Error('CDP WebSocket 连接失败')), { once: true });
-    });
+    await withTimeout(
+      new Promise((resolveOpen, reject) => {
+        socket.addEventListener('open', resolveOpen, { once: true });
+        socket.addEventListener('error', () => reject(new Error('CDP WebSocket 连接失败')), { once: true });
+        socket.addEventListener('close', () => reject(new Error('CDP WebSocket 提前关闭')), { once: true });
+      }),
+      WS_OPEN_TIMEOUT_MS,
+      'CDP WebSocket 连接',
+    );
 
     const session = new CdpSession(socket);
     let loaded = false;
@@ -181,7 +293,7 @@ async function main() {
     await session.send('Network.enable');
     await session.send('Page.enable');
     await session.send('Page.navigate', { url: AUDIT_URL });
-    await waitFor('页面加载', async () => (loaded ? true : null), 15000);
+    await Promise.race([waitFor('页面加载', async () => (loaded ? true : null), 15000), browserGuard.promise]);
     await sleep(WAIT_AFTER_LOAD_MS);
 
     const classified = requests.map((request) => {
@@ -210,6 +322,9 @@ async function main() {
     );
     if (external.length > 0) process.exitCode = 1;
   } finally {
+    clearTimeout(watchdog);
+    previewGuard.stop();
+    if (browserGuard !== null) browserGuard.stop();
     if (socket !== null) {
       try {
         socket.close();
@@ -224,4 +339,15 @@ async function main() {
   }
 }
 
-await main();
+const invokedDirectly =
+  process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  try {
+    await main();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stdout.write(`✗ runtime-network：检查失败（${message}）\n`);
+    process.exitCode = 1;
+  }
+}

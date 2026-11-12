@@ -10,6 +10,7 @@ import { findCycles } from './cycles.mjs';
 import { checkLayers } from './layers.mjs';
 import { exemptionViolations, LAYER_RULES, MODULE_EXEMPTIONS, MODULE_LAYOUT } from './lib.mjs';
 import { checkOffline, stripRustComments } from './offline.mjs';
+import { classifyStartupFailure, withTimeout } from './runtime-network.mjs';
 import { checkSize, SIZE_LIMIT } from './size.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -895,6 +896,50 @@ if (realSize.length === 0) {
   } else {
     failures += 1;
     process.stdout.write(`✗ selftest:exempt 真实 MODULE_EXEMPTIONS：${JSON.stringify(rows)}\n`);
+  }
+}
+
+// runtime 门禁的等待上限与启动失败分类：不启动浏览器，纯函数 + 150ms 上限
+{
+  const label = 'CDP 命令 Page.navigate';
+  const started = Date.now();
+  let timedOut = null;
+  try {
+    await withTimeout(new Promise(() => {}), 150, label);
+  } catch (error) {
+    timedOut = error;
+  }
+  const elapsed = Date.now() - started;
+  if (timedOut instanceof Error && timedOut.message.includes(label) && elapsed < 1000) {
+    process.stdout.write(`✓ selftest:runtime 永不结束的命令在 150ms 上限下 ${elapsed}ms 内失败\n`);
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:runtime 超时未按预期失败：${String(timedOut)}（${elapsed}ms）\n`);
+  }
+
+  const settled = await withTimeout(Promise.resolve('ok'), 150, '正常命令');
+  if (settled === 'ok') {
+    process.stdout.write('✓ selftest:runtime 正常返回不被超时干扰\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:runtime 正常返回被改写：${JSON.stringify(settled)}\n`);
+  }
+
+  const stages = [
+    ['preview 提前退出', { stage: 'preview', code: 1 }, ['环境不满足', 'vite preview', 'code=1']],
+    ['浏览器提前退出', { stage: 'chromium', signal: 'SIGKILL' }, ['环境不满足', 'Chromium', 'signal=SIGKILL']],
+    ['4173 被占用', { stage: 'port-preview' }, ['环境不满足', '4173']],
+    ['9333 被占用', { stage: 'port-debug' }, ['环境不满足', '9333']],
+  ];
+  for (const [name, input, needles] of stages) {
+    const text = classifyStartupFailure(input);
+    const missing = needles.filter((needle) => !text.includes(needle));
+    if (missing.length === 0) {
+      process.stdout.write(`✓ selftest:runtime ${name} 归类为环境不满足\n`);
+    } else {
+      failures += 1;
+      process.stdout.write(`✗ selftest:runtime ${name} 文案缺少 ${missing.join('/')}：${text}\n`);
+    }
   }
 }
 
