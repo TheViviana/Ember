@@ -8,7 +8,7 @@ import { DEFAULT_ROOT, toPosix } from './lib.mjs';
  *
  * 判定口径：
  * 1. 先剥离注释（JS/TS/CSS 的行注释与块注释、HTML 注释），注释里的 URL 不算引用；
- * 2. 剩余文本中出现 http(s):// 即视为引用；
+ * 2. 剩余文本中出现 http(s):// 或协议相对地址 `//host.tld/...` 即视为引用；
  * 3. 本机回环（localhost / 127.0.0.1 / [::1]）放行，因为它们是开发服务器与 IPC；
  * 4. 其余命中必须逐条进入 ALLOW 白名单，并写清"为什么不会发请求"。
  */
@@ -25,8 +25,10 @@ const SOURCE_TARGETS = [
 const SOURCE_EXT = new Set(['.ts', '.tsx', '.css', '.html', '.json', '.mjs', '.js', '.rs']);
 const DIST_EXT = new Set(['.js', '.css', '.html']);
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'target', 'gen', '.git', '.agents', '.trae', 'fixtures']);
-const URL_RE = /\bhttps?:\/\/[^\s"'`<>)\]}]+/g;
-const LOOPBACK_RE = /^https?:\/\/(?:localhost|ipc\.localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)/;
+const URL_RE = /\bhttps?:\/\/[^\s"'`<>)\]}]+/gi;
+/** 协议相对地址（`//cdn.example.com/x.js`）：浏览器会按当前协议发起请求，同样算外域 */
+const PROTOCOL_RELATIVE_RE = /(?<!:)\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?(?:[/?#][^\s"'`<>)\]}]*)?/gi;
+const LOOPBACK_RE = /^(?:https?:)?\/\/(?:localhost|ipc\.localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)/i;
 
 /** 每条白名单都必须能解释"为什么运行期不会产生网络请求" */
 const ALLOW = [
@@ -293,23 +295,25 @@ function scanFile(root, file) {
   const relPath = toPosix(relative(root, file));
   const text = readText(file);
   const found = [];
-  URL_RE.lastIndex = 0;
-  let match = URL_RE.exec(text);
-  while (match !== null) {
-    const url = match[0].replace(/[;,]+$/, '');
-    const line = text.slice(0, match.index).split('\n').length;
-    if (LOOPBACK_RE.test(url)) {
-      found.push({ url, line, allowed: true, reason: '本机回环（开发服务器 / IPC）' });
-    } else {
-      const allow = whitelistFor(relPath, url);
-      found.push({
-        url,
-        line,
-        allowed: allow !== null,
-        reason: allow === null ? '未登记的外域引用' : allow.reason,
-      });
+  for (const pattern of [URL_RE, PROTOCOL_RELATIVE_RE]) {
+    pattern.lastIndex = 0;
+    let match = pattern.exec(text);
+    while (match !== null) {
+      const url = match[0].replace(/[;,]+$/, '');
+      const line = text.slice(0, match.index).split('\n').length;
+      if (LOOPBACK_RE.test(url)) {
+        found.push({ url, line, allowed: true, reason: '本机回环（开发服务器 / IPC）' });
+      } else {
+        const allow = whitelistFor(relPath, url);
+        found.push({
+          url,
+          line,
+          allowed: allow !== null,
+          reason: allow === null ? '未登记的外域引用' : allow.reason,
+        });
+      }
+      match = pattern.exec(text);
     }
-    match = URL_RE.exec(text);
   }
   return { relPath, found };
 }

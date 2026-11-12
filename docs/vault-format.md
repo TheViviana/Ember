@@ -74,7 +74,7 @@
 规则：
 
 - `id` 一旦写入，**永不改变**。重命名、移动目录、内容改写都不改 `id`。
-- 同一库内 `id` 必须唯一。判重是索引职责，不是写盘职责（写盘不做全库扫描）。
+- 同一库内 `id` 必须唯一。`[设计]` 判重归索引职责，但索引尚未接入（§9）：v1 由 `doc-service.refresh()` 在目录对账时兜底判重，保留先收录者并告警，写盘路径不做全库扫描。
 - 新建文档时由 `doc-service` 生成，采用**同进程单调**策略：同一毫秒内随机部分递增，保证同一毫秒创建的多个文档仍可按创建顺序排序。
 
 ### 3.2 路径只是定位符
@@ -83,6 +83,10 @@
 - 文件名冲突后缀（§10）不参与 title 派生：`方案 (conflict 20261111T103205Z-7F3K).md` 的 title 仍是 `方案`，除非 frontmatter 显式写了 `title`。
 
 ### 3.3 缺 id 的文档（adoption）
+
+> **实现状态（v1 未实现）**：`refresh()` 目前只跳过缺 id（或 frontmatter 损坏）的文档并输出告警，
+> 不标记 `needs_adoption`，也没有「纳入库管理（adopt）」命令；`DocMeta.flags` 恒为全 `false`。
+> 以下为设计目标，待后续版本实现。
 
 `[设计选择]` 从 Obsidian 或纯文本目录导入的文档没有 `id`。Ember **不在后台静默改写文件**，而是：
 
@@ -285,6 +289,8 @@ journal 是**追加写的 NDJSON**，路径 `~/Library/Application Support/Ember
 - 心跳：持有者每 5 秒刷新 `heartbeatAt`（重写整个文件 + rename）。
 - 失效判定：同一 `machineId` 且 pid 不存在 → 失效；任意机器上 `heartbeatAt` 超过 30 秒未更新 → 失效（跨机器共享库时以时间兜底）。
 - 失效后：新实例可以抢占，但**必须先完成 §6.2 的 journal 恢复**，且抢占动作写入 journal（`kind: "lock.takeover"`）以便审计。
+  - **实现状态（与上句有偏差）**：`Vault::open` 的顺序是 `ensure_identity` → `lock::acquire`（含接管）→ `journal::recover`，
+    即先拿锁再回放 journal；`lock.takeover` 审计记录尚未实现。
 - 抢不到锁：以**只读观察者**模式打开库（可搜索、可渲染、不可写），UI 明确提示「库已被其它实例打开」。绝不降级为「写但不加锁」。
 
 `.lock` 与 `.journal/` 由 watcher 忽略，避免自我触发。
@@ -294,6 +300,10 @@ journal 是**追加写的 NDJSON**，路径 `~/Library/Application Support/Ember
 ## 8. `.workbench/` schema
 
 通用约定：所有 JSON 文件都带 `schemaVersion`（整数，当前为 `1`），未知版本 ≥ 当前应用支持版本时**拒绝写入**并提示升级应用；低于当前版本时按迁移链升级，升级前先写 `.workbench/backup/<name>.<ts>.json`。
+
+> **实现状态（v1 部分未实现）**：`vault.json` 读到未知/缺失 `schemaVersion` 时 `Vault::open` 返回可读错误，
+> 启动页显示「启动失败 + 原因」（不再 panic），但**没有迁移链、也没有升级前备份**；`settings.json` 由
+> 内核按默认值容错，`ui.json` 读到更高版本时整会话禁写（§10.3）已实现。
 
 所有写入同样走 §6.1 原子写；`.workbench/` 下的文件不参与 Markdown 索引。
 
@@ -467,6 +477,10 @@ journal 是**追加写的 NDJSON**，路径 `~/Library/Application Support/Ember
 
 ### 9.2 表结构（v1）
 
+> **实现状态（v1 未实现）**：Rust 侧 SQLite/FTS5 索引尚未接入；运行期注入的是
+> `createPendingIndexPort` 占位端口（`available: false`，查询返回空、`rebuild` 返回空统计）。
+> 下文表结构、`flags` 位与分词方案都是后续版本目标，当前没有落地的库文件。
+
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- meta: schema_version, vault_id, built_at, tokenizer_version
@@ -604,6 +618,8 @@ notes/方案 (conflict 20261111T103205Z-7F3K).md
 - 索引允许存在重复 id 的行，但 `documents.id` 唯一约束会被违反 → 改为允许重复：主键为 `rowid`，`id` 建普通索引，另加 `id_canonical` 指向规范文档。
 - 规范文档选择：`created` 最早者；相同则路径字典序最小者。
 - 其余标记 `flags.bit2 = duplicate_id`，UI 提供「重新分配 id」命令（复用 adoption 流程，逐文件确认）。
+  - **实现状态（v1 未实现）**：没有 `duplicate_id` 标记，也没有「重新分配 id」命令；`refresh()` 只按路径字典序保留先收录者并告警，
+    不会改写任何文件。
 - **禁止**在后台自动改 id——那会在用户不知情时改变外部工具的引用。
 
 ---
