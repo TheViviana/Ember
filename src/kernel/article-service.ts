@@ -2,7 +2,7 @@ import type { CanvasNode, CanvasPoint, CanvasScene } from '#canvas-engine';
 import type { CanvasId, VaultPath } from '#doc-model';
 import { safeFileName, unsafeVaultPath } from '#doc-model';
 import type { CanvasHost } from './canvas-host.ts';
-import type { DocService } from './doc-service.ts';
+import type { DocServiceInternal } from './doc-service.ts';
 import { EmberError, isEmberError, toErrorText } from './errors.ts';
 import type { DocSnapshot } from './types.ts';
 
@@ -13,7 +13,7 @@ const MAX_NAME_ATTEMPTS = 50;
 const NAME_MAX = 80;
 
 export interface CreateArticleInput {
-  readonly docs: DocService;
+  readonly docs: DocServiceInternal;
   readonly canvas: CanvasHost;
   readonly canvasId: CanvasId;
   readonly title: string;
@@ -27,6 +27,14 @@ export interface CreateArticleInput {
 export interface CreateArticleResult {
   readonly snapshot: DocSnapshot;
   readonly scene: CanvasScene;
+}
+
+/** 上下文门面入参：调用方不接触内核实例（尤其是带 purge 的内部文档服务） */
+export type ArticleCanvasInput = Omit<CreateArticleInput, 'docs' | 'canvas'>;
+
+/** KernelContext.articles：把文章创建与回滚细节留在内核内部 */
+export interface ArticlesFacade {
+  createOnCanvas(input: ArticleCanvasInput): Promise<CreateArticleResult>;
 }
 
 const candidatePath = (name: string, attempt: number): VaultPath =>

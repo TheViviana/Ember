@@ -10,7 +10,6 @@ import {
 import type { CanvasMutation, CanvasNode, CanvasPoint, CanvasScene, Viewport } from '#canvas-engine';
 import { createUlid } from '#doc-model';
 import type { CanvasId, DocId } from '#doc-model';
-import { createArticleOnCanvas } from '../../kernel/article-service.ts';
 import type { DocMeta } from '../../kernel/types.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import type { AnchorDoc } from './anchor-menu.ts';
@@ -356,16 +355,15 @@ export const useCanvasCommands = (options: CanvasCommandOptions) => {
       if (prompt === null || canvasId === null || scene === null) return;
       const nodeId = `n_${createUlid()}`;
       const z = scene.nodes.reduce((max, node) => Math.max(max, node.z), 0) + 1;
-      createArticleOnCanvas({
-        docs: kernel.docs,
-        canvas: kernel.canvas,
-        canvasId,
-        title: value,
-        point: prompt.point,
-        nodeId,
-        size: { w: DEFAULT_NODE_SIZE.w, h: DEFAULT_NODE_SIZE.h },
-        z,
-      })
+      kernel.articles
+        .createOnCanvas({
+          canvasId,
+          title: value,
+          point: prompt.point,
+          nodeId,
+          size: { w: DEFAULT_NODE_SIZE.w, h: DEFAULT_NODE_SIZE.h },
+          z,
+        })
         .then((result) => {
           setSelected(new Set([nodeId]));
           setSelectedEdgeId(null);

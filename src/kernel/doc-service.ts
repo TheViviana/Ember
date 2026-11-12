@@ -44,20 +44,20 @@ export interface DocService {
   rename(id: DocId, next: VaultPath, opts: WriteOptions): Promise<WriteOutcome>;
   /** 用户删除：移入系统回收站，库内不保留副本 */
   remove(id: DocId, opts: WriteOptions): Promise<void>;
-  /**
-   * 永久删除：**仅供内核回滚内部使用**（文章创建后画布写入失败）。
-   * 不是用户删除入口，也不注册为命令——`core.doc.purge` 在契约里仍是「v1 未实现」。
-   */
-  purge(id: DocId, opts: WriteOptions): Promise<void>;
 
   flush(): Promise<void>;
   watch(listener: (change: DocChange) => void): Disposable;
 }
 
-/** 内核内部扩展：watcher 触发目录对账用，不暴露给能力 */
+/** 内核内部扩展：watcher 触发目录对账、文章回滚用，不暴露给能力（G1） */
 export interface DocServiceInternal extends DocService {
   /** 全量对账：文件 → 目录；只收录已具备合法且唯一 id 的文档 */
   refresh(): Promise<void>;
+  /**
+   * 永久删除：**仅供内核回滚内部使用**（文章创建后画布写入失败），不是用户删除入口；
+   * 不注册为命令——`core.doc.purge` 在契约里仍是「v1 未实现」。
+   */
+  purge(id: DocId, opts: WriteOptions): Promise<void>;
 }
 
 interface CatalogEntry {

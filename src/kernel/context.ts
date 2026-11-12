@@ -1,3 +1,4 @@
+import type { ArticlesFacade } from './article-service.ts';
 import type { CanvasHost } from './canvas-host.ts';
 import type { CapabilityHost } from './capability-host.ts';
 import type { CommandBus } from './command-bus.ts';
@@ -13,6 +14,8 @@ import type { Disposable, ExtensionSlot, KernelEnv, Logger, SettingsService } fr
 export interface KernelContext {
   readonly env: KernelEnv;
   readonly docs: DocService;
+  /** 文章门面：内部持有带 purge 的文档服务，调用方只看到用户语义 */
+  readonly articles: ArticlesFacade;
   readonly index: IndexService;
   readonly commands: CommandBus;
   readonly editor: EditorHost;
@@ -28,6 +31,7 @@ export interface KernelContext {
 export interface KernelServices {
   readonly env: KernelEnv;
   readonly docs: DocService;
+  readonly articles: ArticlesFacade;
   readonly index: IndexService;
   readonly commands: CommandBus;
   readonly editor: EditorHost;

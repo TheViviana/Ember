@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { asVaultId, createUlid, unsafeVaultPath } from '#doc-model';
-import { createArticleOnCanvas } from '../../src/kernel/article-service.ts';
 import { bootKernel, type Kernel } from '../../src/kernel/boot.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
 import type { Logger } from '../../src/kernel/types.ts';
@@ -36,8 +35,6 @@ const boot = async (vault: MemoryVault, log: Logger): Promise<Kernel> =>
 const createInput = async (kernel: Kernel, title: string) => {
   const canvasId = (await kernel.context.canvas.ensureDefault()).id;
   return {
-    docs: kernel.context.docs,
-    canvas: kernel.context.canvas,
     canvasId,
     title,
     point: { x: 64, y: 32 },
@@ -52,7 +49,7 @@ void test('正常路径：落盘 notes/标题.md 并新增一个 doc 节点', as
   const kernel = await boot(vault, createLogger().log);
 
   const input = await createInput(kernel, '验收文章');
-  const result = await createArticleOnCanvas(input);
+  const result = await kernel.context.articles.createOnCanvas(input);
 
   assert.equal(String(result.snapshot.meta.path), 'notes/验收文章.md');
   const text = vault.dump()['notes/验收文章.md'];
@@ -77,8 +74,8 @@ void test('同名标题自动加后缀，不覆盖已有文件', async () => {
   const vault = createMemoryVault();
   const kernel = await boot(vault, createLogger().log);
 
-  await createArticleOnCanvas(await createInput(kernel, '重名'));
-  const second = await createArticleOnCanvas(await createInput(kernel, '重名'));
+  await kernel.context.articles.createOnCanvas(await createInput(kernel, '重名'));
+  const second = await kernel.context.articles.createOnCanvas(await createInput(kernel, '重名'));
 
   assert.equal(String(second.snapshot.meta.path), 'notes/重名-2.md');
   assert.ok(vault.dump()['notes/重名.md'] !== undefined);
@@ -90,8 +87,8 @@ void test('以 . 开头的标题不会生成隐藏文档，重名仍按原有规
   const vault = createMemoryVault();
   const kernel = await boot(vault, createLogger().log);
 
-  const first = await createArticleOnCanvas(await createInput(kernel, '.隐藏标题'));
-  const second = await createArticleOnCanvas(await createInput(kernel, '.隐藏标题'));
+  const first = await kernel.context.articles.createOnCanvas(await createInput(kernel, '.隐藏标题'));
+  const second = await kernel.context.articles.createOnCanvas(await createInput(kernel, '.隐藏标题'));
 
   assert.equal(String(first.snapshot.meta.path), 'notes/隐藏标题.md');
   assert.equal(String(second.snapshot.meta.path), 'notes/隐藏标题-2.md');
@@ -131,7 +128,7 @@ void test('画布写失败：回滚走永久删除，库内不产生回收副本
 
   const input = await createInput(kernel, '回滚文章');
   await assert.rejects(
-    createArticleOnCanvas(input),
+    kernel.context.articles.createOnCanvas(input),
     (error: unknown) =>
       error instanceof EmberError &&
       error.code === 'io_failed' &&
@@ -174,7 +171,7 @@ void test('双重失败：错误文本给出文章磁盘路径，文件仍在磁
 
   const input = await createInput(kernel, '双重失败文章');
   let message = '';
-  await assert.rejects(createArticleOnCanvas(input), (error: unknown) => {
+  await assert.rejects(kernel.context.articles.createOnCanvas(input), (error: unknown) => {
     assert.ok(error instanceof EmberError);
     message = error.message;
     return error.code === 'io_failed';

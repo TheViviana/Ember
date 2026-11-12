@@ -1,4 +1,5 @@
 import type { CapabilityId, VaultId } from '#doc-model';
+import { createArticleOnCanvas, type ArticlesFacade } from './article-service.ts';
 import { createCanvasHost } from './canvas-host.ts';
 import {
   createCapabilityHost,
@@ -111,6 +112,14 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
 
   let contextRef: KernelContext | null = null;
 
+  /**
+   * 文章门面：闭包持有内部 docs（含 purge），上下文对外只暴露用户语义。
+   * shell / 能力层拿到的是 KernelContext，因此写 kernel.docs.purge 会编译失败。
+   */
+  const articles: ArticlesFacade = {
+    createOnCanvas: (input) => createArticleOnCanvas({ ...input, docs, canvas }),
+  };
+
   const capabilities: CapabilityHostInternal = createCapabilityHost({
     kernelVersion,
     events,
@@ -127,6 +136,7 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
   const context = createKernelContext({
     env,
     docs,
+    articles,
     index,
     commands,
     editor,
