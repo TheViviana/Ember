@@ -205,7 +205,7 @@ async function main() {
     );
     process.stdout.write(
       external.length === 0
-        ? 'gate:runtime-network 通过：启动后零外域请求\n'
+        ? 'gate:runtime-network 通过：启动窗口内零外域请求（用户后续操作不在覆盖范围）\n'
         : 'gate:runtime-network 失败：存在外域请求\n',
     );
     if (external.length > 0) process.exitCode = 1;
