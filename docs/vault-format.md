@@ -280,18 +280,23 @@ journal 是**追加写的 NDJSON**，路径 `~/Library/Application Support/Ember
 锁文件：`<vault>/.workbench/.lock`
 
 ```json
-{"vaultId":"01JB...","pid":48213,"machineId":"01JB...","startedAt":"2026-11-11T03:00:00Z","heartbeatAt":"2026-11-11T03:00:10Z","app":"0.1.0"}
+{"vaultId":"01JB...","pid":48213,"machineId":"01JB...","startedAt":"2026-11-11T03:00:00Z","heartbeatAt":"2026-11-11T03:00:10Z","leaseToken":1,"app":"0.1.0"}
 ```
 
 规则：
 
 - 获取：`open(O_CREAT|O_EXCL)`。已存在则读内容判断有效性。
+- 租约代次：`leaseToken` 为 `u64`，只增不减。首次获取写 `1`，每次失效接管在当前值上 `+1`；缺失或损坏按 `0` 处理。
 - 心跳：持有者每 5 秒刷新 `heartbeatAt`（重写整个文件 + rename）。
 - 失效判定：同一 `machineId` 且 pid 不存在 → 失效；任意机器上 `heartbeatAt` 超过 30 秒未更新 → 失效（跨机器共享库时以时间兜底）。
+- 写前校验：每次落盘前重读锁文件，要求 `pid`、`leaseToken`、`heartbeatAt` 三者与持有方内存值**完全一致**；任一不一致说明锁已被接管或心跳停摆，**立即转只读**并拒绝本次写入（正文写入与图片落盘都走同一道写闸）。
 - 失效后：新实例可以抢占，但**必须先完成 §6.2 的 journal 恢复**，且抢占动作写入 journal（`kind: "lock.takeover"`）以便审计。
   - **实现状态（与上句有偏差）**：`Vault::open` 的顺序是 `ensure_identity` → `lock::acquire`（含接管）→ `journal::recover`，
-    即先拿锁再回放 journal；`lock.takeover` 审计记录尚未实现。
+    即先拿锁再回放 journal；`lock.takeover` 审计记录尚未实现。写前校验（`pid` + `leaseToken` + `heartbeatAt`）已在
+    `lock.rs` 的 `verify_lease` 与 `Vault::begin_write` 落地，心跳线程发现锁文件 PID/代次不符时同样立即降级只读。
 - 抢不到锁：以**只读观察者**模式打开库（可搜索、可渲染、不可写），UI 明确提示「库已被其它实例打开」。绝不降级为「写但不加锁」。
+  - 只读判定分两层：启动态的 `readonly` 只在抢锁时确定，运行期接管后的 UI 提示**最多滞后一个心跳周期（5 秒）**；
+    真正的拦截点是写闸里的写前校验，因此不会出现「提示仍可写、实际已双写」的窗口。
 
 `.lock` 与 `.journal/` 由 watcher 忽略，避免自我触发。
 
