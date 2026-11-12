@@ -261,30 +261,29 @@ pub fn save(vault: &Vault, bytes: &[u8], mime: &str) -> VaultResult<AssetSaved> 
     let relative = format!("{MEDIA_DIR}/{}/{name}", &hash[..2]);
     let (absolute, normalized) = paths::resolve(vault.root(), &relative)?;
 
-    // 图片不走 journal，但落盘前同样要进写闸并做即时租约校验：
-    // ensure_writable 只反映心跳巡检结果，锁刚被接管时可能仍为 true。
-    // 闸放在去重判断之前，锁失守后连「命中已有图片」也不返回成功。
-    let _gate = vault.begin_write()?;
-    if absolute.is_file() {
-        return Ok(AssetSaved {
-            path: normalized,
-            name,
-            hash,
-            mime: declared.mime().to_string(),
-            bytes: bytes.len() as u64,
-            deduped: true,
-        });
-    }
-    if list(vault)?.len() >= MAX_ASSETS {
+    // 去重与配额都是只读检查，放在写闸外：list 要遍历整个 media 目录，
+    // 图库接近上限时不该在闸内阻塞正文 journal 写入。
+    // 代价是配额存在极小的超限竞态：并发 asset_save 可能都读到 399 再各写一张，
+    // 超出量以并发导入数为上限（UI 串行导入时不会发生），属可接受的软配额。
+    let mut deduped = absolute.is_file();
+    if !deduped && list(vault)?.len() >= MAX_ASSETS {
         return Err(VaultError::Encoding(format!(
             "图库已达 {MAX_ASSETS} 张上限，先删除不用的图片再导入"
         )));
     }
 
-    atomic::write_atomic(&absolute, bytes).map_err(|error| match error {
-        VaultError::Io(inner) => io_at(inner, &absolute),
-        other => other,
-    })?;
+    // 图片不走 journal，但落盘前同样要进写闸并做即时租约校验：
+    // ensure_writable 只反映心跳巡检结果，锁刚被接管时可能仍为 true。
+    // 闸放在返回之前，锁失守后连「命中已有图片」也不返回成功。
+    let _gate = vault.begin_write()?;
+    // 闸内复核去重：配额检查与取闸之间，同一张图可能已被并发写入。
+    deduped = deduped || absolute.is_file();
+    if !deduped {
+        atomic::write_atomic(&absolute, bytes).map_err(|error| match error {
+            VaultError::Io(inner) => io_at(inner, &absolute),
+            other => other,
+        })?;
+    }
 
     Ok(AssetSaved {
         path: normalized,
@@ -292,7 +291,7 @@ pub fn save(vault: &Vault, bytes: &[u8], mime: &str) -> VaultResult<AssetSaved> 
         hash,
         mime: declared.mime().to_string(),
         bytes: bytes.len() as u64,
-        deduped: false,
+        deduped,
     })
 }
 
