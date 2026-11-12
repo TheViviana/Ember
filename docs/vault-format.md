@@ -286,11 +286,16 @@ journal 是**追加写的 NDJSON**，路径 `~/Library/Application Support/Ember
 规则：
 
 - 获取：`open(O_CREAT|O_EXCL)`。已存在则读内容判断有效性。
-- 租约代次：`leaseToken` 为 `u64`，只增不减。首次获取写 `1`，每次失效接管在当前值上 `+1`；缺失或损坏按 `0` 处理。
+- 租约代次：`leaseToken` 为 `u64`。同一把锁存续期间只增不减：首次获取写 `1`，每次失效接管在当前值上 `+1`；锁文件缺失或损坏（包括认领后崩溃留下的空路径）按 `0` 处理。
 - 心跳：持有者每 5 秒刷新 `heartbeatAt`（重写整个文件 + rename）。
 - 失效判定：同一 `machineId` 且 pid 不存在 → 失效；任意机器上 `heartbeatAt` 超过 30 秒未更新 → 失效（跨机器共享库时以时间兜底）。
 - 写前校验：每次落盘前重读锁文件，要求 `pid`、`leaseToken`、`heartbeatAt` 三者与持有方内存值**完全一致**；任一不一致说明锁已被接管或心跳停摆，**立即转只读**并拒绝本次写入（正文写入与图片落盘都走同一道写闸）。
 - 失效后：新实例可以抢占，但**必须先完成 §6.2 的 journal 恢复**，且抢占动作写入 journal（`kind: "lock.takeover"`）以便审计。
+  - 接管流程：先把 `.lock` 原子 `rename` 到 `.workbench/lock.takeover.<pid>.<leaseToken>` 完成认领，
+    并发接管只有一个 `rename` 成功，其余按只读返回；认领后回读临时文件，与判定失效时读到的原始字节
+    逐字节比较，内容已变说明期间有人写入了新锁，用硬链接原位放回（目标存在时原子失败，不覆盖新锁），
+    确认是同一份后才创建新 `.lock`，`leaseToken` 在认领值上 `+1`。接管者在 `rename` 后、创建前崩溃时
+    锁路径为空，后续实例可直接创建，不会留下永久不可用的库；临时副本留在 `.workbench/` 中不参与锁判定。
   - **实现状态（与上句有偏差）**：`Vault::open` 的顺序是 `ensure_identity` → `lock::acquire`（含接管）→ `journal::recover`，
     即先拿锁再回放 journal；`lock.takeover` 审计记录尚未实现。写前校验（`pid` + `leaseToken` + `heartbeatAt`）已在
     `lock.rs` 的 `verify_lease` 与 `Vault::begin_write` 落地，心跳线程发现锁文件 PID/代次不符时同样立即降级只读。
