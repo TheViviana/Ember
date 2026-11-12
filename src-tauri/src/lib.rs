@@ -20,20 +20,36 @@ fn resolve_root() -> PathBuf {
     PathBuf::from(home).join("Documents").join("EmberVault")
 }
 
+/// 启动阶段建库失败（身份损坏、schemaVersion 不受支持等）。
+/// 不 panic：窗口照常打开，`vault_identity` 把这个错误交给前端启动页展示。
+pub struct StartupFailure(pub String);
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let root = resolve_root();
-            let vault = vault::Vault::open(root)?;
-            let watcher = vault::watcher::spawn(app.handle().clone(), vault.root().to_path_buf());
-            app.manage(vault);
-            app.manage::<Watcher>(watcher);
+            match vault::Vault::open(root.clone()) {
+                Ok(vault) => {
+                    let watcher = vault::watcher::spawn(
+                        app.handle().clone(),
+                        vault.root().to_path_buf(),
+                        vault.health_flag(),
+                    );
+                    app.manage(vault);
+                    app.manage::<Watcher>(watcher);
+                }
+                Err(error) => {
+                    app.manage(StartupFailure(format!(
+                        "无法打开库 {}：{error}",
+                        root.display()
+                    )));
+                }
+            }
             app.manage(commands::ai::AiState::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::vault_identity,
-            commands::vault_init,
             commands::vault_read,
             commands::vault_write,
             commands::vault_remove,

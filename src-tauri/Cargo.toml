@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Ember 本地优先知识工作台的宿主进程"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [lib]
 name = "ember_lib"

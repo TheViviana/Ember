@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::Serialize;
-use tauri::{LogicalPosition, LogicalSize, State, Window};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, State, Window};
 
 use crate::error::{VaultError, VaultResult};
 use crate::vault::{atomic, media, paths, ulid, Vault};
@@ -45,26 +45,31 @@ pub struct FileStat {
 
 /// vault 文档读入上限：整文件 + base64（×4/3）都驻留内存，超限拒绝而非读入
 const MAX_VAULT_READ_BYTES: u64 = 32 * 1024 * 1024;
+/// vault 写入上限：与读取对称，避免被攻破的 renderer 一次性灌入超大文件
+const MAX_VAULT_WRITE_BYTES: u64 = 32 * 1024 * 1024;
 /// ui.json 是机器本地小文件，远超实际需要的载荷直接拒绝
 const MAX_MACHINE_UI_BYTES: usize = 1024 * 1024;
 
 fn identity_of(vault: &Vault) -> VaultIdentity {
     VaultIdentity {
         vault_id: vault.id().to_string(),
-        readonly: vault.readonly(),
+        // 用 writable() 而非 readonly()：运行期锁被接管后也要如实告知前端
+        readonly: !vault.writable(),
     }
 }
 
 /// 前端启动第一步：拿库身份与只读标志（只读标志来自库锁获取结果）。
+/// 建库失败时返回可读错误，交给启动页展示，而不是让原生进程 panic。
 #[tauri::command]
-pub fn vault_identity(vault: State<'_, Vault>) -> VaultIdentity {
-    identity_of(&vault)
-}
-
-/// 幂等的初始化入口：`Vault::open` 已在启动时创建 settings.json。
-#[tauri::command]
-pub fn vault_init(vault: State<'_, Vault>) -> VaultResult<VaultIdentity> {
-    Ok(identity_of(&vault))
+pub fn vault_identity(app: AppHandle) -> VaultResult<VaultIdentity> {
+    match (
+        app.try_state::<crate::StartupFailure>(),
+        app.try_state::<Vault>(),
+    ) {
+        (Some(failure), _) => Err(VaultError::Startup(failure.0.clone())),
+        (None, Some(vault)) => Ok(identity_of(&vault)),
+        (None, None) => Err(VaultError::Uninitialized),
+    }
 }
 
 /// 字节以 base64 过 IPC；文件不存在返回 null。
@@ -89,6 +94,13 @@ pub async fn vault_write(
     data: String,
     intent: String,
 ) -> VaultResult<()> {
+    // 解码前按 base64 长度（×3/4）估算：与读取上限对称，超大载荷直接拒绝
+    if (data.len() as u64) * 3 / 4 > MAX_VAULT_WRITE_BYTES {
+        return Err(VaultError::Encoding(format!(
+            "写入超过 {} MB 上限：{path}",
+            MAX_VAULT_WRITE_BYTES / (1024 * 1024)
+        )));
+    }
     let bytes = STANDARD
         .decode(data.as_bytes())
         .map_err(|error| VaultError::Encoding(error.to_string()))?;

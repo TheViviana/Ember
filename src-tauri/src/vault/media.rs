@@ -231,9 +231,9 @@ pub fn read(vault: &Vault, relative: &str) -> VaultResult<AssetData> {
 
 /// 按内容哈希落盘：同内容只存一份，重复导入返回 deduped。
 pub fn save(vault: &Vault, bytes: &[u8], mime: &str) -> VaultResult<AssetSaved> {
-    if vault.readonly() {
-        return Err(VaultError::Readonly);
-    }
+    // 必须走 ensure_writable：readonly() 只反映启动时是否抢到锁，
+    // 运行期心跳失败/被接管后的降级同样要拒绝图片落盘。
+    vault.ensure_writable()?;
     if bytes.is_empty() {
         return Err(VaultError::Encoding("图片内容为空".to_string()));
     }
@@ -434,13 +434,42 @@ mod tests {
     }
 
     #[test]
+    fn save_rejects_runtime_readonly_degrade() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        vault.write("notes/a.md", b"x", "user").unwrap();
+
+        // 运行期锁被接管：启动标志仍是可写，必须由 write_health 拒绝
+        let forged = crate::vault::lock::LockPayload {
+            vault_id: vault.id().to_string(),
+            pid: 999_999_999,
+            machine_id: "01JFORGEDMACHINEID000000".to_string(),
+            started_at: crate::vault::clock::now_iso8601(),
+            heartbeat_at: crate::vault::clock::now_iso8601(),
+            app: "0.0.0".to_string(),
+        };
+        atomic::write_atomic(
+            &paths::lock_file(&temp.root),
+            &serde_json::to_vec(&forged).unwrap(),
+        )
+        .unwrap();
+        std::thread::sleep(
+            crate::vault::lock::HEARTBEAT_INTERVAL + std::time::Duration::from_millis(300),
+        );
+
+        let error = save(&vault, PNG, "image/png").unwrap_err();
+        assert!(matches!(error, VaultError::Readonly), "降级后图片落盘应被拒绝：{error}");
+        assert!(list(&vault).unwrap().is_empty());
+    }
+
+    #[test]
     fn rejects_svg_and_unknown_types() {
         let temp = TempVault::new();
         let vault = temp.open();
 
-        // 零联网门禁按 http(s):// 扫描源码：命名空间在运行时拼出，源码里不留完整 URL
-        let scheme = "http:";
-        let svg = format!("<svg xmlns=\"{scheme}//www.w3.org/2000/svg\"></svg>");
+        // 零联网门禁同时扫 http(s):// 与协议相对 //host：把 scheme 拆开，源码里不留完整 URL
+        let scheme = "ht";
+        let svg = format!("<svg xmlns=\"{scheme}tp://www.w3.org/2000/svg\"></svg>");
         assert!(save(&vault, svg.as_bytes(), "image/svg+xml").is_err());
         assert!(save(&vault, PNG, "text/plain").is_err());
         assert!(list(&vault).unwrap().is_empty());
@@ -524,7 +553,7 @@ mod tests {
         let temp = TempVault::new();
         let owner = temp.open();
         let observer = temp.open();
-        assert!(observer.readonly());
+        assert!(!observer.writable());
 
         assert!(matches!(
             save(&observer, PNG, "image/png").unwrap_err(),

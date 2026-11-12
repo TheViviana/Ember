@@ -18,6 +18,9 @@ pub enum VaultError {
     IoAt { path: String, message: String },
     #[error("序列化错误：{0}")]
     Serde(#[from] serde_json::Error),
+    /// 启动阶段无法建立可用库（身份损坏/版本不支持）：让前端启动页展示原因，而不是 panic
+    #[error("启动失败：{0}")]
+    Startup(String),
 }
 
 impl VaultError {
@@ -31,6 +34,7 @@ impl VaultError {
             VaultError::Io(_) => "io_failed",
             VaultError::IoAt { .. } => "io_failed",
             VaultError::Serde(_) => "invalid_payload",
+            VaultError::Startup(_) => "startup_failed",
         }
     }
 }

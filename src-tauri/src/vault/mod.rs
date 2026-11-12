@@ -94,8 +94,9 @@ impl Vault {
         &self.id
     }
 
-    pub fn readonly(&self) -> bool {
-        self.initially_readonly
+    /// 运行期健康标志：watcher 用它检测锁被接管/心跳失败后通知前端
+    pub(crate) fn health_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.write_health.clone()
     }
 
     pub fn read(&self, relative: &str) -> VaultResult<Option<Vec<u8>>> {
@@ -179,7 +180,12 @@ impl Vault {
         Ok(Some((clock::iso8601(millis), metadata.len())))
     }
 
-    fn ensure_writable(&self) -> VaultResult<()> {
+    /// 当前是否允许写入：启动即只读，或运行期锁被接管/心跳失败时返回 false。
+    pub fn writable(&self) -> bool {
+        self.ensure_writable().is_ok()
+    }
+
+    pub(crate) fn ensure_writable(&self) -> VaultResult<()> {
         // 启动时没抢到锁，或运行期心跳已判定锁失守（被接管/写失败）→ 一律拒绝写入。
         let healthy = self
             .write_health
@@ -209,8 +215,8 @@ fn with_path(error: VaultError, path: &Path) -> VaultError {
 /// - `.workbench/trash/<ULID>/`（>30 天）：软删除副本到期回收（规范 §10.5 保留期）。
 ///
 /// 全部失败只记日志不影响启动；mtime 不可读按保守不删处理。
-/// 注意：孤儿 temp 清扫**跳过 `.workbench/`**——锁心跳与 journal 写入的瞬时 temp
-/// 也 lives 在那里，清扫与它们的 rename 竞态会让心跳误判失败（降级只读）。
+/// `.workbench/` 内的临时文件（锁心跳、journal）同样参与清扫：24h 年龄门槛
+/// 远大于一次原子写/心跳的存活时间，不会误删在途 temp。
 fn sweep_housekeeping(root: &Path) {
     let now = SystemTime::now();
     let temps = sweep_orphan_temps(root, now);
@@ -231,11 +237,6 @@ fn sweep_orphan_temps(dir: &Path, now: SystemTime) -> usize {
         match entry.file_type() {
             // 符号链接两臂都不命中（与 resolve 的拒链接策略一致）
             Ok(file_type) if file_type.is_dir() => {
-                // `.workbench/` 整体跳过：锁心跳与 journal 的瞬时 temp 也在这里，
-                // 清扫若删掉 rename 前的 temp，会让心跳误判失败而降级只读。
-                if entry.file_name() == paths::WORKBENCH_DIR {
-                    continue;
-                }
                 removed += sweep_orphan_temps(&path, now);
             }
             Ok(file_type) if file_type.is_file() => {
@@ -535,6 +536,27 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_settings_version_fails_without_rewriting_file() {
+        let temp = TempVault::new();
+        let settings = paths::settings_file(&temp.root);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+        value["schemaVersion"] = serde_json::json!(2);
+        let bytes = serde_json::to_vec_pretty(&value).unwrap();
+        fs::write(&settings, &bytes).unwrap();
+
+        // 启动失败要带回可读原因（前端据此显示启动失败页），且不得覆盖用户文件
+        let Err(error) = Vault::open(temp.root.clone()) else {
+            panic!("高版本 settings 不应打开成功");
+        };
+        assert!(
+            matches!(error, VaultError::Encoding(ref message) if message.contains("schemaVersion=2")),
+            "应为版本错误：{error}"
+        );
+        assert_eq!(fs::read(&settings).unwrap(), bytes, "不得改写用户文件");
+    }
+
+    #[test]
     fn corrupt_journal_degrades_to_readonly_instead_of_failing_startup() {
         let temp = TempVault::new();
         temp.vault.write("notes/a.md", b"keep", "user").unwrap();
@@ -544,7 +566,7 @@ mod tests {
         atomic::write_atomic(&paths::journal_file(&temp.root), &bytes).unwrap();
 
         let reopened = Vault::open(temp.root.clone()).unwrap();
-        assert!(reopened.readonly(), "journal 损坏应降级为只读模式");
+        assert!(!reopened.writable(), "journal 损坏应降级为只读模式");
 
         // 读不受影响；写一律拒绝
         assert_eq!(
@@ -581,6 +603,12 @@ mod tests {
         // 新鲜临时文件：在途写入，不得误删
         let fresh = temp.root.join("notes").join(".b.md.ember-tmp-200-2");
         fs::write(&fresh, b"writing").unwrap();
+        // `.workbench/` 内崩溃遗留的锁/journal temp 也要回收，但在途 temp 不得误删
+        let stale_internal = temp.root.join(".workbench").join(".lock.json.ember-tmp-100-3");
+        fs::write(&stale_internal, b"stale").unwrap();
+        backdate(&stale_internal);
+        let fresh_internal = temp.root.join(".workbench").join(".lock.json.ember-tmp-200-4");
+        fs::write(&fresh_internal, b"heartbeat").unwrap();
         // 过期与保留期内的回收目录
         let expired_trash = temp.root.join(".workbench").join("trash").join("01JOLD");
         let fresh_trash = temp.root.join(".workbench").join("trash").join("01JNEW");
@@ -593,10 +621,12 @@ mod tests {
         let temps = sweep_orphan_temps(&temp.root, now);
         let trash = sweep_expired_trash(&temp.root, now);
 
-        assert_eq!(temps, 1, "只清理孤儿临时文件");
+        assert_eq!(temps, 2, "回收孤儿临时文件（含 .workbench 内部）");
         assert_eq!(trash, 1, "只清理过期回收目录");
         assert!(!orphan.exists(), "孤儿临时文件应被回收");
         assert!(fresh.exists(), "在途临时文件不得误删");
+        assert!(!stale_internal.exists(), ".workbench 内超龄 temp 应被回收");
+        assert!(fresh_internal.exists(), "心跳中的 temp 不得误删");
         assert!(!expired_trash.exists(), "过期回收目录应被回收");
         assert!(fresh_trash.exists(), "保留期内的回收目录不得误删");
         assert!(temp.vault.read("notes/a.md").unwrap().is_some(), "正文不受清扫影响");
