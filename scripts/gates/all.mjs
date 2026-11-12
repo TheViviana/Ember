@@ -32,4 +32,5 @@ for (const result of results) {
 }
 
 process.stdout.write(failed === 0 ? 'gate 全部通过\n' : `gate 失败：${failed} 项未通过\n`);
+process.stdout.write('注：vite.config.ts 的 alias 未参与校验，别名变更需人工同步\n');
 process.exit(failed === 0 ? 0 : 1);

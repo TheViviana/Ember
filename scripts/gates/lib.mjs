@@ -463,19 +463,19 @@ const STATE_LIBS = /^(?:zustand|@tanstack\/)/;
 /** 各层的外部依赖禁令与内部层禁令 */
 export const LAYER_RULES = {
   'pkg:doc-model': {
-    denyLayers: ['shell', 'data', 'kernel', 'capabilities', 'assembly', 'tests'],
+    denyLayers: ['shell', 'data', 'kernel', 'capabilities', 'assembly'],
     denyExternal: [REACT, TAURI, NODE_BUILTIN, STATE_LIBS, /^@codemirror\//],
   },
   'pkg:canvas-engine': {
-    denyLayers: ['shell', 'data', 'kernel', 'capabilities', 'assembly', 'tests'],
+    denyLayers: ['shell', 'data', 'kernel', 'capabilities', 'assembly'],
     denyExternal: [REACT, TAURI, NODE_BUILTIN, STATE_LIBS, /^@codemirror\//],
   },
   kernel: {
-    denyLayers: ['shell', 'data', 'capabilities', 'assembly', 'tests'],
+    denyLayers: ['shell', 'data', 'capabilities', 'assembly'],
     denyExternal: [TAURI, REACT, STATE_LIBS],
   },
   capabilities: {
-    denyLayers: ['shell', 'data', 'tests'],
+    denyLayers: ['shell', 'data'],
     denyExternal: [TAURI, NODE_BUILTIN, REACT, STATE_LIBS],
   },
   assembly: {
@@ -483,7 +483,7 @@ export const LAYER_RULES = {
     denyExternal: [TAURI, REACT, STATE_LIBS],
   },
   data: {
-    denyLayers: ['shell', 'capabilities', 'assembly', 'tests'],
+    denyLayers: ['shell', 'capabilities', 'assembly'],
     denyExternal: [],
   },
   shell: { denyLayers: [], denyExternal: [] },

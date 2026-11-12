@@ -720,6 +720,38 @@ if (realSize.length === 0) {
   }
 }
 
+{
+  const knownLayers = new Set(Object.keys(LAYER_RULES));
+  const badLayers = Object.entries(LAYER_RULES).flatMap(([layer, rules]) =>
+    rules.denyLayers
+      .filter((denied) => !knownLayers.has(denied))
+      .map((denied) => `${layer} → ${denied}`),
+  );
+  if (badLayers.length === 0) {
+    process.stdout.write('✓ selftest:gate denyLayers 仅引用已登记层\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:gate denyLayers 含未登记层：${badLayers.join('，')}\n`);
+  }
+}
+
+{
+  // 第三处同名映射 vite.config.ts 不参与门禁解析，这里只做键名存在性断言（不比对路径）
+  const root = join(here, '..', '..');
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const keys = Object.keys(pkg.imports ?? {});
+  const viteText = readFileSync(join(root, 'vite.config.ts'), 'utf8');
+  const missing = keys.filter(
+    (key) => !viteText.includes(`'${key}'`) && !viteText.includes(`"${key}"`),
+  );
+  if (keys.length > 0 && missing.length === 0) {
+    process.stdout.write(`✓ selftest:vite imports 的 ${keys.length} 个键名均出现在 vite.config.ts\n`);
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:vite 未在 vite.config.ts 找到别名键：${JSON.stringify(missing)}\n`);
+  }
+}
+
 for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });
 
 process.exit(failures === 0 ? 0 : 1);
