@@ -740,6 +740,7 @@ export type EmberErrorCode =
   | 'path_outside_vault'
   | 'stale_revision'
   | 'invalid_frontmatter'
+  | 'invalid_payload'
   | 'duplicate_id'
   | 'vault_locked'
   | 'index_unavailable'
