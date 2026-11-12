@@ -57,6 +57,12 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
       mtimes.delete(String(path));
       return Promise.resolve();
     },
+    purge: (path) => {
+      assertWritable();
+      files.delete(String(path));
+      mtimes.delete(String(path));
+      return Promise.resolve();
+    },
     rename: (from, to) => {
       assertWritable();
       const bytes = files.get(String(from));

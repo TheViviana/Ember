@@ -56,6 +56,11 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
       await invoke('vault_remove', { path: String(path) });
     },
 
+    // 回滚内部使用：不注册为命令（core.doc.purge 仍为 v1 未实现）
+    purge: async (path) => {
+      await invoke('vault_purge', { path: String(path) });
+    },
+
     rename: async (from, to) => {
       await invoke('vault_rename', { from: String(from), to: String(to) });
     },

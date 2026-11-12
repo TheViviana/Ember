@@ -472,25 +472,72 @@ void test('refresh 单飞：并发调用只扫描一次，结束后可再次刷�
   assert.equal(listCalls, 2, '扫描结束后释放单飞锁');
 });
 
-void test('软删除删原文件失败：回滚 trash 副本、目录不变、抛 io_failed', async () => {
+void test('删除成功：只调用一次 port.remove，库内零 trash 写入，目录与事件各一次', async () => {
   const vault = createMemoryVault({ files: { [VALID]: VALID_TEXT } });
   let removeCalls = 0;
+  const trashWrites: string[] = [];
   const { service } = createServiceWith(vault, {
     remove: async (path) => {
       removeCalls += 1;
-      if (String(path) === VALID) throw new Error('locked');
       return vault.port.remove(path);
+    },
+    write: async (path, bytes, intent) => {
+      if (String(path).startsWith('.workbench/trash/')) trashWrites.push(String(path));
+      return vault.port.write(path, bytes, intent);
     },
   });
   const meta = (await service.list())[0];
   assert.ok(meta !== undefined);
+  const changes: DocChange[] = [];
+  const watcher = service.watch((change) => changes.push(change));
+
+  await service.remove(meta.id, { base: meta.rev, intent: 'user' });
+  watcher.dispose();
+
+  assert.equal(removeCalls, 1, '删除只能触发一次 port.remove');
+  assert.deepEqual(trashWrites, [], '库内不得再写入任何回收副本');
+  assert.deepEqual(Object.keys(vault.dump()), [], '文件是唯一真相源，删除后库内不残留副本');
+  assert.equal((await service.list()).length, 0, '目录条目必须移除');
+  assert.equal(changes.filter((change) => change.kind === 'removed').length, 1, 'removed 事件恰好一次');
+});
+
+void test('删除失败：只尝试一次 port.remove，目录与磁盘保持原样，无残留 key', async () => {
+  const vault = createMemoryVault({ files: { [VALID]: VALID_TEXT } });
+  let removeCalls = 0;
+  const { service } = createServiceWith(vault, {
+    remove: () => {
+      removeCalls += 1;
+      return Promise.reject(new Error('EACCES: 回收站不可写'));
+    },
+  });
+  const meta = (await service.list())[0];
+  assert.ok(meta !== undefined);
+  const changes: DocChange[] = [];
+  const watcher = service.watch((change) => changes.push(change));
 
   await assert.rejects(
     () => service.remove(meta.id, { base: meta.rev, intent: 'user' }),
-    (error: unknown) => error instanceof EmberError && error.code === 'io_failed',
+    (error: unknown) =>
+      error instanceof EmberError &&
+      error.code === 'io_failed' &&
+      error.message.includes('删除失败，文档保持原样（文件未被移入回收站）'),
   );
-  assert.equal(removeCalls, 2, '失败后应最佳努力删除刚写的 trash 副本');
+  watcher.dispose();
+
+  assert.equal(removeCalls, 1, '失败后不得再拿副本路径重试删除');
   assert.ok((vault.dump()[VALID] ?? '').includes('正文内容'));
-  assert.deepEqual(Object.keys(vault.dump()), [VALID], '不应留下 trash 残留');
+  assert.deepEqual(Object.keys(vault.dump()), [VALID], '目录里不得出现任何残留 key');
   assert.equal((await service.list()).length, 1, '目录条目保持不变');
+  assert.deepEqual(changes, [], '失败不得广播 removed 事件');
+});
+
+void test('删除后库内不残留 .workbench/trash 副本', async () => {
+  const { vault, service } = setup({ [VALID]: VALID_TEXT });
+  const meta = (await service.list())[0];
+  assert.ok(meta !== undefined);
+  await service.remove(meta.id, { base: meta.rev, intent: 'user' });
+
+  const trashKeys = Object.keys(vault.dump()).filter((path) => path.startsWith('.workbench/trash/'));
+  assert.deepEqual(trashKeys, [], '文件是唯一真相源，库内不得再有删除副本');
+  assert.equal(vault.dump()[VALID], undefined);
 });

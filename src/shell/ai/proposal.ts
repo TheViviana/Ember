@@ -153,7 +153,7 @@ export const applyProposalDoc = async (
   await docs.remove(proposal.docId, { base: current.meta.rev, intent: 'user' });
   return {
     kind: 'applied',
-    notice: `已删除《${proposal.title}》，文件在 .workbench/trash/`,
+    notice: `已删除《${proposal.title}》，文件已移入系统回收站；本次运行内仍可撤销（撤销是重建，不从回收站取回）`,
     createdId: null,
     undo: { kind: 'restore-deleted', title: proposal.title, input },
   };
@@ -181,7 +181,7 @@ export const undoProposalDoc = async (docs: ProposalDocs, undo: UndoAction): Pro
   if (undo.kind === 'remove-created') {
     const created = await docs.read(undo.docId);
     await docs.remove(undo.docId, { base: created.meta.rev, intent: 'user' });
-    return '已撤销新建，文件移入 .workbench/trash/';
+    return '已撤销新建，文件已移入系统回收站';
   }
   await docs.create(undo.input);
   return `已恢复《${undo.title}》`;

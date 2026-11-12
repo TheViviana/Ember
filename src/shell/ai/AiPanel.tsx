@@ -408,7 +408,7 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
               ? `把《${proposal.title}》正文替换为 AI 结果？旧正文会暂存在本次运行内，可撤销。`
               : proposal.kind === 'create'
                 ? '新建文章，写入 notes/ 目录：'
-                : `删除《${proposal.title}》？文件会移入 .workbench/trash/，可撤销。`}
+                : `删除《${proposal.title}》？文件会移入系统回收站，本次运行内仍可撤销（撤销是重建，不从回收站取回）。`}
           </p>
           {proposal.kind === 'create' ? (
             <input
@@ -461,7 +461,7 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
             type="button"
             className={styles.remove}
             disabled={streaming || busy || activeDocId === null}
-            title="删除当前文章（移入回收站）"
+            title="删除当前文章（移入系统回收站）"
             onClick={() => {
               void requestDelete();
             }}

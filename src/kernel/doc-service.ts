@@ -42,7 +42,13 @@ export interface DocService {
   create(input: CreateDocInput): Promise<DocSnapshot>;
   update(id: DocId, patch: DocPatch, opts: WriteOptions): Promise<WriteOutcome>;
   rename(id: DocId, next: VaultPath, opts: WriteOptions): Promise<WriteOutcome>;
+  /** 用户删除：移入系统回收站，库内不保留副本 */
   remove(id: DocId, opts: WriteOptions): Promise<void>;
+  /**
+   * 永久删除：**仅供内核回滚内部使用**（文章创建后画布写入失败）。
+   * 不是用户删除入口，也不注册为命令——`core.doc.purge` 在契约里仍是「v1 未实现」。
+   */
+  purge(id: DocId, opts: WriteOptions): Promise<void>;
 
   flush(): Promise<void>;
   watch(listener: (change: DocChange) => void): Disposable;
@@ -596,24 +602,40 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
             id: String(id),
           });
         }
-        const trashDir = paths.normalize(`.workbench/trash/${createUlid(now().getTime())}`);
-        const trashPath = paths.join(trashDir, paths.basename(entry.path));
-        // 软删除副本重写为新 id：trash 目录虽被扫描排除，但一旦副本被移出 .workbench/
-        // （或排除规则将来变化），同 id 副本会污染目录——防御纵深，代价是一次往返序列化
-        const trashParsed = parseDocText(decoder.decode(bytes));
-        const trashFrontmatter: Frontmatter = {
-          ...trashParsed.frontmatter,
-          id: createUlid(now().getTime()),
-        };
-        const trashBytes = encoder.encode(composeDocText(trashFrontmatter, trashParsed.body));
-        await port.write(trashPath, trashBytes, opts.intent);
         try {
           await port.remove(entry.path);
         } catch (error) {
-          // 删原文件失败：最佳努力清掉刚写的 trash 副本，目录保持不变，允许用户重试
-          await port.remove(trashPath).catch(() => undefined);
           if (error instanceof EmberError) throw error;
-          throw new EmberError('io_failed', '删除原文件失败，文档保持原样', {
+          throw new EmberError('io_failed', '删除失败，文档保持原样（文件未被移入回收站）', {
+            id: String(id),
+            path: String(entry.path),
+          });
+        }
+        entries.delete(String(id));
+        versions.delete(String(id));
+        byPath.delete(String(entry.path));
+        emitChange({ id, path: entry.path, kind: 'removed', revision: { rev: entry.rev + 1, hash } });
+      });
+    },
+
+    purge: async (id, opts) => {
+      await ensureScanned();
+      return enqueue(String(id), async () => {
+        assertWritable();
+        const entry = requireEntry(id);
+        const bytes = await readBytes(entry.path);
+        if (bytes === null) throw new EmberError('doc_not_found', `文件已消失：${String(entry.path)}`);
+        const hash = await hashBytes(bytes);
+        if (opts.base.hash !== hash) {
+          throw new EmberError('stale_revision', '回滚前修订已过期，请重新读取后再处理', {
+            id: String(id),
+          });
+        }
+        try {
+          await port.purge(entry.path);
+        } catch (error) {
+          if (error instanceof EmberError) throw error;
+          throw new EmberError('io_failed', '回滚删除失败，文件仍在磁盘', {
             id: String(id),
             path: String(entry.path),
           });

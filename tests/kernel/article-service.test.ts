@@ -25,21 +25,6 @@ const createLogger = (): { log: Logger; warns: string[] } => {
   };
 };
 
-/** 部分路径写失败：模拟磁盘只读 / 权限不足，用于验证回滚的两条分支 */
-const withFailingWrites = (
-  vault: MemoryVault,
-  shouldFail: (path: string) => boolean,
-): MemoryVault => ({
-  ...vault,
-  port: {
-    ...vault.port,
-    write: (path, bytes, intent) =>
-      shouldFail(String(path))
-        ? Promise.reject(new Error('EACCES: 磁盘只读'))
-        : vault.port.write(path, bytes, intent),
-  },
-});
-
 const boot = async (vault: MemoryVault, log: Logger): Promise<Kernel> =>
   bootKernel({
     vaultId: VAULT_ID,
@@ -119,15 +104,30 @@ void test('以 . 开头的标题不会生成隐藏文档，重名仍按原有规
   await kernel.shutdown();
 });
 
-void test('画布写失败：文件回滚进 .workbench/trash/，节点数不变', async () => {
+void test('画布写失败：回滚走永久删除，库内不产生回收副本、节点数不变', async () => {
   const vault = createMemoryVault();
   // 先放行 ensureDefault 建画布，之后所有画布写入都失败
   let canvasWrites = 0;
-  const failing = withFailingWrites(
-    vault,
-    (path) => path.startsWith('.workbench/canvas/') && canvasWrites++ >= 1,
-  );
-  const kernel = await boot(failing, createLogger().log);
+  const calls = { purge: 0, remove: 0 };
+  const instrumented = {
+    ...vault,
+    port: {
+      ...vault.port,
+      write: (path: Parameters<typeof vault.port.write>[0], bytes: Uint8Array, intent: Parameters<typeof vault.port.write>[2]) =>
+        path.startsWith('.workbench/canvas/') && canvasWrites++ >= 1
+          ? Promise.reject(new Error('EACCES: 磁盘只读'))
+          : vault.port.write(path, bytes, intent),
+      purge: (path: Parameters<typeof vault.port.purge>[0]) => {
+        calls.purge += 1;
+        return vault.port.purge(path);
+      },
+      remove: (path: Parameters<typeof vault.port.remove>[0]) => {
+        calls.remove += 1;
+        return vault.port.remove(path);
+      },
+    },
+  };
+  const kernel = await boot(instrumented, createLogger().log);
 
   const input = await createInput(kernel, '回滚文章');
   await assert.rejects(
@@ -136,15 +136,19 @@ void test('画布写失败：文件回滚进 .workbench/trash/，节点数不变
       error instanceof EmberError &&
       error.code === 'io_failed' &&
       error.message.includes('已回滚') &&
-      error.message.includes('.workbench/trash/') &&
+      !error.message.includes('.workbench/trash/') &&
       error.message.includes('notes/回滚文章.md'),
   );
 
+  assert.equal(calls.purge, 1, '回滚必须调用永久删除入口');
+  assert.equal(calls.remove, 0, '回滚不能走用户删除（否则会进系统回收站）');
   const dump = vault.dump();
-  assert.equal(dump['notes/回滚文章.md'], undefined, '原文件必须已从 notes/ 移走');
-  const trashed = Object.keys(dump).filter((path) => path.startsWith('.workbench/trash/'));
-  assert.equal(trashed.length, 1, `应恰好一个回收文件，实际：${trashed.join(', ')}`);
-  assert.ok(trashed[0]?.endsWith('/回滚文章.md'), `回收文件名不对：${trashed[0]}`);
+  assert.equal(dump['notes/回滚文章.md'], undefined, '刚建的文章必须已从磁盘删除');
+  assert.deepEqual(
+    Object.keys(dump).filter((path) => path.startsWith('.workbench/trash/')),
+    [],
+    '库内不得产生回收副本',
+  );
 
   const scene = await kernel.context.canvas.open(input.canvasId);
   assert.equal(scene.scene.nodes.length, 0);
@@ -152,16 +156,21 @@ void test('画布写失败：文件回滚进 .workbench/trash/，节点数不变
   await kernel.shutdown();
 });
 
-void test('双重失败：错误文本同时给出文章磁盘路径与回收目录，文件仍在磁盘', async () => {
+void test('双重失败：错误文本给出文章磁盘路径，文件仍在磁盘且无回收副本', async () => {
   const vault = createMemoryVault();
   let canvasWrites = 0;
-  const failing = withFailingWrites(
-    vault,
-    (path) =>
-      (path.startsWith('.workbench/canvas/') && canvasWrites++ >= 1) ||
-      path.startsWith('.workbench/trash/'),
-  );
-  const kernel = await boot(failing, createLogger().log);
+  const instrumented = {
+    ...vault,
+    port: {
+      ...vault.port,
+      write: (path: Parameters<typeof vault.port.write>[0], bytes: Uint8Array, intent: Parameters<typeof vault.port.write>[2]) =>
+        path.startsWith('.workbench/canvas/') && canvasWrites++ >= 1
+          ? Promise.reject(new Error('EACCES: 磁盘只读'))
+          : vault.port.write(path, bytes, intent),
+      purge: () => Promise.reject(new Error('EPERM: 永久删除失败')),
+    },
+  };
+  const kernel = await boot(instrumented, createLogger().log);
 
   const input = await createInput(kernel, '双重失败文章');
   let message = '';
@@ -172,7 +181,7 @@ void test('双重失败：错误文本同时给出文章磁盘路径与回收目
   });
 
   assert.match(message, /notes\/双重失败文章\.md/, `错误文本缺少文章路径：${message}`);
-  assert.match(message, /\.workbench\/trash\//, `错误文本缺少回收目录：${message}`);
+  assert.ok(!message.includes('.workbench/trash/'), `不应再提库内回收目录：${message}`);
   assert.match(message, /回滚失败/);
 
   const dump = vault.dump();

@@ -189,7 +189,7 @@ export interface DocFilter {
 - **D1** `update`/`rename`/`remove` 的 `base` 与磁盘不一致时，必须走 diff3，不得直接覆盖（I2）。
 - **D2** `create` 遇到已存在的路径，必须抛 `path_exists`，不得覆盖。
 - **D3** `rename` 不改变 `id`、`created`、`updated`；只改路径与 frontmatter 中的显式 title 不受影响。
-- **D4** `remove` 默认移入 `.workbench/trash/<ULID>/`（软删除），硬删除只能经命令 `core.doc.purge`，且需要显式参数（v1 未实现：回收站只进不出，当前唯一回收路径是 vault-format §8.6 的 30 天惰性清扫；属已记录缺口，不是允许的现状）。
+- **D4** `remove` 把文件**移入操作系统回收站**（macOS：`NSFileManager.trashItemAtURL`），库内不保留副本；非 macOS 明确失败（`io_failed`，文案说明该平台不支持系统回收站），**不得**回退为永久删除。应用内不提供从回收站恢复的入口，恢复只能在系统回收站里完成。永久删除入口 `Vault::purge` / `vault_purge` **仅供内核回滚内部使用**（文章创建后画布写入失败），不是用户入口；`core.doc.purge` 在 v1 仍是「未实现」。
 - **D5** 所有返回值里的 `DocMeta.rev` 必须与磁盘实际内容对应；不允许返回「打算写入但未提交」的状态。
 - **D6** `read` 不做写入（adoption 不在这里发生）。
 - **D7** 任何写入完成后，索引刷新可以是异步的，但 `flush()` 返回后索引必须已对齐。

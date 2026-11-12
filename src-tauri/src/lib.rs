@@ -53,6 +53,7 @@ pub fn run() {
             commands::vault_read,
             commands::vault_write,
             commands::vault_remove,
+            commands::vault_purge,
             commands::vault_rename,
             commands::vault_list,
             commands::vault_stat,

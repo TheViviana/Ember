@@ -4,6 +4,7 @@ pub mod journal;
 pub mod lock;
 pub mod media;
 pub mod paths;
+pub mod trash;
 pub mod ulid;
 pub mod watcher;
 
@@ -21,7 +22,8 @@ const SETTINGS_SCHEMA_VERSION: u64 = 1;
 /// 孤儿临时文件保留期：正常一次原子写远不到 1 小时，超龄的 `.ember-tmp-`
 /// 必然是崩溃遗留且未登记进 journal 的孤儿（recover 只清理登记过的）。
 const ORPHAN_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
-/// 软删除副本（`.workbench/trash/<ULID>/`）保留期，到期整目录回收。
+/// 旧版软删除副本（`.workbench/trash/<ULID>/`）保留期。
+/// v1 起删除直接进系统回收站，库内不再产生新副本；这里只为历史库做惰性回收。
 const TRASH_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
 
 /// 库运行态：根路径、身份、锁与写入串行化。
@@ -117,8 +119,24 @@ impl Vault {
             .map_err(|error| with_path(error, &absolute))
     }
 
-    /// 删除不存在的文件视为成功，便于内核做幂等对账。
+    /// 删除：移入操作系统回收站，库内不保留副本（vault-format §8.6）。
+    /// 文件不存在视为成功，便于内核做幂等对账。
     pub fn remove(&self, relative: &str) -> VaultResult<()> {
+        self.ensure_writable()?;
+        let (absolute, normalized) = paths::resolve(&self.root, relative)?;
+        paths::ensure_not_reserved(&normalized)?;
+        let _gate = self.begin_write()?;
+        match fs::symlink_metadata(&absolute) {
+            Ok(_) => trash::trash(&self.root, &absolute),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(with_path(error.into(), &absolute)),
+        }
+    }
+
+    /// 永久删除：**仅供内核回滚内部使用**（文章创建后画布写入失败），
+    /// 不是用户删除入口——用户删除一律走 [`Vault::remove`] 进系统回收站。
+    /// 不注册为用户可调用的 `core.doc.purge` 命令（契约里该项仍为 v1 未实现）。
+    pub fn purge(&self, relative: &str) -> VaultResult<()> {
         self.ensure_writable()?;
         let (absolute, normalized) = paths::resolve(&self.root, relative)?;
         paths::ensure_not_reserved(&normalized)?;
@@ -240,7 +258,8 @@ fn with_path(error: VaultError, path: &Path) -> VaultError {
 /// 启动期惰性清扫（持锁、journal 恢复成功后执行；只读观察者不执行）。
 ///
 /// - 全库孤儿 `.ember-tmp-` 临时文件（>24h）：崩溃遗留且未登记 journal，永远无人清理；
-/// - `.workbench/trash/<ULID>/`（>30 天）：软删除副本到期回收（规范 §10.5 保留期）。
+/// - `.workbench/trash/<ULID>/`（>30 天）：**旧版**软删除副本的惰性回收。
+///   v1 起删除直接进系统回收站，库内不再产生新副本；历史库的副本冻结保留到期后清理。
 ///
 /// 全部失败只记日志不影响启动；mtime 不可读按保守不删处理。
 /// `.workbench/` 内的临时文件（锁心跳、journal）同样参与清扫：24h 年龄门槛
@@ -495,9 +514,6 @@ mod tests {
         temp.vault
             .write(".workbench/canvas/01J.json", b"{}", "user")
             .unwrap();
-        temp.vault
-            .write(".workbench/trash/01J/a.md", b"x", "user")
-            .unwrap();
     }
 
     #[test]
@@ -513,7 +529,83 @@ mod tests {
             let error = temp.vault.remove(path).unwrap_err();
             assert_eq!(reserved_code(error), "path_outside_vault", "路径：{path}");
         }
-        temp.vault.remove("notes/a.md").unwrap();
+        // 保留路径之外的清理走 purge，避免把测试文件塞进用户回收站（真实落点由下方专测覆盖）
+        temp.vault.purge("notes/a.md").unwrap();
+    }
+
+    #[test]
+    fn remove_missing_file_is_idempotent() {
+        let temp = TempVault::new();
+        // 内核做幂等对账：不存在就是成功，不报错、不产生回收站动作
+        temp.vault.remove("notes/never-existent.md").unwrap();
+        temp.vault.purge("notes/never-existent.md").unwrap();
+    }
+
+    #[test]
+    fn remove_on_readonly_vault_is_rejected() {
+        let temp = TempVault::new();
+        temp.vault.write("notes/a.md", b"x", "user").unwrap();
+
+        // 同库第二个实例抢不到锁 → 只读观察者；删除必须在触盘前被拒
+        let observer = Vault::open(temp.root.clone()).unwrap();
+        assert!(!observer.writable(), "第二个实例应为只读观察者");
+        let error = observer.remove("notes/a.md").unwrap_err();
+        assert!(matches!(error, VaultError::Readonly), "只读库删除应被拒：{error}");
+        assert_eq!(error.code(), "vault_locked");
+        assert!(temp.root.join("notes/a.md").exists(), "文件必须保持原样");
+    }
+
+    /// 系统回收站落点（本地卷：`~/.Trash/<name>`）。测试只接受绝对落点，避免误删。
+    #[cfg(target_os = "macos")]
+    fn system_trash_path(name: &str) -> PathBuf {
+        let home = std::env::var("HOME").expect("测试机应有 HOME");
+        PathBuf::from(home).join(".Trash").join(name)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn remove_moves_document_into_system_trash() {
+        let temp = TempVault::new();
+        let name = format!("ember-trash-{}.md", ulid::generate());
+        let relative = format!("notes/{name}");
+        temp.vault.write(&relative, b"trash me", "user").unwrap();
+        let source = temp.root.join("notes").join(&name);
+        let landed = system_trash_path(&name);
+        assert!(!landed.exists(), "回收站不应已有同名残留：{}", landed.display());
+
+        temp.vault.remove(&relative).unwrap();
+
+        assert!(!source.exists(), "源文件必须离开库内");
+        assert!(
+            temp.vault
+                .list()
+                .unwrap()
+                .iter()
+                .all(|path| path != &relative),
+            "库清单不得再包含被删文档"
+        );
+        assert!(
+            landed.exists(),
+            "文件应出现在系统回收站：{}",
+            landed.display()
+        );
+        // 清理：测完从回收站删除，不污染用户回收站
+        fs::remove_file(&landed).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn purge_deletes_permanently_without_touching_trash() {
+        let temp = TempVault::new();
+        let name = format!("ember-purge-{}.md", ulid::generate());
+        let relative = format!("notes/{name}");
+        temp.vault.write(&relative, b"purge me", "user").unwrap();
+        let landed = system_trash_path(&name);
+
+        temp.vault.purge(&relative).unwrap();
+
+        assert!(!temp.root.join("notes").join(&name).exists());
+        assert!(!landed.exists(), "回滚用永久删除不得在回收站留痕");
     }
 
     #[test]

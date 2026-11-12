@@ -34,7 +34,8 @@ const candidatePath = (name: string, attempt: number): VaultPath =>
 
 /**
  * 一步新建文章：落盘 .md → 建文档节点。
- * 画布写失败时把刚建的文件移入 .workbench/trash/（复用 docs.remove），失败则报出磁盘路径。
+ * 画布写失败时用 docs.purge 永久删除刚建的空文件（回滚不是用户删除，不进回收站），
+ * 失败则报出磁盘路径。
  */
 export const createArticleOnCanvas = async (
   input: CreateArticleInput,
@@ -77,17 +78,17 @@ export const createArticleOnCanvas = async (
   } catch (canvasError) {
     const path = String(created.meta.path);
     try {
-      await input.docs.remove(created.meta.id, { base: created.meta.rev, intent: 'user' });
+      await input.docs.purge(created.meta.id, { base: created.meta.rev, intent: 'user' });
     } catch (rollbackError) {
       throw new EmberError(
         'io_failed',
-        `画布写入失败且回滚失败。文章仍在磁盘：${path}；目标回收目录：.workbench/trash/（回滚原因：${toErrorText(rollbackError)}；画布原因：${toErrorText(canvasError)}）`,
+        `画布写入失败且回滚失败。文章仍在磁盘：${path}（回滚原因：${toErrorText(rollbackError)}；画布原因：${toErrorText(canvasError)}）`,
         { path, rolledBack: false },
       );
     }
     throw new EmberError(
       'io_failed',
-      `画布写入失败，已回滚并移入 .workbench/trash/：${path}（原因：${toErrorText(canvasError)}）`,
+      `画布写入失败，已回滚并删除刚创建的文件：${path}（原因：${toErrorText(canvasError)}）`,
       { path, rolledBack: true },
     );
   }

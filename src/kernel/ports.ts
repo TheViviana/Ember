@@ -25,7 +25,10 @@ export interface VaultPort {
   /** 不存在返回 null */
   read(path: VaultPath): Promise<Uint8Array | null>;
   write(path: VaultPath, bytes: Uint8Array, intent: WriteIntent): Promise<void>;
+  /** 用户删除：移入操作系统回收站（非 macOS 明确失败，不回退为永久删除） */
   remove(path: VaultPath): Promise<void>;
+  /** 永久删除：仅供内核回滚内部使用，不是用户删除入口 */
+  purge(path: VaultPath): Promise<void>;
   rename(from: VaultPath, to: VaultPath): Promise<void>;
   /** 全库文件清单（相对路径），用于目录对账 */
   list(): Promise<readonly VaultPath[]>;

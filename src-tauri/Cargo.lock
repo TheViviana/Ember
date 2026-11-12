@@ -743,6 +743,8 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.4.3",
  "keyring",
+ "objc2",
+ "objc2-foundation",
  "reqwest",
  "serde",
  "serde_json",
@@ -2141,6 +2143,7 @@ checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.13.2",
  "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
 ]

@@ -107,9 +107,16 @@ pub async fn vault_write(
     vault.write(&path, &bytes, &intent)
 }
 
+/// 用户删除：移入系统回收站（vault-format §8.6）。
 #[tauri::command]
 pub async fn vault_remove(vault: State<'_, Vault>, path: String) -> VaultResult<()> {
     vault.remove(&path)
+}
+
+/// 永久删除：仅供内核回滚内部使用，不是用户命令（`core.doc.purge` 仍为 v1 未实现）。
+#[tauri::command]
+pub async fn vault_purge(vault: State<'_, Vault>, path: String) -> VaultResult<()> {
+    vault.purge(&path)
 }
 
 #[tauri::command]
