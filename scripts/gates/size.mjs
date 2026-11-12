@@ -108,12 +108,12 @@ export function checkSize(root, options = {}) {
   let info;
   try {
     info = statSync(shellDir);
-  } catch {
+  } catch (error) {
     violations.push({
       file: 'src/shell',
       line: 0,
       rule: 'size-root',
-      detail: 'shell 目录不存在或不可访问；拒绝以空结果通过',
+      detail: `shell 目录不存在或不可访问（${error.code ?? error.message}）；拒绝以空结果通过`,
     });
     return violations;
   }

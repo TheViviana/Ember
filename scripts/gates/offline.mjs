@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DEFAULT_ROOT, toPosix } from './lib.mjs';
+import { DEFAULT_ROOT, exemptionViolations, toPosix } from './lib.mjs';
 
 /**
  * 零联网门禁：源码 + 构建产物里不允许出现会被运行期加载的外域 URL。
@@ -30,32 +30,40 @@ const URL_RE = /\bhttps?:\/\/[^\s"'`<>)\]}]+/gi;
 const PROTOCOL_RELATIVE_RE = /(?<!:)\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?(?:[/?#][^\s"'`<>)\]}]*)?/gi;
 const LOOPBACK_RE = /^(?:https?:)?\/\/(?:localhost|ipc\.localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)/i;
 
-/** 每条白名单都必须能解释"为什么运行期不会产生网络请求" */
+/**
+ * 每条白名单都必须能解释"为什么运行期不会产生网络请求"。
+ * expires 是复核节点，不是失效开关：到期必须重新裁决，修复后删除条目或论证后改期。
+ */
 const ALLOW = [
   {
     file: 'src-tauri/tauri.conf.json',
     match: /^https:\/\/schema\.tauri\.app\//,
     reason: '开发期 JSON Schema 标识，只给编辑器补全用，应用运行时不请求',
+    expires: '2027-01-31',
   },
   {
     file: 'src-tauri/tauri.conf.json',
     match: /^http:\/\/localhost:5173$/,
     reason: 'devUrl 指向本机 Vite 开发服务器',
+    expires: '2027-01-31',
   },
   {
     file: 'dist/**',
     match: /^https:\/\/react\.dev\/errors\//,
     reason: 'React 生产包内的错误说明链接，仅作为错误消息字符串拼接',
+    expires: '2027-01-31',
   },
   {
     file: 'dist/**',
     match: /^https:\/\/react\.dev\/link\//,
     reason: 'React 生产包内的文档链接字符串，不会被请求',
+    expires: '2027-01-31',
   },
   {
     file: 'dist/**',
     match: /^http:\/\/www\.w3\.org\//,
     reason: 'SVG / XML 命名空间标识符，仅用于 setAttribute，不是可请求地址',
+    expires: '2027-01-31',
   },
 ];
 
@@ -251,36 +259,63 @@ function charLiteralEnd(source, start) {
   return source[index] === "'" ? index + 1 : null;
 }
 
-function walk(dir, result = []) {
+function walk(dir, root, result, problems) {
   const start = resolve(dir);
   let entries;
   try {
     entries = readdirSync(start, { withFileTypes: true });
-  } catch {
-    return result;
+  } catch (error) {
+    problems.push({
+      file: toPosix(relative(root, start)) || '.',
+      detail: `目录无法读取：${error.code ?? error.message}`,
+    });
+    return;
   }
   for (const entry of entries) {
     if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
     const full = join(start, entry.name);
-    if (entry.isDirectory()) walk(full, result);
+    if (entry.isDirectory()) walk(full, root, result, problems);
     else if (SOURCE_EXT.has(extname(entry.name).toLowerCase())) result.push(full);
   }
   return result;
 }
 
-function walkDist(dir, result = []) {
+function walkDist(dir, root, result, problems) {
+  const start = resolve(dir);
   let entries;
   try {
-    entries = readdirSync(resolve(dir), { withFileTypes: true });
-  } catch {
-    return result;
+    entries = readdirSync(start, { withFileTypes: true });
+  } catch (error) {
+    problems.push({
+      file: toPosix(relative(root, start)) || '.',
+      detail: `产物目录无法读取：${error.code ?? error.message}`,
+    });
+    return;
   }
   for (const entry of entries) {
-    const full = join(resolve(dir), entry.name);
-    if (entry.isDirectory()) walkDist(full, result);
+    const full = join(start, entry.name);
+    if (entry.isDirectory()) walkDist(full, root, result, problems);
     else if (DIST_EXT.has(extname(entry.name).toLowerCase())) result.push(full);
   }
   return result;
+}
+
+function collectSources(root, problems) {
+  const files = [];
+  for (const target of SOURCE_TARGETS) {
+    const full = join(root, target);
+    try {
+      const stat = statSync(full);
+      if (stat.isDirectory()) walk(full, root, files, problems);
+      else if (SOURCE_EXT.has(extname(full).toLowerCase())) files.push(full);
+    } catch (error) {
+      problems.push({
+        file: target,
+        detail: `扫描目标不可访问（${error.code ?? error.message}）`,
+      });
+    }
+  }
+  return files.sort();
 }
 
 function whitelistFor(relPath, url) {
@@ -318,61 +353,93 @@ function scanFile(root, file) {
   return { relPath, found };
 }
 
-function collectSources(root) {
-  const files = [];
-  for (const target of SOURCE_TARGETS) {
-    const full = join(root, target);
-    if (!existsSync(full)) continue;
-    const stat = statSync(full);
-    if (stat.isDirectory()) files.push(...walk(full));
-    else if (SOURCE_EXT.has(extname(full).toLowerCase())) files.push(full);
-  }
-  return files.sort();
-}
+const FONT_FILES = [
+  'orbitron-latin.woff2',
+  'roboto-latin.woff2',
+  'anonymous-pro-latin-400.woff2',
+  'anonymous-pro-latin-700.woff2',
+  'geist-sans-variable.woff2',
+];
 
-function main() {
-  const rootArg = process.argv.indexOf('--root');
-  const root = resolve(rootArg >= 0 ? (process.argv[rootArg + 1] ?? DEFAULT_ROOT) : DEFAULT_ROOT);
+/**
+ * 审计库内源码与 dist 产物的外域引用。
+ * 读取失败一律变成 `offline-read`：不可读子树、缺失的扫描目标都不允许冒充「零外域」。
+ * @param {string} root 仓库根
+ * @param {{requireDist?: boolean, checkFonts?: boolean}} [options]
+ */
+export function checkOffline(root, options = {}) {
+  const requireDist = options.requireDist ?? true;
+  const checkFonts = options.checkFonts ?? true;
+  const problems = [];
+  const sources = collectSources(root, problems);
   const distDir = join(root, 'dist');
+  const dist = existsSync(distDir) ? walkDist(distDir, root, [], problems) : [];
 
-  const sources = collectSources(root);
-  const dist = existsSync(distDir) ? walkDist(distDir) : [];
-  if (dist.length === 0) {
-    process.stdout.write('✗ offline：dist 不存在或为空，请先运行 pnpm build 再检查产物\n');
-    process.exit(1);
+  const violations = [
+    ...exemptionViolations(ALLOW, { rule: 'offline-allow', label: 'offline' }),
+    ...problems.map((problem) => ({
+      file: problem.file,
+      line: 0,
+      rule: 'offline-read',
+      detail: problem.detail,
+    })),
+  ];
+  if (requireDist && dist.length === 0) {
+    violations.push({
+      file: 'dist',
+      line: 0,
+      rule: 'offline-dist',
+      detail: 'dist 不存在或为空，请先运行 pnpm build 再检查产物',
+    });
   }
 
   const scans = [...sources.map((file) => scanFile(root, file)), ...dist.map((file) => scanFile(root, file))];
   const hits = scans.flatMap((scan) => scan.found.map((hit) => ({ ...hit, file: scan.relPath })));
   const allowed = hits.filter((hit) => hit.allowed);
-  const violations = hits.filter((hit) => !hit.allowed);
+  for (const hit of hits.filter((hit) => !hit.allowed)) {
+    violations.push({
+      file: hit.file,
+      line: hit.line,
+      rule: 'offline-url',
+      detail: `${hit.url}（${hit.reason}）`,
+    });
+  }
 
-  for (const hit of allowed) {
+  const missingFonts = checkFonts
+    ? FONT_FILES.filter((name) => !existsSync(join(root, 'public', 'fonts', name)))
+    : [];
+  for (const name of missingFonts) {
+    violations.push({
+      file: `public/fonts/${name}`,
+      line: 0,
+      rule: 'offline-font',
+      detail: '缺少本地字体；运行期会回退到系统字体或尝试联网',
+    });
+  }
+
+  return { violations, allowed, sources, dist, missingFonts };
+}
+
+function main() {
+  const rootArg = process.argv.indexOf('--root');
+  const root = resolve(rootArg >= 0 ? (process.argv[rootArg + 1] ?? DEFAULT_ROOT) : DEFAULT_ROOT);
+  const result = checkOffline(root);
+
+  for (const hit of result.allowed) {
     process.stdout.write(`  · 白名单 ${hit.file}:${hit.line} ${hit.url} — ${hit.reason}\n`);
   }
-  for (const hit of violations) {
-    process.stdout.write(`  ✗ ${hit.file}:${hit.line} ${hit.url}（${hit.reason}）\n`);
+  for (const violation of result.violations) {
+    process.stdout.write(`  ✗ ${violation.file}:${violation.line} [${violation.rule}] ${violation.detail}\n`);
   }
 
-  const fontFiles = [
-    'orbitron-latin.woff2',
-    'roboto-latin.woff2',
-    'anonymous-pro-latin-400.woff2',
-    'anonymous-pro-latin-700.woff2',
-    'geist-sans-variable.woff2',
-  ];
-  const missingFonts = fontFiles.filter((name) => !existsSync(join(root, 'public', 'fonts', name)));
-
+  const external = result.violations.filter((violation) => violation.rule === 'offline-url').length;
   process.stdout.write(
-    `offline：源码 ${sources.length} 个文件、产物 ${dist.length} 个文件；` +
-      `外域引用 ${violations.length} 处，白名单 ${allowed.length} 处；` +
-      `本地字体 ${fontFiles.length - missingFonts.length}/${fontFiles.length}\n`,
+    `offline：源码 ${result.sources.length} 个文件、产物 ${result.dist.length} 个文件；` +
+      `外域引用 ${external} 处，白名单 ${result.allowed.length} 处；` +
+      `本地字体 ${FONT_FILES.length - result.missingFonts.length}/${FONT_FILES.length}\n`,
   );
-  if (missingFonts.length > 0) {
-    process.stdout.write(`  ✗ 缺少本地字体：${missingFonts.join(', ')}\n`);
-  }
 
-  const failed = violations.length > 0 || missingFonts.length > 0;
+  const failed = result.violations.length > 0;
   process.stdout.write(failed ? 'gate:offline 失败\n' : 'gate:offline 通过：运行期零外域引用\n');
   process.exit(failed ? 1 : 0);
 }

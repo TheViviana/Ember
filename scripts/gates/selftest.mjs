@@ -9,7 +9,7 @@ import { scanBans } from './bans.mjs';
 import { findCycles } from './cycles.mjs';
 import { checkLayers } from './layers.mjs';
 import { exemptionViolations, LAYER_RULES, MODULE_EXEMPTIONS, MODULE_LAYOUT } from './lib.mjs';
-import { stripRustComments } from './offline.mjs';
+import { checkOffline, stripRustComments } from './offline.mjs';
 import { checkSize, SIZE_LIMIT } from './size.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -191,6 +191,83 @@ for (const testCase of rustCases) {
     process.stdout.write(
       `✗ selftest:rust ${testCase.name}：期望${testCase.shouldMatch ? '保留' : '剥离'}地址\n`,
     );
+  }
+}
+
+// offline：读取失败与缺失目标必须显式报错，不允许静默当作「零外域」
+{
+  const FONT_NAMES = [
+    'orbitron-latin.woff2',
+    'roboto-latin.woff2',
+    'anonymous-pro-latin-400.woff2',
+    'anonymous-pro-latin-700.woff2',
+    'geist-sans-variable.woff2',
+  ];
+  const buildOfflineTree = () => {
+    const dir = makeTempRoot('ember-gate-offline-');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    mkdirSync(join(dir, 'packages'), { recursive: true });
+    mkdirSync(join(dir, 'src-tauri', 'src'), { recursive: true });
+    mkdirSync(join(dir, 'dist'), { recursive: true });
+    mkdirSync(join(dir, 'public', 'fonts'), { recursive: true });
+    for (const name of FONT_NAMES) writeFileSync(join(dir, 'public', 'fonts', name), '');
+    writeFileSync(join(dir, 'src', 'main.ts'), 'export const ok = 1;\n');
+    writeFileSync(join(dir, 'index.html'), '<!doctype html>\n');
+    writeFileSync(join(dir, 'vite.config.ts'), 'export default {};\n');
+    writeFileSync(join(dir, 'eslint.config.mjs'), 'export default [];\n');
+    writeFileSync(join(dir, 'src-tauri', 'tauri.conf.json'), '{}\n');
+    writeFileSync(join(dir, 'src-tauri', 'src', 'main.rs'), '\n');
+    writeFileSync(join(dir, 'dist', 'index.js'), 'console.log(1);\n');
+    return dir;
+  };
+  const expectOfflineRule = (label, root, rule, options = {}) => {
+    const { violations } = checkOffline(root, options);
+    if (violations.some((row) => row.rule === rule)) {
+      process.stdout.write(`✓ selftest:offline ${label}\n`);
+    } else {
+      failures += 1;
+      process.stdout.write(`✗ selftest:offline ${label}：期望命中 ${rule}，实际 ${JSON.stringify(violations)}\n`);
+    }
+  };
+
+  const clean = buildOfflineTree();
+  const cleanResult = checkOffline(clean);
+  if (cleanResult.violations.length === 0) {
+    process.stdout.write('✓ selftest:offline 完整临时树 0 违规\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:offline 完整临时树有违规：${JSON.stringify(cleanResult.violations)}\n`);
+  }
+
+  const unreadable = buildOfflineTree();
+  const hidden = join(unreadable, 'src', 'hidden');
+  mkdirSync(hidden);
+  writeFileSync(join(hidden, 'leak.ts'), 'export const u = "https://evil.example/x";\n');
+  chmodSync(hidden, 0o000);
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    process.stdout.write('· selftest:offline 不可读目录用例跳过（root 不受权限位限制）\n');
+  } else {
+    expectOfflineRule('不可读目录被拒', unreadable, 'offline-read');
+  }
+  chmodSync(hidden, 0o700);
+
+  const missing = buildOfflineTree();
+  rmSync(join(missing, 'packages'), { recursive: true, force: true });
+  expectOfflineRule('缺失扫描目标被拒', missing, 'offline-read');
+
+  const external = buildOfflineTree();
+  writeFileSync(join(external, 'src', 'main.ts'), 'export const u = "https://evil.example/x";\n');
+  expectOfflineRule('外域引用被拒', external, 'offline-url');
+
+  const emptyDist = buildOfflineTree();
+  rmSync(join(emptyDist, 'dist'), { recursive: true, force: true });
+  expectOfflineRule('dist 为空仍按原语义失败', emptyDist, 'offline-dist');
+  const noDist = checkOffline(emptyDist, { requireDist: false });
+  if (noDist.violations.length === 0) {
+    process.stdout.write('✓ selftest:offline requireDist=false 时允许无 dist\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:offline requireDist=false 仍有违规：${JSON.stringify(noDist.violations)}\n`);
   }
 }
 
