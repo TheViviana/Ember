@@ -61,8 +61,15 @@ export const createFloatPersister = (deps: FloatPersisterDeps): FloatPersister =
 
   let saving = false;
   let pending: (() => void) | null = null;
+  /** 等待「当前这轮保存结束」的完成信号；单槽 pending 会被后续 persist 覆盖，不能复用 */
+  const waiters: Array<() => void> = [];
   let savedBody = '';
   let base: DocRevision | null = null;
+
+  const drainWaiters = (): void => {
+    const callbacks = waiters.splice(0);
+    for (const callback of callbacks) callback();
+  };
 
   const reset = (snapshot: DocSnapshot): void => {
     base = snapshot.meta.rev;
@@ -183,6 +190,9 @@ export const createFloatPersister = (deps: FloatPersisterDeps): FloatPersister =
       }
     } finally {
       saving = false;
+      // 先唤醒等待者，再执行排队写入：等待者恢复后会重新检查 saving，
+      // 即使排队写入立刻开始，也只会继续等下一轮，不会丢完成信号。
+      drainWaiters();
       const next = pending;
       pending = null;
       if (next !== null) next();
@@ -191,13 +201,7 @@ export const createFloatPersister = (deps: FloatPersisterDeps): FloatPersister =
 
   const flushOnClose = async (body: string): Promise<void> => {
     while (saving) {
-      await new Promise<void>((resolve) => {
-        const previous = pending;
-        pending = () => {
-          previous?.();
-          resolve();
-        };
-      });
+      await new Promise<void>((resolve) => waiters.push(resolve));
     }
     await persist(body);
   };
