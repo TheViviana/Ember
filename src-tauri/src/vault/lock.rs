@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
@@ -16,6 +16,25 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const HEARTBEAT_STEP: Duration = Duration::from_millis(250);
 const STALE_AFTER: Duration = Duration::from_secs(30);
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 失效锁认领副本的文件名前缀（`<prefix><pid>.<leaseToken>.<序号>`）。
+pub const TAKEOVER_PREFIX: &str = "lock.takeover.";
+
+/// 认领副本的进程内序号：同一进程的两个认领不能共用路径，
+/// 否则后者的清理会删掉前者刚 rename 出来的副本，两个都拿不到租约。
+static TAKEOVER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 是否为认领副本名：前缀之后必须恰好是三段纯数字，避免误伤同目录的相似文件。
+pub fn is_takeover_copy(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(TAKEOVER_PREFIX) else {
+        return false;
+    };
+    let mut parts = rest.split('.');
+    let numeric = |value: Option<&str>| {
+        value.is_some_and(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    numeric(parts.next()) && numeric(parts.next()) && numeric(parts.next()) && parts.next().is_none()
+}
 
 /// 规范 §7 的锁载荷。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,16 +343,20 @@ struct ClaimedStale {
 fn claim_stale(root: &Path, stale: &StaleLock) -> VaultResult<Option<ClaimedStale>> {
     let lock = paths::lock_file(root);
     let temp = paths::workbench(root).join(format!(
-        "lock.takeover.{}.{}",
+        "{TAKEOVER_PREFIX}{}.{}.{}",
         std::process::id(),
-        stale.lease_token
+        stale.lease_token,
+        TAKEOVER_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    // 同 pid 的上次崩溃残留：先清掉，rename 才能落地
-    let _ = fs::remove_file(&temp);
     match fs::rename(&lock, &temp) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
+    }
+    // rename 保留原锁文件的 mtime（可能已是几天前）：刷新为认领时刻，
+    // 清扫的年龄门槛才等价于「认领后从未完成」，不会碰到正在进行的认领。
+    if let Ok(file) = fs::OpenOptions::new().write(true).open(&temp) {
+        let _ = file.set_modified(SystemTime::now());
     }
 
     let same = fs::read(&temp)
@@ -506,7 +529,7 @@ mod tests {
         write_dead_lock(&path, 5);
 
         // 模拟接管者 rename 之后、create 之前崩溃：锁路径为空，临时副本留在 .workbench
-        let orphan = paths::workbench(&temp.0).join(format!("lock.takeover.{}.5", std::process::id()));
+        let orphan = paths::workbench(&temp.0).join(format!("lock.takeover.{}.5.0", std::process::id()));
         fs::rename(&path, &orphan).unwrap();
         assert!(!path.exists());
 
@@ -515,6 +538,40 @@ mod tests {
         assert_eq!(payload.pid, std::process::id());
         assert_eq!(payload.lease_token, 1, "空路径按缺失处理，从 1 开始");
         drop(lock);
+    }
+
+    #[test]
+    fn claim_refreshes_copy_mtime_so_sweep_cannot_kill_it() {
+        let temp = TempRoot::new("lock-claim-age");
+        let path = paths::lock_file(&temp.0);
+        fs::create_dir_all(paths::workbench(&temp.0)).unwrap();
+        write_dead_lock(&path, 4);
+        // 认领会把原锁文件的旧 mtime 带到副本上，若不刷新，清扫会立刻判它超龄
+        let old = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        old.set_modified(SystemTime::now() - Duration::from_secs(48 * 3600))
+            .unwrap();
+        drop(old);
+
+        let stale = match staleness(&path).unwrap() {
+            Staleness::Stale(value) => value,
+            Staleness::Active => panic!("伪造的死锁应判定为失效"),
+        };
+        let claimed = claim_stale(&temp.0, &stale).unwrap().expect("应能认领");
+
+        let age = SystemTime::now()
+            .duration_since(fs::metadata(&claimed.temp).unwrap().modified().unwrap())
+            .unwrap();
+        assert!(age < Duration::from_secs(60), "认领副本的 mtime 必须刷新为当前");
+    }
+
+    #[test]
+    fn takeover_copy_names_are_matched_strictly() {
+        assert!(is_takeover_copy("lock.takeover.100.7.0"));
+        assert!(!is_takeover_copy("lock.takeover.md"));
+        assert!(!is_takeover_copy("lock.takeover.100.7"));
+        assert!(!is_takeover_copy("lock.takeover.100.7.0.extra"));
+        assert!(!is_takeover_copy(".lock"));
+        assert!(!is_takeover_copy("lock.takeover..7.0"));
     }
 
     #[test]

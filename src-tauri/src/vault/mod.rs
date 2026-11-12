@@ -248,9 +248,12 @@ fn with_path(error: VaultError, path: &Path) -> VaultError {
 fn sweep_housekeeping(root: &Path) {
     let now = SystemTime::now();
     let temps = sweep_orphan_temps(root, now);
+    let takeovers = sweep_takeover_copies(root, now);
     let trash = sweep_expired_trash(root, now);
-    if temps > 0 || trash > 0 {
-        eprintln!("启动清扫：清理 {temps} 个孤儿临时文件、{trash} 个过期回收目录");
+    if temps > 0 || takeovers > 0 || trash > 0 {
+        eprintln!(
+            "启动清扫：清理 {temps} 个孤儿临时文件、{takeovers} 个失效锁认领副本、{trash} 个过期回收目录"
+        );
     }
 }
 
@@ -280,6 +283,33 @@ fn sweep_orphan_temps(dir: &Path, now: SystemTime) -> usize {
                 }
             }
             _ => {}
+        }
+    }
+    removed
+}
+
+/// `.workbench/` 顶层：接管者在 rename 认领后、创建新锁前崩溃留下的副本。
+/// 复用孤儿 temp 的 24h 门槛——认领到新建只隔几毫秒，超龄副本必然是崩溃残留；
+/// 只匹配 `lock.takeover.<pid>.<token>` 形态的普通文件，`.lock`/journal/settings 一律不碰。
+fn sweep_takeover_copies(root: &Path, now: SystemTime) -> usize {
+    let mut removed = 0usize;
+    let entries = match fs::read_dir(paths::workbench(root)) {
+        Ok(value) => value,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if !lock::is_takeover_copy(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let path = entry.path();
+        if !older_than(&path, now, ORPHAN_TEMP_MAX_AGE) {
+            continue;
+        }
+        if fs::remove_file(&path).is_ok() {
+            removed += 1;
         }
     }
     removed
@@ -648,20 +678,20 @@ mod tests {
             .contains("garbage-not-json"));
     }
 
+    /// 用 touch -t 把目标 mtime 拨到 2020-01-01，模拟「早已存在」。
+    fn backdate(path: &Path) {
+        let status = std::process::Command::new("/usr/bin/touch")
+            .args(["-t", "202001010000"])
+            .arg(path)
+            .status()
+            .expect("touch 可用");
+        assert!(status.success(), "touch -t 执行失败");
+    }
+
     #[test]
     fn housekeeping_sweeps_orphan_temps_and_expired_trash() {
         let temp = TempVault::new();
         temp.vault.write("notes/a.md", b"body", "user").unwrap();
-
-        // 用 touch -t 把目标 mtime 拨到 2020-01-01，模拟「早已存在」
-        let backdate = |path: &Path| {
-            let status = std::process::Command::new("/usr/bin/touch")
-                .args(["-t", "202001010000"])
-                .arg(path)
-                .status()
-                .expect("touch 可用");
-            assert!(status.success(), "touch -t 执行失败");
-        };
 
         // 孤儿临时文件：崩溃遗留且未登记 journal（mtime 拨旧 → 应被清扫）
         let orphan = temp.root.join("notes").join(".a.md.ember-tmp-100-1");
@@ -697,6 +727,36 @@ mod tests {
         assert!(!expired_trash.exists(), "过期回收目录应被回收");
         assert!(fresh_trash.exists(), "保留期内的回收目录不得误删");
         assert!(temp.vault.read("notes/a.md").unwrap().is_some(), "正文不受清扫影响");
+    }
+
+    #[test]
+    fn housekeeping_sweeps_stale_takeover_copies() {
+        let temp = TempVault::new();
+        let workbench = temp.root.join(".workbench");
+
+        // 超龄副本：认领后崩溃，永远不会再走 create
+        let stale = workbench.join("lock.takeover.100.7.0");
+        fs::write(&stale, b"{}").unwrap();
+        backdate(&stale);
+        // 新鲜副本：可能正在认领中，不得误删
+        let fresh = workbench.join("lock.takeover.200.8.1");
+        fs::write(&fresh, b"{}").unwrap();
+        // 同目录其它文件：锁、settings、以及仅前缀相似的普通文件
+        let lookalike = workbench.join("lock.takeover.md");
+        fs::write(&lookalike, b"keep").unwrap();
+        backdate(&lookalike);
+        let settings = workbench.join("settings.json");
+        fs::write(&settings, b"{}").unwrap();
+        backdate(&settings);
+
+        let removed = sweep_takeover_copies(&temp.root, SystemTime::now());
+
+        assert_eq!(removed, 1, "只回收超龄的认领副本");
+        assert!(!stale.exists(), "超龄副本应被回收");
+        assert!(fresh.exists(), "新鲜副本不得误删");
+        assert!(lookalike.exists(), "仅前缀相似的文件不得被清扫");
+        assert!(paths::lock_file(&temp.root).exists(), ".lock 不得被清扫");
+        assert!(settings.exists(), "settings.json 不得被清扫");
     }
 
     #[test]
