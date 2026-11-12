@@ -1,6 +1,6 @@
 import { useRef, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
+import { useWindowPort } from '../kernel-provider.tsx';
 import { RESIZE_ZONES, resolveResize, type ResizeZone, type WindowFrame } from './resize.ts';
-import { windowApi } from './window-api.ts';
 import styles from './WindowChrome.module.css';
 
 interface Session {
@@ -19,6 +19,7 @@ interface Session {
  *    避免 IPC 排队导致窗口落后于指针。
  */
 export const WindowChrome = (): ReactElement | null => {
+  const windowPort = useWindowPort();
   const session = useRef<Session | null>(null);
   const pointer = useRef<{ x: number; y: number } | null>(null);
   const latest = useRef<WindowFrame | null>(null);
@@ -29,7 +30,7 @@ export const WindowChrome = (): ReactElement | null => {
     frameHandle.current = 0;
     const frame = latest.current;
     latest.current = null;
-    if (frame !== null) void windowApi.applyFrame(frame);
+    if (frame !== null) void windowPort.applyFrame(frame);
   };
 
   const schedule = (frame: WindowFrame): void => {
@@ -62,7 +63,7 @@ export const WindowChrome = (): ReactElement | null => {
     session.current = null;
 
     // 起始 frame 有一次异步读取；期间指针可能已经移动，读到后立即补算。
-    void windowApi.readFrame().then((frame) => {
+    void windowPort.readFrame().then((frame) => {
       if (!dragging.current) return;
       if (frame === null) {
         dragging.current = false;
@@ -107,7 +108,7 @@ export const WindowChrome = (): ReactElement | null => {
     flush();
   };
 
-  if (!windowApi.native) return null;
+  if (!windowPort.native) return null;
 
   return (
     <div className={styles.chrome} aria-hidden="true">

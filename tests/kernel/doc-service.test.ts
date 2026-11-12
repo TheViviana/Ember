@@ -4,7 +4,7 @@ import { createUlid } from '#doc-model';
 import { createDocService } from '../../src/kernel/doc-service.ts';
 import { createEventBus } from '../../src/kernel/events.ts';
 import { createPathTools } from '../../src/kernel/paths.ts';
-import type { Logger } from '../../src/kernel/types.ts';
+import type { DocChange, Logger } from '../../src/kernel/types.ts';
 import { createMemoryVault, type MemoryVault } from './fakes.ts';
 
 const VALID = 'notes/ok.md';
@@ -42,16 +42,19 @@ const silentLog: Logger & { warnings: string[] } = {
   error: () => undefined,
 };
 
-const setup = (files: Record<string, string>): { vault: MemoryVault; service: ReturnType<typeof createDocService> } => {
+const setup = (
+  files: Record<string, string>,
+): { vault: MemoryVault; service: ReturnType<typeof createDocService>; events: ReturnType<typeof createEventBus> } => {
   const vault = createMemoryVault({ files });
+  const events = createEventBus();
   const service = createDocService({
     port: vault.port,
     paths: createPathTools(),
-    events: createEventBus(),
+    events,
     log: silentLog,
     now: () => new Date('2026-11-12T00:00:00Z'),
   });
-  return { vault, service };
+  return { vault, service, events };
 };
 
 void test('YAML 语法非法的 frontmatter 不炸穿整库：其余文档照常可读', async () => {
@@ -115,6 +118,52 @@ void test('外部把合法文档改坏 YAML 后，后续刷新跳过该文档且
   const after = await service.list();
   assert.equal(after.length, 1);
   assert.equal(after[0]?.path, VALID);
+});
+
+void test('外部改名（同 id 换路径）后目录跟随迁移，旧路径不再广播 removed', async () => {
+  silentLog.warnings.length = 0;
+  const { vault, service, events } = setup({ [VALID]: VALID_TEXT });
+  const changes: DocChange[] = [];
+  const subscription = events.on('doc:changed', (change) => {
+    changes.push(change);
+  });
+
+  const before = await service.list();
+  assert.equal(before.length, 1);
+  const meta = before[0];
+  assert.ok(meta !== undefined);
+
+  changes.length = 0;
+  vault.writeRaw('notes/renamed.md', VALID_TEXT);
+  vault.removeRaw(VALID);
+  await service.refresh();
+
+  const after = await service.list();
+  assert.equal(after.length, 1);
+  assert.ok(after[0] !== undefined);
+  assert.equal(after[0].path, 'notes/renamed.md');
+  assert.equal(after[0].rev.rev, meta.rev.rev);
+  assert.equal(after[0].rev.hash, meta.rev.hash);
+  assert.ok(
+    changes.some((change) => change.kind === 'renamed' && change.path === 'notes/renamed.md'),
+    `应广播 renamed，实际：${JSON.stringify(changes)}`,
+  );
+  assert.ok(!changes.some((change) => change.kind === 'removed'), `不应广播 removed：${JSON.stringify(changes)}`);
+
+  const snapshot = await service.read(meta.id);
+  assert.equal(snapshot.meta.path, 'notes/renamed.md');
+  subscription.dispose();
+});
+
+void test('同名 id 的两个路径同时存在时仍按重复 id 处理，不互相抢占', async () => {
+  silentLog.warnings.length = 0;
+  const { service } = setup({ 'notes/a.md': VALID_TEXT, 'notes/b.md': VALID_TEXT });
+
+  const docs = await service.list();
+
+  assert.equal(docs.length, 1);
+  assert.equal(docs[0]?.path, 'notes/a.md');
+  assert.ok(silentLog.warnings.some((line) => line.includes('检测到重复 id')));
 });
 
 void test('update 重写整份 frontmatter 时不丢失取值非法的键', async () => {

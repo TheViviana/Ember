@@ -156,23 +156,24 @@ export const createSettingsService = (options: SettingsServiceOptions): Settings
   const fallback = (): VaultSettings =>
     defaultSettings(options.vaultId, options.vaultName ?? 'Ember Vault', now().toISOString());
 
-  const load = async (): Promise<VaultSettings> => {
-    if (cached !== null) return cached;
+  /** 从磁盘读取并归一化：patch 每次都要重读，避免外部改动被缓存覆盖 */
+  const readFromDisk = async (): Promise<VaultSettings> => {
     const bytes = await options.port.read(path);
-    if (bytes === null) {
-      cached = fallback();
-      return cached;
-    }
+    if (bytes === null) return fallback();
     const text = new TextDecoder().decode(bytes);
     let parsed: unknown;
     try {
       parsed = JSON.parse(text) as unknown;
     } catch {
       options.log.warn('settings.json 解析失败，使用默认设置（不覆盖磁盘）', { path: String(path) });
-      cached = fallback();
-      return cached;
+      return fallback();
     }
-    cached = normalizeSettings(parsed, fallback());
+    return normalizeSettings(parsed, fallback());
+  };
+
+  const load = async (): Promise<VaultSettings> => {
+    if (cached !== null) return cached;
+    cached = await readFromDisk();
     return cached;
   };
 
@@ -199,7 +200,9 @@ export const createSettingsService = (options: SettingsServiceOptions): Settings
       // 读-改-写必须整体入队：两个并发 patch 若都从旧缓存 merge，后落盘者会覆盖先落盘者
       // （丢更新）。入队后 load/merge/persist 严格串行，cached 也只在队列内推进。
       const chained: Promise<VaultSettings> = writing.then(async () => {
-        const current = await load();
+        // 队列内强制重读磁盘：用户/外部工具刚改过 settings.json 时，
+        // 基于旧缓存 merge 会把外部修改整段覆盖掉。
+        const current = await readFromDisk();
         const next = mergePatch(current, patch);
         await persistWrite(next);
         cached = next;

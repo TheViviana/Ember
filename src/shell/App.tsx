@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState, type ReactElement } from 'react';
 import type { DocId } from '#doc-model';
 import { toErrorText } from '../kernel/errors.ts';
 import type { CapabilityState, CommandDescriptor, SettingsPatch } from '../kernel/types.ts';
-import { useKernel } from './kernel-provider.tsx';
+import { useKernel, useWindowPort } from './kernel-provider.tsx';
 import { AiPanel } from './ai/AiPanel.tsx';
 import { CanvasSurface } from './canvas/CanvasSurface.tsx';
 import { CommandPalette } from './commands/CommandPalette.tsx';
@@ -11,6 +11,7 @@ import { useShellCommands } from './commands/shell-commands.ts';
 import { ImportDialog } from './import/ImportDialog.tsx';
 import { useImportCommands } from './import/import-commands.ts';
 import { setCursor } from './editor/cursor-store.ts';
+import { flushFloatEditors } from './editor/float-flush.ts';
 import { useFloatStore } from './editor/float-store.ts';
 import { useFocusStore } from './editor/focus-store.ts';
 import { flushMachineUiWrites, useMachineStore } from '../data/stores/machine-store.ts';
@@ -28,6 +29,7 @@ import styles from './App.module.css';
  */
 export const App = (): ReactElement => {
   const kernel = useKernel();
+  const windowPort = useWindowPort();
   const queryClient = useQueryClient();
   // 侧栏高亮 / 浮窗层级共用同一份激活状态；关闭最前窗时 store 会回退到下一扇
   const activeDocId = useFloatStore((state) => state.activeId);
@@ -41,6 +43,8 @@ export const App = (): ReactElement => {
   const [capabilities, setCapabilities] = useState<readonly CapabilityState[]>(() =>
     kernel.capabilities.list(),
   );
+  // 运行期库锁被接管后由内核广播 vault:mode，状态栏需要跟着切换
+  const [readonlyMode, setReadonlyMode] = useState(kernel.env.readonlyMode);
 
   useShellCommands();
   useImportCommands();
@@ -59,7 +63,7 @@ export const App = (): ReactElement => {
     };
   }, [kernel, queryClient]);
 
-  // 设置变更（本窗口 patch 或外部文件变化）时同步面板展示
+  // 本进程 patch 落盘后同步面板展示；外部直接改 settings.json 暂无监听（下次 patch 会重读磁盘保留改动）
   useEffect(() => {
     const subscription = kernel.events.on('settings:changed', ({ settings: next }) => {
       queryClient.setQueryData(['settings'], next);
@@ -80,21 +84,46 @@ export const App = (): ReactElement => {
     };
   }, [kernel]);
 
-  // 关闭/隐藏前把排队中的 ui.json 写入冲掉：退出瞬间的最后一次变更不落盘就丢了
+  // 库锁运行期失守：内核广播 vault:mode，界面切到只读
+  useEffect(() => {
+    setReadonlyMode(kernel.env.readonlyMode);
+    const subscription = kernel.events.on('vault:mode', ({ readonly }) => {
+      setReadonlyMode(readonly);
+    });
+    return () => {
+      subscription.dispose();
+    };
+  }, [kernel]);
+
+  // 关闭/隐藏前把排队中的 ui.json 与编辑器待写内容冲掉：退出瞬间的最后一次变更不落盘就丢了
   useEffect(() => {
     const flushPendingWrites = (): void => {
       void flushMachineUiWrites();
+      void flushFloatEditors();
     };
     const onVisibility = (): void => {
       if (document.visibilityState === 'hidden') flushPendingWrites();
     };
     window.addEventListener('pagehide', flushPendingWrites);
     document.addEventListener('visibilitychange', onVisibility);
+    // Tauri 关窗不会卸载 React 树，必须拦住关闭、落盘后再放行
+    let disposed = false;
+    let unlistenClose: (() => void) | null = null;
+    void windowPort
+      .onCloseRequested(async () => {
+        await Promise.allSettled([flushMachineUiWrites(), flushFloatEditors()]);
+      })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else unlistenClose = unlisten;
+      });
     return () => {
+      disposed = true;
+      unlistenClose?.();
       window.removeEventListener('pagehide', flushPendingWrites);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, []);
+  }, [windowPort]);
 
   // 命令注册/注销不经过 React 状态，订阅总线后同步侧栏与命令面板
   useEffect(() => {
@@ -158,7 +187,7 @@ export const App = (): ReactElement => {
     <div className={`${styles.root} ${focusActive ? styles.focusMode : ''}`}>
       <Topbar
         kernelVersion={kernel.env.kernelVersion}
-        readonlyMode={kernel.env.readonlyMode}
+        readonlyMode={readonlyMode}
         aiOpen={aiOpen}
         onToggleAi={() => {
           useMachineStore.getState().setAiPanel({ open: !aiOpen });
@@ -197,7 +226,7 @@ export const App = (): ReactElement => {
       </div>
 
       <StatusBar
-        readonlyMode={kernel.env.readonlyMode}
+        readonlyMode={readonlyMode}
         kernelVersion={kernel.env.kernelVersion}
         documentCount={documents.data?.length ?? 0}
         activeCapabilities={activeCapabilities}

@@ -1,6 +1,6 @@
 import type { CanvasNode, CanvasPoint, CanvasScene } from '#canvas-engine';
 import type { CanvasId, VaultPath } from '#doc-model';
-import { unsafeVaultPath } from '#doc-model';
+import { safeFileName, unsafeVaultPath } from '#doc-model';
 import type { CanvasHost } from './canvas-host.ts';
 import type { DocService } from './doc-service.ts';
 import { EmberError, isEmberError, toErrorText } from './errors.ts';
@@ -29,16 +29,6 @@ export interface CreateArticleResult {
   readonly scene: CanvasScene;
 }
 
-/** 文件名只留安全字符；空标题回落「未命名文章」 */
-const safeName = (title: string): string => {
-  const cleaned = [...title]
-    .map((char) => ('\\/:*?"<>|'.includes(char) || char.charCodeAt(0) < 32 ? ' ' : char))
-    .join('')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return cleaned.length === 0 ? UNTITLED : cleaned.slice(0, NAME_MAX);
-};
-
 const candidatePath = (name: string, attempt: number): VaultPath =>
   unsafeVaultPath(`${ARTICLE_DIR}/${attempt === 1 ? name : `${name}-${attempt}`}.md`);
 
@@ -49,7 +39,7 @@ const candidatePath = (name: string, attempt: number): VaultPath =>
 export const createArticleOnCanvas = async (
   input: CreateArticleInput,
 ): Promise<CreateArticleResult> => {
-  const name = safeName(input.title);
+  const name = safeFileName(input.title, { fallback: UNTITLED, maxLength: NAME_MAX });
 
   let snapshot: DocSnapshot | null = null;
   for (let attempt = 1; attempt <= MAX_NAME_ATTEMPTS && snapshot === null; attempt += 1) {

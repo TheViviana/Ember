@@ -74,7 +74,10 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
   const env: KernelEnv = {
     kernelVersion,
     vaultId: options.vaultId,
-    readonlyMode: options.ports.vault.readonlyMode,
+    // 运行期锁被接管后端口会翻只读，env 必须跟随而不是固化启动值
+    get readonlyMode() {
+      return options.ports.vault.readonlyMode;
+    },
   };
 
   const settings = createSettingsService({
@@ -150,12 +153,45 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
 
   await docs.flush();
 
-  /** 第 9 步：watcher → 目录对账（串行排队，避免并发扫描） */
-  let reconcile: Promise<void> = Promise.resolve();
-  const watcher = options.ports.vault.watch(() => {
-    reconcile = reconcile
-      .then(() => docs.refresh())
-      .catch((error: unknown) => log.error('目录对账失败', { error: toErrorText(error) }));
+  /**
+   * 第 9 步：watcher → 目录对账。
+   * 一次扫描期间产生的后续事件只记一个「待补扫」标记：结束时再跑一次就够，
+   * 否则批量导入时每个文件事件都排队一次全库重读。
+   */
+  let refreshRunning: Promise<void> | null = null;
+  let refreshQueued = false;
+  const runRefresh = (): void => {
+    if (refreshRunning !== null) {
+      refreshQueued = true;
+      return;
+    }
+    refreshRunning = (async () => {
+      try {
+        await docs.refresh();
+      } catch (error: unknown) {
+        log.error('目录对账失败', { error: toErrorText(error) });
+      } finally {
+        refreshRunning = null;
+        if (refreshQueued) {
+          refreshQueued = false;
+          runRefresh();
+        }
+      }
+    })();
+  };
+  const drainRefresh = async (): Promise<void> => {
+    let current = refreshRunning;
+    while (current !== null) {
+      await current;
+      current = refreshRunning;
+    }
+  };
+  const watcher = options.ports.vault.watch(runRefresh);
+
+  // 运行期降级：端口翻只读后广播给 UI，状态栏/工具栏随之切换
+  const modeWatch = options.ports.vault.watchMode?.((state) => {
+    log.warn('库已降级为只读', { reason: state.reason });
+    events.emit('vault:mode', state);
   });
 
   events.emit('vault:mode', {
@@ -167,9 +203,10 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
     context,
     shutdown: async () => {
       watcher.dispose();
+      modeWatch?.dispose();
       await capabilities.deactivateAll();
       for (const registration of [...registrations].reverse()) registration.dispose();
-      await reconcile;
+      await drainRefresh();
       await docs.flush();
       await canvas.flush();
       await settings.flush();

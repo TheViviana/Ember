@@ -101,6 +101,24 @@ void test('同名标题自动加后缀，不覆盖已有文件', async () => {
   await kernel.shutdown();
 });
 
+void test('以 . 开头的标题不会生成隐藏文档，重名仍按原有规则加后缀', async () => {
+  const vault = createMemoryVault();
+  const kernel = await boot(vault, createLogger().log);
+
+  const first = await createArticleOnCanvas(await createInput(kernel, '.隐藏标题'));
+  const second = await createArticleOnCanvas(await createInput(kernel, '.隐藏标题'));
+
+  assert.equal(String(first.snapshot.meta.path), 'notes/隐藏标题.md');
+  assert.equal(String(second.snapshot.meta.path), 'notes/隐藏标题-2.md');
+  assert.ok(vault.dump()['notes/隐藏标题.md'] !== undefined);
+  assert.equal(
+    Object.keys(vault.dump()).filter((path) => path.startsWith('notes/.')).length,
+    0,
+    'notes/ 下不应出现以点开头的隐藏文档',
+  );
+  await kernel.shutdown();
+});
+
 void test('画布写失败：文件回滚进 .workbench/trash/，节点数不变', async () => {
   const vault = createMemoryVault();
   // 先放行 ensureDefault 建画布，之后所有画布写入都失败

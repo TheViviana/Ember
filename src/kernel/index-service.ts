@@ -13,7 +13,11 @@ import type {
   SearchResult,
 } from './types.ts';
 
-/** 派生数据服务（kernel-contract §4）；唯一可读索引的组件，写入由 Rust 侧负责（X1） */
+/**
+ * 派生数据服务（kernel-contract §4）；唯一可读索引的组件。
+ * 说明：v1 还没有索引写入方——Rust 侧 SQLite/FTS5 尚未接入，
+ * 启动时注入的是 `createPendingIndexPort` 占位实现（rebuild 返回空统计）。
+ */
 export interface IndexService {
   document(id: DocId): Promise<IndexedDocument | null>;
   search(query: SearchQuery): Promise<SearchResult>;

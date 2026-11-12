@@ -1,9 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { WindowFrame } from './resize.ts';
+import type { WindowFrame, WindowPort } from '../../kernel/ports.ts';
 
 /**
- * 无边框窗口的原生能力适配层。
+ * 无边框窗口的原生能力适配层（data 层持有 Tauri import，外壳只经 WindowPort 调用）。
  *
  * 拖拽与双击最大化不在这里：交给 Tauri 的 `data-tauri-drag-region`，
  * 它内置了 macOS「双击后指针一移动就取消最大化」的修正（tauri#8306）。
@@ -14,19 +14,9 @@ import type { WindowFrame } from './resize.ts';
  * 会「成功返回但窗口不动」。所以走自绘 8 向热区 + `window_resize_frame`，
  * 一条 IPC 同时落位置与尺寸，避免两帧撕裂。
  */
-export interface WindowApi {
-  /** 是否运行在 Tauri 内；浏览器 dev 下所有原生调用为 no-op */
-  readonly native: boolean;
-  close(): Promise<void>;
-  minimize(): Promise<void>;
-  toggleZoom(): Promise<void>;
-  readFrame(): Promise<WindowFrame | null>;
-  applyFrame(frame: WindowFrame): Promise<void>;
-}
-
 const inTauri = (): boolean => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
-export const windowApi: WindowApi = {
+export const createTauriWindowPort = (): WindowPort => ({
   get native() {
     return inTauri();
   },
@@ -48,7 +38,7 @@ export const windowApi: WindowApi = {
     await getCurrentWindow().toggleMaximize();
   },
 
-  readFrame: async () => {
+  readFrame: async (): Promise<WindowFrame | null> => {
     if (!inTauri()) return null;
     const current = getCurrentWindow();
     const scale = await current.scaleFactor();
@@ -66,4 +56,16 @@ export const windowApi: WindowApi = {
       height: frame.height,
     });
   },
-};
+
+  onCloseRequested: async (handler) => {
+    if (!inTauri()) return () => undefined;
+    // 不调用 preventDefault 时，Tauri 会等异步回调结束再销毁窗口
+    return getCurrentWindow().onCloseRequested(async () => {
+      try {
+        await handler();
+      } catch {
+        // 收尾失败也要允许关闭；具体错误由各自的写入流程上报
+      }
+    });
+  },
+});

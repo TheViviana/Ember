@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactElement } from 'react';
-import { windowApi } from '../window/window-api.ts';
+import { useWindowPort } from '../kernel-provider.tsx';
 import { WindowControls } from './WindowControls.tsx';
 import styles from './Topbar.module.css';
 
@@ -20,6 +20,7 @@ export const Topbar = ({
   onToggleAi,
   onOpenSettings,
 }: TopbarProps): ReactElement => {
+  const windowPort = useWindowPort();
   const [clock, setClock] = useState(() => formatClock(new Date()));
 
   useEffect(() => {
@@ -38,7 +39,7 @@ export const Topbar = ({
       onDoubleClick={(event) => {
         // 按钮自身的双击（例如连点「设置」）不应该顺带最大化窗口
         if (event.target instanceof Element && event.target.closest('button') !== null) return;
-        void windowApi.toggleZoom();
+        void windowPort.toggleZoom();
       }}
     >
       {/* 两簇浮层：左侧交通灯 + 品牌，右侧状态 + 时钟 + 设置。

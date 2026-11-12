@@ -1,11 +1,9 @@
+import type { WindowFrame } from '../../kernel/ports.ts';
+
 export type ResizeZone = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 
-export interface WindowFrame {
-  readonly x: number;
-  readonly y: number;
-  readonly width: number;
-  readonly height: number;
-}
+/** 坐标定义在 kernel 端口层，这里转出以保持既有导入路径不变 */
+export type { WindowFrame };
 
 export interface WindowSize {
   readonly width: number;

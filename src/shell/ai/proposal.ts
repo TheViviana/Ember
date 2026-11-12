@@ -1,4 +1,4 @@
-import { splitFrontmatter, type DocId } from '#doc-model';
+import { safeFileName, splitFrontmatter, type DocId } from '#doc-model';
 import { EmberError, isEmberError } from '../../kernel/errors.ts';
 import type { CreateDocInput, DocPatch, DocRevision, DocSnapshot, WriteOptions, WriteOutcome } from '../../kernel/types.ts';
 import type { PathTools } from '../../kernel/paths.ts';
@@ -63,16 +63,6 @@ const pad = (value: number): string => String(value).padStart(2, '0');
 const stamp = (at: Date): string =>
   `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}`;
 
-/** 文件名不能带路径分隔符等字符；与新建文档命令保持同一套规则 */
-const safeName = (title: string): string => {
-  const cleaned = title
-    .replace(/[\\/:*?"<>|]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 60);
-  return cleaned.length === 0 ? '未命名' : cleaned;
-};
-
 type PathNormalizer = Pick<PathTools, 'normalize'>;
 
 /** 新建文章：同一秒内重名按 path_exists 自动加序号 */
@@ -83,7 +73,7 @@ export const createProposalDoc = async (
   body: string,
   now: () => Date = () => new Date(),
 ): Promise<DocSnapshot> => {
-  const name = safeName(title);
+  const name = safeFileName(title, { fallback: '未命名', maxLength: 60 });
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
     const path = paths.normalize(`notes/${name}-${stamp(now())}${suffix}.md`);

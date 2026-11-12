@@ -7,6 +7,7 @@ import { parse as parseYaml } from 'yaml';
  *
  * 规则（与已批准方案一致）：
  * - 只吃 .md / .markdown，目标目录固定为 notes/，保留所选目录内的相对层级；
+ *   `.markdown` 统一落为 `.md`，库里不出现两种后缀的同一篇文档；
  * - 跳过 media/ 与 .workbench/ 下的文件；
  * - 单篇 ≤ 5 MB，单次 ≤ 200 篇，超出逐条给出拒绝原因；
  * - 未知 frontmatter 键丢弃，但逐条记录名字，结果里必须能看见；
@@ -244,7 +245,9 @@ export const buildImportPlan = (
       continue;
     }
 
-    const wanted = `${IMPORT_ROOT}/${segments.join('/')}`;
+    // 目标统一 .md 后缀：Rust 扫描与目录对账只认 .md，.markdown 落盘会变成不可见的幽灵文件
+    const fileName = `${stemOf(segments[segments.length - 1] ?? '')}.md`;
+    const wanted = `${IMPORT_ROOT}/${[...segments.slice(0, -1), fileName].join('/')}`;
     const normalized = normalizePath(wanted);
     if (!normalized.ok) {
       rejected.push({ sourcePath, reason: '目标路径不合法' });

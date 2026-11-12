@@ -32,9 +32,11 @@ export interface VaultPort {
   /** 文件元信息；不存在返回 null */
   stat(path: VaultPath): Promise<{ readonly mtime: string; readonly size: number } | null>;
   watch(listener: (event: VaultFileEvent) => void): Disposable;
+  /** 运行期只读状态变化（库锁被接管/心跳失败）；不支持该能力的端口可省略 */
+  watchMode?(listener: (state: { readonly readonly: boolean; readonly reason: string | null }) => void): Disposable;
 }
 
-/** 索引端口：SQLite + FTS5 在 Rust 侧，内核只做编排与查询参数归一化 */
+/** 索引端口：SQLite + FTS5 计划由 Rust 侧实现；v1 仍是占位端口（见 data/tauri/index-port.ts） */
 export interface IndexPort {
   readonly available: boolean;
   document(id: DocId): Promise<IndexedDocument | null>;
@@ -68,4 +70,28 @@ export interface AiPort {
     readonly system: string | null;
     readonly signal: AbortSignal | null;
   }): Promise<string>;
+}
+
+/** 窗口逻辑坐标与尺寸（无边框窗口自绘缩放用） */
+export interface WindowFrame {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * 窗口能力端口：宿主窗口的原生操作由 data 层适配，外壳只经此接口调用。
+ * 浏览器 dev 下 `native` 为 false，所有操作退化为 no-op。
+ */
+export interface WindowPort {
+  readonly native: boolean;
+  close(): Promise<void>;
+  minimize(): Promise<void>;
+  toggleZoom(): Promise<void>;
+  /** 无法读取时返回 null */
+  readFrame(): Promise<WindowFrame | null>;
+  applyFrame(frame: WindowFrame): Promise<void>;
+  /** 关窗请求：回调完成后窗口才销毁；返回取消订阅函数 */
+  onCloseRequested(handler: () => Promise<void>): Promise<() => void>;
 }

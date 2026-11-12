@@ -149,7 +149,7 @@ const withFrontmatterPatch = (base: Frontmatter, patch: DocPatch): Frontmatter =
   };
 };
 
-/** 目录对账：只收录已具备合法且唯一 id 的文档；adoption 由 Rust vault 扫描阶段完成（vault-format §3.2） */
+/** 目录对账：只收录已具备合法且唯一 id 的文档；adoption 尚未实现（vault-format §3.3） */
 export const createDocService = (options: DocServiceOptions): DocServiceInternal => {
   const { port, paths, events, log } = options;
   const now = options.now ?? ((): Date => new Date());
@@ -211,6 +211,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
 
   const refresh = async (): Promise<void> => {
     const pathsInVault = await port.list();
+    const present = new Set(pathsInVault.map((item) => String(item)));
     const seen = new Set<string>();
     const duplicateIds = new Set<string>();
 
@@ -238,9 +239,29 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       const hash = await hashBytes(bytes);
       const existing = entries.get(String(id));
       if (existing !== undefined && String(existing.path) !== String(path)) {
-        // 重复 id：保留先收录者（list 为字典序，结果稳定），后来者不进目录、
-        // 也不写 byPath——否则旧路径会残留指向已换址条目的陈旧映射
-        duplicateIds.add(String(id));
+        if (present.has(String(existing.path))) {
+          // 重复 id：两个路径都还在，保留先收录者（list 为字典序，结果稳定），
+          // 后来者不进目录、也不写 byPath
+          duplicateIds.add(String(id));
+          continue;
+        }
+        // 同 id 的旧路径已不存在：外部改名/移动，迁移条目而不是当作重复 id 丢弃
+        const oldPath = existing.path;
+        const changed = existing.hash !== hash;
+        const rev = changed ? existing.rev + 1 : existing.rev;
+        existing.path = path;
+        existing.rev = rev;
+        existing.hash = hash;
+        existing.text = text;
+        byPath.delete(String(oldPath));
+        byPath.set(String(path), id);
+        seen.add(String(id));
+        emitChange({
+          id,
+          path,
+          kind: changed ? 'external' : 'renamed',
+          revision: { rev, hash },
+        });
         continue;
       }
       const rev = existing === undefined ? 1 : existing.hash === hash ? existing.rev : existing.rev + 1;

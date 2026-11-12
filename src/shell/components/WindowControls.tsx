@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react';
-import { windowApi } from '../window/window-api.ts';
+import { useWindowPort } from '../kernel-provider.tsx';
 import styles from './WindowControls.module.css';
 
 /**
@@ -7,7 +7,8 @@ import styles from './WindowControls.module.css';
  * 按钮是可点击元素，Tauri 的 data-tauri-drag-region 会自动跳过它们，不会误触发拖拽。
  */
 export const WindowControls = (): ReactElement | null => {
-  if (!windowApi.native) return null;
+  const windowPort = useWindowPort();
+  if (!windowPort.native) return null;
 
   return (
     <div className={styles.controls}>
@@ -17,7 +18,7 @@ export const WindowControls = (): ReactElement | null => {
         title="关闭"
         aria-label="关闭窗口"
         onClick={() => {
-          void windowApi.close();
+          void windowPort.close();
         }}
       />
       <button
@@ -26,7 +27,7 @@ export const WindowControls = (): ReactElement | null => {
         title="最小化"
         aria-label="最小化窗口"
         onClick={() => {
-          void windowApi.minimize();
+          void windowPort.minimize();
         }}
       />
       <button
@@ -35,7 +36,7 @@ export const WindowControls = (): ReactElement | null => {
         title="缩放"
         aria-label="缩放窗口"
         onClick={() => {
-          void windowApi.toggleZoom();
+          void windowPort.toggleZoom();
         }}
       />
     </div>

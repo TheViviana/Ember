@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { asCapabilityId, asCommandId, asVaultId, unsafeVaultPath } from '#doc-model';
 import { bootKernel, type Kernel } from '../../src/kernel/boot.ts';
 import type { CapabilityModule } from '../../src/kernel/capability-host.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
+import type { VaultPort } from '../../src/kernel/ports.ts';
 import type { Logger } from '../../src/kernel/types.ts';
 import { createMemoryIndex, createMemoryVault, type MemoryVault } from './fakes.ts';
 
@@ -46,6 +48,89 @@ const boot = async (vault: MemoryVault, calls: string[]): Promise<Kernel> =>
     capabilities: [slashCapability(calls)],
     log: silentLogger,
   });
+
+void test('watcher 连续事件合并：扫描中只补扫一次，不会每个事件各排一次全库重读', async () => {
+  const vault = createMemoryVault();
+  let listCalls = 0;
+  let releaseFirst = (): void => undefined;
+  const port: VaultPort = {
+    ...vault.port,
+    list: () => {
+      listCalls += 1;
+      if (listCalls === 1) {
+        return new Promise((resolve) => {
+          releaseFirst = () => {
+            resolve([]);
+          };
+        });
+      }
+      return Promise.resolve([]);
+    },
+  };
+  const kernel = await bootKernel({
+    vaultId: VAULT_ID,
+    ports: { vault: port, index: createMemoryIndex().port },
+    capabilities: [],
+    log: silentLogger,
+  });
+
+  vault.emitExternal('notes/a.md', 'created');
+  vault.emitExternal('notes/b.md', 'created');
+  vault.emitExternal('notes/c.md', 'created');
+  await delay(0);
+  assert.equal(listCalls, 1, '事件到达时只应有一次扫描在跑');
+
+  releaseFirst();
+  await delay(10);
+
+  assert.equal(listCalls, 2, '进行中收到的事件合并成结束后的一次补扫');
+  await kernel.shutdown();
+  assert.equal(listCalls, 2);
+});
+
+void test('运行期库锁失守：watchMode 转发为 vault:mode 事件并翻只读', async () => {
+  const vault = createMemoryVault();
+  let readonly = false;
+  const listeners: ((state: { readonly: boolean; reason: string | null }) => void)[] = [];
+  const port: VaultPort = {
+    ...vault.port,
+    get readonlyMode() {
+      return readonly;
+    },
+    watchMode: (listener) => {
+      listeners.push(listener);
+      return {
+        dispose: (): void => {
+          const index = listeners.indexOf(listener);
+          if (index >= 0) listeners.splice(index, 1);
+        },
+      };
+    },
+  };
+  const kernel = await bootKernel({
+    vaultId: VAULT_ID,
+    ports: { vault: port, index: createMemoryIndex().port },
+    capabilities: [],
+    log: silentLogger,
+  });
+  const modes: boolean[] = [];
+  const subscription = kernel.context.events.on('vault:mode', ({ readonly: next }) => {
+    modes.push(next);
+  });
+  assert.equal(kernel.context.env.readonlyMode, false);
+
+  readonly = true;
+  const listener = listeners[0];
+  assert.ok(listener !== undefined);
+  listener({ readonly: true, reason: 'library lock unavailable' });
+
+  assert.deepEqual(modes, [true]);
+  assert.equal(kernel.context.env.readonlyMode, true, 'env 必须跟随端口，而不是固化启动值');
+
+  subscription.dispose();
+  await kernel.shutdown();
+  assert.equal(listeners.length, 0, '关闭后注销运行期监听');
+});
 
 void test('启动后能力激活、命令可执行、关闭后命令消失', async () => {
   const vault = createMemoryVault();

@@ -60,6 +60,7 @@ export {
   type WikiLink,
 } from './links.ts';
 export { merge3, type ConflictLabels, type MergeResult } from './merge.ts';
+export { safeFileName, type SafeFileNameOptions } from './naming.ts';
 export { parseMarkdown, type MarkdownProcessor, type MarkdownRoot } from './markdown/pipeline.ts';
 export { joinFrontmatter, splitFrontmatter, type FrontmatterSplit } from './markdown/split.ts';
 export { extractLinks, toPlainText, type ExtractedLink } from './markdown/extract.ts';

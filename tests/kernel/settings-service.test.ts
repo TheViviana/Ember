@@ -146,6 +146,30 @@ void test('patch 后同时触发 settings:changed 事件与 watch 监听', async
   assert.deepEqual(watched, ['off']);
 });
 
+void test('读缓存后外部改写 settings.json，patch 不覆盖外部修改', async () => {
+  const { vault, service } = setup();
+  // 先读一次，让服务持有旧缓存
+  await service.read();
+
+  vault.writeRaw(
+    SETTINGS,
+    JSON.stringify({
+      schemaVersion: 1,
+      externalFlag: true,
+      ui: { sidebar: 'off', extra: 'from-external' },
+    }),
+  );
+
+  await service.patch({ ui: { defaultView: 'editor' } });
+
+  const stored = JSON.parse(vault.dump()[SETTINGS] ?? '{}') as Record<string, unknown>;
+  assert.equal(stored['externalFlag'], true, '外部新增的顶层键应保留');
+  const ui = stored['ui'] as Record<string, unknown>;
+  assert.equal(ui['extra'], 'from-external', '外部新增的 ui 键应保留');
+  assert.equal(ui['sidebar'], 'off', '外部修改不能被旧缓存覆盖');
+  assert.equal(ui['defaultView'], 'editor', '本次 patch 仍要生效');
+});
+
 void test('并发 patch 串行排队，互不丢失更新', async () => {
   const { vault, service } = setup();
 

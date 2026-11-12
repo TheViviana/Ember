@@ -32,7 +32,7 @@ void test('导入：只吃 .md/.markdown，跳过 media、.workbench 与隐藏�
 
   assert.deepEqual(
     plan.entries.map((entry) => entry.targetPath),
-    ['notes/a.md', 'notes/media2/d.md', 'notes/sub/b.markdown'],
+    ['notes/a.md', 'notes/media2/d.md', 'notes/sub/b.md'],
   );
   assert.deepEqual(
     plan.rejected.map((item) => [item.sourcePath, item.reason]),
@@ -42,6 +42,19 @@ void test('导入：只吃 .md/.markdown，跳过 media、.workbench 与隐藏�
       ['folder/.workbench/e.md', '位于 .workbench/，不导入'],
       ['media/c.md', '位于 media/，不导入'],
     ],
+  );
+});
+
+void test('导入：.markdown 统一落为 .md，与既有 .md 同名时加后缀', () => {
+  const plan = buildImportPlan(
+    [candidate('c.markdown', '# C'), candidate('sub/b.markdown', '# B')],
+    ['notes/c.md'],
+    false,
+  );
+
+  assert.deepEqual(
+    plan.entries.map((entry) => entry.targetPath),
+    ['notes/c-2.md', 'notes/sub/b.md'],
   );
 });
 

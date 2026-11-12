@@ -11,6 +11,8 @@ export interface MemoryVault {
   dump(): Readonly<Record<string, string>>;
   /** 模拟外部工具直接改文件（不经端口写） */
   writeRaw(path: string, text: string): void;
+  /** 模拟外部工具直接删除/移走文件（不经端口写） */
+  removeRaw(path: string): void;
   emitExternal(path: string, kind: VaultFileEvent['kind']): void;
 }
 
@@ -95,6 +97,10 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
     writeRaw: (path, text) => {
       files.set(path, encoder.encode(text));
       mtimes.set(path, tick());
+    },
+    removeRaw: (path) => {
+      files.delete(path);
+      mtimes.delete(path);
     },
   };
 };

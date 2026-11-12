@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { asCommandId, splitFrontmatter, type CommandId, type DocId } from '#doc-model';
+import { asCommandId, safeFileName, splitFrontmatter, type CommandId, type DocId } from '#doc-model';
 import type { KernelContext } from '../../kernel/context.ts';
 import { EmberError, isEmberError } from '../../kernel/errors.ts';
 import { useFloatStore } from '../editor/float-store.ts';
@@ -21,16 +21,6 @@ const pad = (value: number): string => String(value).padStart(2, '0');
 const stamp = (now: Date): string =>
   `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 
-/** 文件名不能带路径分隔符等字符，标题里的这些字符统一换成空格 */
-const safeName = (title: string): string => {
-  const cleaned = title
-    .replace(/[\\/:*?"<>|]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 60);
-  return cleaned.length === 0 ? '未命名' : cleaned;
-};
-
 interface NoteSeed {
   readonly summary?: string;
   readonly tags?: readonly string[];
@@ -42,7 +32,7 @@ const createNote = async (
   body: string,
   seed: NoteSeed,
 ): Promise<DocId> => {
-  const name = safeName(title);
+  const name = safeFileName(title, { fallback: '未命名', maxLength: 60 });
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
     const path = kernel.paths.normalize(`notes/${name}-${stamp(new Date())}${suffix}.md`);

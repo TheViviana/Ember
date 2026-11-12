@@ -1,7 +1,42 @@
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { settleFloatWrite, trackFloatWrite } from '../../src/shell/editor/float-flush.ts';
+import { flushFloatEditors, registerFloatFlusher, settleFloatWrite, trackFloatWrite } from '../../src/shell/editor/float-flush.ts';
+
+void test('关窗前注册的编辑器落盘回调全部执行', async () => {
+  const calls: string[] = [];
+  const unsubscribeA = registerFloatFlusher(() => {
+    calls.push('a');
+    return Promise.resolve();
+  });
+  const unsubscribeB = registerFloatFlusher(() => {
+    calls.push('b');
+    return Promise.resolve();
+  });
+
+  await flushFloatEditors();
+
+  assert.deepEqual(calls, ['a', 'b']);
+  unsubscribeA();
+  unsubscribeB();
+});
+
+void test('注销后的回调不再执行，单个回调失败不影响其它', async () => {
+  const calls: string[] = [];
+  const unsubscribeBroken = registerFloatFlusher(() => Promise.reject(new Error('disk full')));
+  const unsubscribeHealthy = registerFloatFlusher(() => {
+    calls.push('healthy');
+    return Promise.resolve();
+  });
+
+  await flushFloatEditors();
+  assert.deepEqual(calls, ['healthy'], '失败的回调不阻断其它落盘');
+
+  unsubscribeBroken();
+  unsubscribeHealthy();
+  await flushFloatEditors();
+  assert.deepEqual(calls, ['healthy'], '注销后关窗不再触发');
+});
 
 void test('关闭写入未完成时，重开必须挂在等待上，落盘后才继续', async () => {
   let release: () => void = () => undefined;

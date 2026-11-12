@@ -34,69 +34,103 @@ export interface TauriVaultPortOptions {
  * Rust vault 的 IPC 适配层：journal 两阶段、库锁、watcher 全在 Rust 侧，
  * 这里只做字节编码与命令名映射。
  */
-export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort => ({
-  readonlyMode: options.readonlyMode,
+export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort => {
+  // 运行期锁被接管后由 vault://mode 翻转；各内核服务每次写入时读这个值
+  let readonly = options.readonlyMode;
 
-  read: async (path) => {
-    const payload = await invoke<string | null>('vault_read', { path: String(path) });
-    return payload === null ? null : fromBase64(payload);
-  },
+  return {
+    get readonlyMode() {
+      return readonly;
+    },
 
-  write: async (path, bytes, intent: WriteIntent) => {
-    await invoke('vault_write', { path: String(path), data: toBase64(bytes), intent });
-  },
+    read: async (path) => {
+      const payload = await invoke<string | null>('vault_read', { path: String(path) });
+      return payload === null ? null : fromBase64(payload);
+    },
 
-  remove: async (path) => {
-    await invoke('vault_remove', { path: String(path) });
-  },
+    write: async (path, bytes, intent: WriteIntent) => {
+      await invoke('vault_write', { path: String(path), data: toBase64(bytes), intent });
+    },
 
-  rename: async (from, to) => {
-    await invoke('vault_rename', { from: String(from), to: String(to) });
-  },
+    remove: async (path) => {
+      await invoke('vault_remove', { path: String(path) });
+    },
 
-  list: async () => {
-    const paths = await invoke<readonly string[]>('vault_list');
-    return paths.map((path) => unsafeVaultPath(path));
-  },
+    rename: async (from, to) => {
+      await invoke('vault_rename', { from: String(from), to: String(to) });
+    },
 
-  stat: async (path) => {
-    const stat = await invoke<RawStat | null>('vault_stat', { path: String(path) });
-    return stat === null ? null : { mtime: stat.mtime, size: stat.size };
-  },
+    list: async () => {
+      const paths = await invoke<readonly string[]>('vault_list');
+      return paths.map((path) => unsafeVaultPath(path));
+    },
 
-  watch: (listener) => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void listen<{ kind: VaultFileEvent['kind']; path: string; from?: string }>(
-      'vault://changed',
-      (event) => {
-        listener({
-          kind: event.payload.kind,
-          path: unsafeVaultPath(event.payload.path),
-          ...(event.payload.from === undefined
-            ? {}
-            : { from: unsafeVaultPath(event.payload.from) }),
+    stat: async (path) => {
+      const stat = await invoke<RawStat | null>('vault_stat', { path: String(path) });
+      return stat === null ? null : { mtime: stat.mtime, size: stat.size };
+    },
+
+    watch: (listener) => {
+      let disposed = false;
+      let unlisten: (() => void) | null = null;
+      void listen<{ kind: VaultFileEvent['kind']; path: string; from?: string }>(
+        'vault://changed',
+        (event) => {
+          listener({
+            kind: event.payload.kind,
+            path: unsafeVaultPath(event.payload.path),
+            ...(event.payload.from === undefined
+              ? {}
+              : { from: unsafeVaultPath(event.payload.from) }),
+          });
+        },
+      )
+        .then((fn) => {
+          if (disposed) {
+            fn();
+            return;
+          }
+          unlisten = fn;
+        })
+        .catch((error: unknown) => {
+          console.error('订阅 vault://changed 失败', error);
         });
-      },
-    )
-      .then((fn) => {
-        if (disposed) {
-          fn();
-          return;
-        }
-        unlisten = fn;
-      })
-      .catch((error: unknown) => {
-        console.error('订阅 vault://changed 失败', error);
-      });
 
-    const disposable: Disposable = {
-      dispose: (): void => {
-        disposed = true;
-        unlisten?.();
-        unlisten = null;
-      },
-    };
-    return disposable;
-  },
-});
+      const disposable: Disposable = {
+        dispose: (): void => {
+          disposed = true;
+          unlisten?.();
+          unlisten = null;
+        },
+      };
+      return disposable;
+    },
+
+    watchMode: (listener) => {
+      let disposed = false;
+      let unlisten: (() => void) | null = null;
+      void listen<{ readonly: boolean; reason: string | null }>('vault://mode', (event) => {
+        readonly = event.payload.readonly;
+        listener(event.payload);
+      })
+        .then((fn) => {
+          if (disposed) {
+            fn();
+            return;
+          }
+          unlisten = fn;
+        })
+        .catch((error: unknown) => {
+          console.error('订阅 vault://mode 失败', error);
+        });
+
+      return {
+        dispose: (): void => {
+          disposed = true;
+          unlisten?.();
+          unlisten = null;
+        },
+      } satisfies Disposable;
+    },
+  };
+};

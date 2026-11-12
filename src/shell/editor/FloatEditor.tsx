@@ -47,7 +47,7 @@ import { useInlineAi } from '../ai/use-inline-ai.ts';
 import { layout, space } from '../theme/tokens.ts';
 import { emberEditorThemeExtensions } from './cm-theme.ts';
 import type { CursorPosition } from './cursor.ts';
-import { settleFloatWrite, trackFloatWrite } from './float-flush.ts';
+import { registerFloatFlusher, settleFloatWrite, trackFloatWrite } from './float-flush.ts';
 import {
   cascadeFloatFrame,
   clampFloatSize,
@@ -746,6 +746,19 @@ export const FloatEditor = ({
       await persist(body);
     };
 
+    // 窗口关闭不会卸载 React 树：登记到全局，关窗请求里主动把待写内容落盘
+    const unregisterFlusher = registerFloatFlusher(async () => {
+      if (view === null) return;
+      const body = view.state.doc.toString();
+      const metaDirty = dirty.current.title || dirty.current.tags || dirty.current.summary;
+      if (body === savedBody && !metaDirty) return;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      await flushOnClose(body);
+    });
+
     const scheduleSave = (): void => {
       if (timer !== null) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
@@ -992,6 +1005,7 @@ export const FloatEditor = ({
 
     return () => {
       disposed = true;
+      unregisterFlusher();
       scheduleRef.current = () => undefined;
       actionsRef.current = null;
       if (timer !== null) {
