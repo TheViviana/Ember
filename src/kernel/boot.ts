@@ -18,7 +18,7 @@ import type { AiPort, IndexPort, VaultPort } from './ports.ts';
 import { createSettingsService } from './settings-service.ts';
 import type { Disposable, KernelEnv, Logger } from './types.ts';
 
-export const KERNEL_VERSION = '1.0.0';
+export const KERNEL_VERSION = '1.1.0';
 
 export interface BootPorts {
   readonly vault: VaultPort;

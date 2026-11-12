@@ -10,7 +10,15 @@ import type { IndexService } from './index-service.ts';
 import type { PathTools } from './paths.ts';
 import type { Disposable, ExtensionSlot, KernelEnv, Logger, SettingsService } from './types.ts';
 
-/** 能力能看到的全部内核面（G1）。新增字段即破坏性变更，需升 KERNEL_VERSION */
+/**
+ * 能力能看到的全部内核面（G1）。版本规则见 `KERNEL_VERSION`（kernel-contract §12）：
+ * - 新增字段或服务方法 → minor 位 +1；
+ * - 删除字段或改变已有字段语义 → major 位 +1；
+ * - 纯 bug 修复、接口不变 → patch 位 +1。
+ *
+ * 新增字段时，**所有 `KernelContext` 构造点必须同步**（boot.ts 的 createKernelContext、
+ * 测试里的 stubContext/scopeContext 桩等）；不补就是类型错误，不得用可选字段或类型断言绕过。
+ */
 export interface KernelContext {
   readonly env: KernelEnv;
   readonly docs: DocService;

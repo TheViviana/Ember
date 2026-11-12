@@ -600,7 +600,7 @@ export interface CommandBus {
 ```ts
 // src/kernel/context.ts
 export interface KernelEnv {
-  readonly kernelVersion: string;   // "1.0.0"
+  readonly kernelVersion: string;   // "1.1.0"
   readonly vaultId: VaultId;
   readonly readonlyMode: boolean;   // 未拿到库锁时为 true
 }
@@ -608,6 +608,8 @@ export interface KernelEnv {
 export interface KernelContext {
   readonly env: KernelEnv;
   readonly docs: DocService;
+  /** 文章门面：内部持有带 purge 的文档服务，能力侧看不到永久删除入口 */
+  readonly articles: ArticlesFacade;
   readonly index: IndexService;
   readonly commands: CommandBus;
   readonly editor: EditorHost;
@@ -770,8 +772,11 @@ export class EmberError extends Error {
 
 ## 12. 契约演进
 
-- v1 内只做**加法**：新增可选字段、新增服务方法、新增错误码。
-- 破坏性变更必须升 `KERNEL_VERSION` 到 2.x，并同时存在两个版本的能力适配层（v1 能力仍能加载）。
+- 版本号规则（`KERNEL_VERSION`）：
+  - **新增**字段或服务方法 → minor 位 +1（如 1.0.0 → 1.1.0）；
+  - **删除**字段或改变已有字段语义 → major 位 +1，并同时存在两个版本的能力适配层（v1 能力仍能加载）；
+  - 纯 bug 修复、接口不变 → patch 位 +1。
+- 新增字段时，**所有 `KernelContext` 构造点必须同步**（boot 的 createKernelContext、测试桩 stubContext/scopeContext 等）；不补即类型错误，不得用可选字段或类型断言绕过。
 - 能力声明的 `requiresKernel` 与实际内核版本不兼容时，只禁用该能力，不阻塞启动。
 
 ---
