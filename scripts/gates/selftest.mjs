@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -153,6 +153,48 @@ for (const testCase of rustCases) {
   } else {
     failures += 1;
     process.stdout.write(`✗ selftest:size 过期豁免未按预期报出：${JSON.stringify(stale)}\n`);
+  }
+
+  const expectRule = (label, root, rule) => {
+    const result = checkSize(root, { whitelist: [] });
+    if (result.length === 1 && result[0].rule === rule) {
+      process.stdout.write(`✓ selftest:size ${label}\n`);
+    } else {
+      failures += 1;
+      process.stdout.write(`✗ selftest:size ${label}：${JSON.stringify(result)}\n`);
+    }
+  };
+
+  // 根路径不存在 / src/shell 不是目录：必须失败，不能以 0 违规放行
+  expectRule('根路径不存在被拒', join(tmp, 'missing-root'), 'size-root');
+  mkdirSync(join(tmp, 'not-dir', 'src'), { recursive: true });
+  writeFileSync(join(tmp, 'not-dir', 'src', 'shell'), '');
+  expectRule('src/shell 是文件被拒', join(tmp, 'not-dir'), 'size-root');
+
+  // 空目录：0 个源码文件必须报出，避免目录被移走后假通过
+  mkdirSync(join(tmp, 'empty', 'src', 'shell'), { recursive: true });
+  expectRule('空 shell 目录被拒', join(tmp, 'empty'), 'size-empty');
+
+  // 禁止扩展名与隐藏目录都不能绕过行数检查
+  mkdirSync(join(tmp, 'js', 'src', 'shell'), { recursive: true });
+  writeFileSync(join(tmp, 'js', 'src', 'shell', 'big.js'), 'const a = 1;\n');
+  expectRule('shell 下 .js 被拒', join(tmp, 'js'), 'size-ext');
+  mkdirSync(join(tmp, 'hidden', 'src', 'shell', '.tmp'), { recursive: true });
+  writeFileSync(join(tmp, 'hidden', 'src', 'shell', '.tmp', 'big.ts'), 'const a = 1;\n'.repeat(SIZE_LIMIT + 1));
+  expectRule('隐藏目录内超限仍命中', join(tmp, 'hidden'), 'size');
+
+  // 不可读目录：读取异常必须报出，不能当成空树；root 环境无法制造 EACCES，跳过
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    process.stdout.write('✓ selftest:size 不可读目录（root 环境跳过）\n');
+  } else {
+    mkdirSync(join(tmp, 'locked', 'src', 'shell', 'locked'), { recursive: true });
+    writeFileSync(join(tmp, 'locked', 'src', 'shell', 'locked', 'deep.ts'), 'const a = 1;\n');
+    chmodSync(join(tmp, 'locked', 'src', 'shell', 'locked'), 0o000);
+    try {
+      expectRule('不可读目录被拒', join(tmp, 'locked'), 'size-read');
+    } finally {
+      chmodSync(join(tmp, 'locked', 'src', 'shell', 'locked'), 0o755);
+    }
   }
 
   rmSync(tmp, { recursive: true, force: true });

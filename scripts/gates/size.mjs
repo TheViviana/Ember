@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_ROOT, toPosix } from './lib.mjs';
@@ -7,6 +7,10 @@ import { DEFAULT_ROOT, toPosix } from './lib.mjs';
 export const SIZE_LIMIT = 600;
 
 const SCAN_EXT = new Set(['.ts', '.tsx']);
+/** shell 层是 TypeScript 源码目录：出现这些扩展名视为绕过体积门禁 */
+const FORBIDDEN_EXT = new Set(['.js', '.jsx', '.mjs', '.cjs']);
+/** 只跳过依赖目录；隐藏目录同样扫描，避免用 `.tmp/` 藏超限文件 */
+const SKIP_DIRS = new Set(['node_modules']);
 
 /**
  * 逐条豁免：只允许已登记的文件超限。
@@ -25,21 +29,49 @@ export const SIZE_WHITELIST = [
   },
 ];
 
-function walk(dir, result = []) {
-  const start = resolve(dir);
+/**
+ * 递归收集源码文件。读取失败与禁止扩展名都记为问题而不是静默跳过——
+ * 否则改个扩展名、放个隐藏目录或制造不可读目录就能让门禁假通过。
+ */
+function walk(dir, root, files, problems) {
   let entries;
   try {
-    entries = readdirSync(start, { withFileTypes: true });
-  } catch {
-    return result;
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (error) {
+    problems.push({
+      file: toPosix(relative(root, dir)),
+      rule: 'size-read',
+      detail: `目录无法读取：${error instanceof Error ? error.message : String(error)}`,
+    });
+    return;
   }
   for (const entry of entries) {
-    if (entry.name.startsWith('.')) continue;
-    const full = join(start, entry.name);
-    if (entry.isDirectory()) walk(full, result);
-    else if (SCAN_EXT.has(extname(entry.name))) result.push(full);
+    const full = join(dir, entry.name);
+    if (entry.isSymbolicLink()) {
+      problems.push({
+        file: toPosix(relative(root, full)),
+        rule: 'size-symlink',
+        detail: 'shell 层不允许符号链接：扫描无法保证覆盖真实文件',
+      });
+      continue;
+    }
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      walk(full, root, files, problems);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    const ext = extname(entry.name).toLowerCase();
+    if (SCAN_EXT.has(ext)) {
+      files.push(full);
+    } else if (FORBIDDEN_EXT.has(ext)) {
+      problems.push({
+        file: toPosix(relative(root, full)),
+        rule: 'size-ext',
+        detail: `shell 层应为 TypeScript，禁止 ${ext} 文件（或改回 .ts/.tsx 接受行数检查）`,
+      });
+    }
   }
-  return result;
 }
 
 /** 与 wc -l 一致：按换行计数，末尾换行不多算一行 */
@@ -64,10 +96,50 @@ export function checkSize(root, options = {}) {
 
   const violations = [];
   const seen = new Set();
+  const shellDir = join(root, 'src', 'shell');
 
-  for (const file of walk(join(root, 'src', 'shell')).sort()) {
+  let info;
+  try {
+    info = statSync(shellDir);
+  } catch {
+    violations.push({
+      file: 'src/shell',
+      line: 0,
+      rule: 'size-root',
+      detail: 'shell 目录不存在或不可访问；拒绝以空结果通过',
+    });
+    return violations;
+  }
+  if (!info.isDirectory()) {
+    violations.push({
+      file: 'src/shell',
+      line: 0,
+      rule: 'size-root',
+      detail: 'src/shell 不是目录；拒绝以空结果通过',
+    });
+    return violations;
+  }
+
+  const files = [];
+  const problems = [];
+  walk(shellDir, root, files, problems);
+  violations.push(...problems);
+
+  for (const file of files.sort()) {
     const rel = toPosix(relative(root, file));
-    const lines = countLines(readFileSync(file, 'utf8'));
+    let source;
+    try {
+      source = readFileSync(file, 'utf8');
+    } catch (error) {
+      violations.push({
+        file: rel,
+        line: 0,
+        rule: 'size-read',
+        detail: `文件无法读取：${error instanceof Error ? error.message : String(error)}`,
+      });
+      continue;
+    }
+    const lines = countLines(source);
     const reason = allowed.get(rel);
     seen.add(rel);
     if (lines > limit) {
@@ -94,6 +166,17 @@ export function checkSize(root, options = {}) {
         detail: `${lines} 行已不超过 ${limit} 行；请删除过期豁免`,
       });
     }
+  }
+
+  // 目录存在却一个源码文件都没扫到：多半是根路径给错或目录被搬走，
+  // 与「确实没有 shell 代码」无法区分，一律拒绝放行。
+  if (files.length === 0 && problems.length === 0) {
+    violations.push({
+      file: 'src/shell',
+      line: 0,
+      rule: 'size-empty',
+      detail: '未扫描到任何 .ts/.tsx 文件；拒绝以空结果通过',
+    });
   }
 
   for (const entry of whitelist) {
