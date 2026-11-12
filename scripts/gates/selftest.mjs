@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkCsp } from './csp.mjs';
 import { stripRustComments } from './offline.mjs';
 import { checkSize, SIZE_LIMIT } from './size.mjs';
 
@@ -207,6 +209,160 @@ if (realSize.length === 0) {
   failures += 1;
   process.stdout.write(`✗ selftest:真实树 size 有 ${realSize.length} 条违规\n`);
   for (const v of realSize) process.stdout.write(`  ${v.file}:${v.line} [${v.rule}] ${v.detail}\n`);
+}
+
+// CSP 门禁：临时目录构造最小 index.html + tauri.conf.json，逐条验证“放宽必须失败”
+{
+  const cspRoot = mkdtempSync(join(tmpdir(), 'ember-gate-csp-'));
+  mkdirSync(join(cspRoot, 'src-tauri'), { recursive: true });
+  const styleText = 'html, body { background: #0a0a0a; }';
+  const styleHash = `'sha256-${createHash('sha256').update(styleText).digest('base64')}'`;
+  const index = `<!doctype html><html><head><style>${styleText}</style></head><body></body></html>`;
+  const baseCsp = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self'",
+    `style-src-elem 'self' ${styleHash}`,
+    "style-src-attr 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    "connect-src 'self' ipc: http://ipc.localhost",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'none'",
+    "frame-src 'none'",
+  ].join('; ');
+  const baseDevCsp = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    "connect-src 'self' ws://localhost:5173 http://localhost:5173 ipc: http://ipc.localhost",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'none'",
+  ].join('; ');
+
+  const runCsp = ({ csp = baseCsp, devCsp = baseDevCsp, html = index } = {}) => {
+    writeFileSync(
+      join(cspRoot, 'src-tauri', 'tauri.conf.json'),
+      JSON.stringify({ app: { security: { csp, devCsp } } }),
+    );
+    writeFileSync(join(cspRoot, 'index.html'), html);
+    return checkCsp(cspRoot);
+  };
+
+  const expectCspRule = (label, options, rule) => {
+    const violations = runCsp(options);
+    if (violations.some((v) => v.rule === rule)) {
+      process.stdout.write(`✓ selftest:csp ${label}\n`);
+    } else {
+      failures += 1;
+      process.stdout.write(
+        `✗ selftest:csp ${label}：期望命中 ${rule}，实际 ${JSON.stringify(violations)}\n`,
+      );
+    }
+  };
+
+  const expectCspPass = (label, options) => {
+    const violations = runCsp(options);
+    if (violations.length === 0) {
+      process.stdout.write(`✓ selftest:csp ${label}\n`);
+    } else {
+      failures += 1;
+      process.stdout.write(`✗ selftest:csp ${label}：期望 0 违规，实际 ${JSON.stringify(violations)}\n`);
+    }
+  };
+
+  expectCspPass('真实基线通过', {});
+  expectCspRule(
+    'script-src 出现 unsafe-eval 必须失败',
+    { csp: baseCsp.replace("script-src 'self'", "script-src 'self' 'unsafe-eval'") },
+    'csp-forbidden-token',
+  );
+  expectCspRule(
+    'script-src 出现 unsafe-inline 必须失败',
+    { csp: baseCsp.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'") },
+    'csp-forbidden-token',
+  );
+  expectCspRule(
+    'script-src 新增外域必须失败',
+    { csp: baseCsp.replace("script-src 'self'", "script-src 'self' https://evil.example") },
+    'csp-directive',
+  );
+  expectCspRule(
+    'connect-src 新增外域必须失败',
+    {
+      csp: baseCsp.replace(
+        "connect-src 'self' ipc: http://ipc.localhost",
+        "connect-src 'self' ipc: http://ipc.localhost https://evil.example",
+      ),
+    },
+    'csp-directive',
+  );
+  expectCspRule(
+    '新增未登记指令必须失败',
+    { csp: `${baseCsp}; worker-src 'self'` },
+    'csp-unknown-directive',
+  );
+  expectCspRule(
+    '删掉 base-uri 必须失败',
+    { csp: baseCsp.replace("; base-uri 'self'", '') },
+    'csp-missing-directive',
+  );
+  expectCspRule(
+    '重复 script-src 必须失败',
+    { csp: `${baseCsp}; script-src 'unsafe-eval'` },
+    'csp-duplicate-directive',
+  );
+  expectCspRule(
+    '空值指令必须失败',
+    { csp: baseCsp.replace("script-src 'self'", 'script-src') },
+    'csp-empty-directive',
+  );
+  expectCspRule(
+    'style-src-attr 去掉 unsafe-inline 必须失败',
+    { csp: baseCsp.replace("style-src-attr 'unsafe-inline'", "style-src-attr 'self'") },
+    'csp-attr-katex',
+  );
+  expectCspRule(
+    '内联样式改动但未同步哈希必须失败',
+    { html: index.replace(styleText, 'html, body { background: #111; }') },
+    'csp-elem-hash',
+  );
+  expectCspRule(
+    'devCsp 收紧到生产值必须失败',
+    { devCsp: baseDevCsp.replace("script-src 'self' 'unsafe-inline' 'unsafe-eval'", "script-src 'self'") },
+    'csp-directive',
+  );
+  expectCspRule(
+    'devCsp connect-src 新增外域必须失败',
+    {
+      devCsp: baseDevCsp.replace(
+        'ws://localhost:5173 http://localhost:5173',
+        'ws://localhost:5173 http://localhost:5173 https://evil.example',
+      ),
+    },
+    'csp-directive',
+  );
+  expectCspRule(
+    '生产 style-src 出现 unsafe-inline 必须失败',
+    { csp: baseCsp.replace("style-src 'self'", "style-src 'self' 'unsafe-inline'") },
+    'csp-directive',
+  );
+
+  const nextStyle = 'html, body { background: #121212; }';
+  const nextHash = `'sha256-${createHash('sha256').update(nextStyle).digest('base64')}'`;
+  expectCspPass('改内联样式并同步哈希仍通过', {
+    csp: baseCsp.replace(`style-src-elem 'self' ${styleHash}`, `style-src-elem 'self' ${nextHash}`),
+    html: index.replace(styleText, nextStyle),
+  });
+  expectCspPass('调整顺序与末尾分号仍通过', {
+    csp: `${baseCsp.split('; ').reverse().join('; ')};`,
+  });
+
+  rmSync(cspRoot, { recursive: true, force: true });
 }
 
 process.exit(failures === 0 ? 0 : 1);
