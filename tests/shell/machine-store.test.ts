@@ -106,16 +106,24 @@ void test('缩放期间不写机器状态，松手才记忆一次', async () => 
 });
 
 void test('尺寸状态不进入编辑器重建依赖，缩放后仍可继续输入', () => {
-  const source = readFileSync(new URL('../../src/shell/editor/FloatEditor.tsx', import.meta.url), 'utf8');
+  // 拆分后：编辑器会话在 use-float-document，浮窗几何在 use-float-frame
+  const source = readFileSync(
+    new URL('../../src/shell/editor/use-float-document.ts', import.meta.url),
+    'utf8',
+  );
+  const frameSource = readFileSync(
+    new URL('../../src/shell/editor/use-float-frame.ts', import.meta.url),
+    'utf8',
+  );
 
   // CodeMirror 会话的 effect 依赖里没有 frame / savedSize / focus，缩放与切窗只重排样式，不重建 EditorView
-  assert.ok(source.includes('}, [docId, host, kernel, openWikiLink, queryClient]);'));
+  assert.ok(source.includes('}, [docId, host, kernel, inlineCloseRef, openWikiLink, queryClient]);'));
 
-  const resizeStart = source.indexOf('const beginResize');
+  const resizeStart = frameSource.indexOf('const beginResize');
   // 取 beginResize 之后的下一个 effect 作为边界：文件前部可能另有同步 ref 的小 effect
-  const resizeEnd = source.indexOf('useEffect(() => {', resizeStart);
+  const resizeEnd = frameSource.indexOf('useEffect(() => {', resizeStart);
   assert.ok(resizeStart >= 0 && resizeEnd > resizeStart);
-  const resizeBody = source.slice(resizeStart, resizeEnd);
+  const resizeBody = frameSource.slice(resizeStart, resizeEnd);
   assert.ok(!resizeBody.includes('persist'));
   assert.ok(!resizeBody.includes('docs.update'));
   assert.ok(!resizeBody.includes('scheduleSave'));
