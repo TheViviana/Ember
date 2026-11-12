@@ -291,11 +291,12 @@ journal 是**追加写的 NDJSON**，路径 `~/Library/Application Support/Ember
 - 失效判定：同一 `machineId` 且 pid 不存在 → 失效；任意机器上 `heartbeatAt` 超过 30 秒未更新 → 失效（跨机器共享库时以时间兜底）。
 - 写前校验：每次落盘前重读锁文件，要求 `pid`、`leaseToken`、`heartbeatAt` 三者与持有方内存值**完全一致**；任一不一致说明锁已被接管或心跳停摆，**立即转只读**并拒绝本次写入（正文写入与图片落盘都走同一道写闸）。
 - 失效后：新实例可以抢占，但**必须先完成 §6.2 的 journal 恢复**，且抢占动作写入 journal（`kind: "lock.takeover"`）以便审计。
-  - 接管流程：先把 `.lock` 原子 `rename` 到 `.workbench/lock.takeover.<pid>.<leaseToken>` 完成认领，
+  - 接管流程：先把 `.lock` 原子 `rename` 到 `.workbench/lock.takeover.<pid>.<leaseToken>.<序号>` 完成认领（序号区分同进程的并发认领），
     并发接管只有一个 `rename` 成功，其余按只读返回；认领后回读临时文件，与判定失效时读到的原始字节
     逐字节比较，内容已变说明期间有人写入了新锁，用硬链接原位放回（目标存在时原子失败，不覆盖新锁），
     确认是同一份后才创建新 `.lock`，`leaseToken` 在认领值上 `+1`。接管者在 `rename` 后、创建前崩溃时
-    锁路径为空，后续实例可直接创建，不会留下永久不可用的库；临时副本留在 `.workbench/` 中不参与锁判定。
+    锁路径为空，后续实例可直接创建，不会留下永久不可用的库；临时副本留在 `.workbench/` 中不参与锁判定，
+    超过 24 小时（与孤儿临时文件同一门槛）由启动清扫回收，正在进行的认领因认领时刷新过 mtime 而不会被误删。
   - **实现状态（与上句有偏差）**：`Vault::open` 的顺序是 `ensure_identity` → `lock::acquire`（含接管）→ `journal::recover`，
     即先拿锁再回放 journal；`lock.takeover` 审计记录尚未实现。写前校验（`pid` + `leaseToken` + `heartbeatAt`）已在
     `lock.rs` 的 `verify_lease` 与 `Vault::begin_write` 落地，心跳线程发现锁文件 PID/代次不符时同样立即降级只读。
