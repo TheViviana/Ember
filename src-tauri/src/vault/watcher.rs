@@ -36,7 +36,7 @@ struct VaultChange {
 #[derive(Debug, Clone, Serialize)]
 struct VaultMode {
     readonly: bool,
-    reason: Option<String>,
+    reason: Option<crate::vault::lock::ReadonlyReason>,
 }
 
 /// 轮询型 watcher（不引入 notify crate）：按 mtime + size 指纹对比整库 Markdown 文件。
@@ -193,7 +193,8 @@ fn emit_mode(app: &AppHandle) {
         "vault://mode",
         VaultMode {
             readonly: true,
-            reason: Some("library lock unavailable".to_string()),
+            // 运行期失守只有一种原因：心跳发现锁被接管/丢失。
+            reason: Some(crate::vault::lock::ReadonlyReason::LockLost),
         },
     ) {
         eprintln!("vault://mode 事件发送失败：{error}");

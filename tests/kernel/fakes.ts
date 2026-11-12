@@ -44,6 +44,7 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
 
   const port: VaultPort = {
     readonlyMode: options.readonlyMode === true,
+    readonlyReason: options.readonlyMode === true ? 'lockedByOther' : null,
     read: (path) => Promise.resolve(files.get(String(path)) ?? null),
     write: (path, bytes) => {
       assertWritable();

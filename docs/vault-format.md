@@ -296,6 +296,10 @@ journal 是**追加写的 NDJSON**，路径 `<vault>/.workbench/.journal/journal
 - 租约代次：`leaseToken` 为 `u64`。同一把锁存续期间只增不减：首次获取写 `1`，每次失效接管在当前值上 `+1`；锁文件缺失或损坏（包括认领后崩溃留下的空路径）按 `0` 处理。
 - 心跳：持有者每 5 秒刷新 `heartbeatAt`（重写整个文件 + rename）。
 - 失效判定：同一 `machineId` 且 pid 不存在 → 失效；任意机器上 `heartbeatAt` 超过 30 秒未更新 → 失效（跨机器共享库时以时间兜底）。
+  但超龄**不立即判失效**：同机（`machineId` 一致）且 pid 仍存活时，说明只是心跳停了（进程挂起、调度饥饿或时钟前跳），
+  判为「持有者心跳已停」——新实例保持只读并提示关闭另一实例，不抢锁，避免接管后与原进程双写。
+  pid 已死、或无法判断是否本机 / pid 状态不可探测 → 仍按失效处理（沿用下面的接管路径）。
+  时钟回拨（`now < mtime`）时年龄视为 0，按未超龄处理，行为与之前一致。
 - 写前校验：每次落盘前重读锁文件，要求 `pid`、`leaseToken`、`heartbeatAt` 三者与持有方内存值**完全一致**；任一不一致说明锁已被接管或心跳停摆，**立即转只读**并拒绝本次写入（正文写入与图片落盘都走同一道写闸）。
 - 失效后：新实例可以抢占；接管成功并持有锁之后、任何写入之前，必须先完成 §6.2 的 journal 恢复。
   - 接管流程：先把 `.lock` 原子 `rename` 到 `.workbench/lock.takeover.<pid>.<leaseToken>.<序号>` 完成认领（序号区分同进程的并发认领），
@@ -309,6 +313,9 @@ journal 是**追加写的 NDJSON**，路径 `<vault>/.workbench/.journal/journal
     `Vault::begin_write` 落地，心跳线程发现锁文件 PID/代次不符时同样立即降级只读；`kind: "lock.takeover"` 审计记录
     尚未实现（属已记录缺口，待后续版本补齐）。
 - 抢不到锁：以**只读观察者**模式打开库（可搜索、可渲染、不可写），UI 明确提示「库已被其它实例打开」。绝不降级为「写但不加锁」。
+  - 只读原因随 `vault_identity.readonlyReason`（可选字段）与 `vault://mode` 事件给出，取值为
+    `lockedByOther` / `lockedByStalled` / `claimFailed` / `lockLost` / `journalCorrupt`，状态栏按原因显示不同文案
+    （kernel-contract §10.2）；`journalCorrupt` 明确提示「已保留现场，需人工处理」。
   - 只读判定分两层：启动态的 `readonly` 只在抢锁时确定，运行期接管后的 UI 提示**最多滞后一个心跳周期（5 秒）**；
     真正的拦截点是写闸里的写前校验，因此不会出现「提示仍可写、实际已双写」的窗口。
 

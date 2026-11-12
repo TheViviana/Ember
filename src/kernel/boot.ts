@@ -18,7 +18,7 @@ import type { AiPort, IndexPort, VaultPort } from './ports.ts';
 import { createSettingsService } from './settings-service.ts';
 import type { Disposable, KernelEnv, Logger } from './types.ts';
 
-export const KERNEL_VERSION = '1.1.0';
+export const KERNEL_VERSION = '1.2.0';
 
 export interface BootPorts {
   readonly vault: VaultPort;
@@ -78,6 +78,9 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
     // 运行期锁被接管后端口会翻只读，env 必须跟随而不是固化启动值
     get readonlyMode() {
       return options.ports.vault.readonlyMode;
+    },
+    get readonlyReason() {
+      return options.ports.vault.readonlyReason;
     },
   };
 
@@ -206,7 +209,7 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
 
   events.emit('vault:mode', {
     readonly: env.readonlyMode,
-    reason: env.readonlyMode ? 'library lock unavailable' : null,
+    reason: env.readonlyMode ? env.readonlyReason : null,
   });
 
   // 单飞：关窗收尾与 KernelProvider 卸载可能同时触发，拆解只能执行一次。

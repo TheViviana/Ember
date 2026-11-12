@@ -97,6 +97,10 @@ void test('运行期库锁失守：watchMode 转发为 vault:mode 事件并翻�
     get readonlyMode() {
       return readonly;
     },
+    get readonlyReason() {
+      // 运行期降级由内核恒定归因为 lockLost，替身保持同一形状
+      return readonly ? 'lockLost' : null;
+    },
     watchMode: (listener) => {
       listeners.push(listener);
       return {

@@ -54,6 +54,47 @@ pub struct LockPayload {
     pub app: String,
 }
 
+/// 只读原因：启动时由锁判定给出，运行期固定为 `LockLost`。
+/// 序列化为 camelCase 字符串，供 IPC 与前端文案映射共用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReadonlyReason {
+    /// 另一实例正常持锁（心跳新鲜）
+    LockedByOther,
+    /// 另一实例持锁但心跳已停：本机进程仍存活，等它退出而不是抢锁
+    LockedByStalled,
+    /// 判为失效后认领失败（并发抢锁输了）
+    ClaimFailed,
+    /// 运行期心跳发现锁被接管或丢失
+    LockLost,
+    /// journal 恢复失败，损坏现场已保留，需人工处理
+    JournalCorrupt,
+}
+
+/// `acquire_detailed` 的失败：只读要带原因，其它错误原样上抛。
+#[derive(Debug)]
+pub enum AcquireFailure {
+    Readonly(ReadonlyReason),
+    Error(VaultError),
+}
+
+impl From<VaultError> for AcquireFailure {
+    fn from(error: VaultError) -> Self {
+        Self::Error(error)
+    }
+}
+
+impl AcquireFailure {
+    /// 退化回旧接口的错误形态：只读统一是 `VaultError::Readonly`。
+    #[cfg(test)]
+    fn into_error(self) -> VaultError {
+        match self {
+            Self::Readonly(_) => VaultError::Readonly,
+            Self::Error(error) => error,
+        }
+    }
+}
+
 /// 持有的库锁。Drop 时停止心跳并删除自己写入的锁文件。
 pub struct VaultLock {
     path: PathBuf,
@@ -78,11 +119,14 @@ impl VaultLock {
     /// 写前栅栏：锁文件仍带本实例的租约代次与心跳时间才算持有成功。
     /// 任何不一致都说明锁已被接管或心跳停摆，调用方必须立即转只读。
     pub fn verify_lease(&self) -> bool {
+        // 读期望值与读文件放在同一把锁的作用域内，两个方向都覆盖：
+        // - 心跳先写文件、后更新内存 → 校验方不会读到「文件新、内存旧」；
+        // - 校验方先取内存、后读文件 → 也不会读到「内存旧、文件新」。
+        // 若像过去那样先克隆再释放锁去读，心跳恰好插入就会把正常心跳误判为失守。
         let expected = self
             .heartbeat_at
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let bytes = match fs::read(&self.path) {
             Ok(value) => value,
             Err(_) => return false,
@@ -91,7 +135,7 @@ impl VaultLock {
             Ok(current) => {
                 current.pid == self.pid
                     && current.lease_token == self.lease_token
-                    && current.heartbeat_at == expected
+                    && current.heartbeat_at == *expected
             }
             Err(_) => false,
         }
@@ -125,34 +169,51 @@ fn current_lease_token(path: &Path) -> u64 {
 }
 
 /// 获取库锁；抢不到返回 `VaultError::Readonly`，调用方据此进入只读观察者模式。
+#[cfg(test)]
 pub fn acquire(root: &Path, vault_id: &str) -> VaultResult<VaultLock> {
+    acquire_detailed(root, vault_id).map_err(AcquireFailure::into_error)
+}
+
+/// 获取库锁并保留只读原因，供 `vault_identity` 与前端文案区分「谁占了锁」。
+pub fn acquire_detailed(
+    root: &Path,
+    vault_id: &str,
+) -> Result<VaultLock, AcquireFailure> {
     let path = paths::lock_file(root);
-    fs::create_dir_all(paths::workbench(root))?;
+    fs::create_dir_all(paths::workbench(root)).map_err(VaultError::from)?;
     let machine_id = machine_id()?;
 
     match create(&path, vault_id, &machine_id, current_lease_token(&path) + 1) {
         Ok(lock) => Ok(lock),
         Err(VaultError::Readonly) => {
             let stale = match staleness(&path) {
-                Ok(Staleness::Active) => return Err(VaultError::Readonly),
+                Ok(Staleness::Active) => {
+                    return Err(AcquireFailure::Readonly(ReadonlyReason::LockedByOther));
+                }
+                Ok(Staleness::Stalled) => {
+                    return Err(AcquireFailure::Readonly(ReadonlyReason::LockedByStalled));
+                }
                 Ok(Staleness::Stale(value)) => value,
                 // 判定与读取之间锁被移除：本轮放弃；下次 acquire 会在空路径上直接创建。
                 Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(VaultError::Readonly);
+                    return Err(AcquireFailure::Readonly(ReadonlyReason::ClaimFailed));
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(AcquireFailure::Error(error)),
             };
             // journal 恢复由 Vault::open 在拿到锁之后执行。
             let Some(claimed) = claim_stale(root, &stale)? else {
-                return Err(VaultError::Readonly);
+                return Err(AcquireFailure::Readonly(ReadonlyReason::ClaimFailed));
             };
             // 认领成功后锁路径为空；代次在认领值上 +1，保证接管者严格更大。
             // 若创建失败，说明有别的实例抢先，失效副本已无意义，清理后按只读返回。
             let created = create(&path, vault_id, &machine_id, claimed.lease_token + 1);
             let _ = fs::remove_file(&claimed.temp);
-            created
+            created.map_err(|error| match error {
+                VaultError::Readonly => AcquireFailure::Readonly(ReadonlyReason::ClaimFailed),
+                other => AcquireFailure::Error(other),
+            })
         }
-        Err(error) => Err(error),
+        Err(error) => Err(AcquireFailure::Error(error)),
     }
 }
 
@@ -161,6 +222,16 @@ fn create(
     vault_id: &str,
     machine_id: &str,
     lease_token: u64,
+) -> VaultResult<VaultLock> {
+    create_with_interval(path, vault_id, machine_id, lease_token, HEARTBEAT_INTERVAL)
+}
+
+fn create_with_interval(
+    path: &Path,
+    vault_id: &str,
+    machine_id: &str,
+    lease_token: u64,
+    interval: Duration,
 ) -> VaultResult<VaultLock> {
     let mut handle = match OpenOptions::new().create_new(true).write(true).open(path) {
         Ok(value) => value,
@@ -194,6 +265,7 @@ fn create(
         Arc::clone(&stop),
         Arc::clone(&healthy),
         Arc::clone(&heartbeat_at),
+        interval,
     );
 
     Ok(VaultLock {
@@ -213,6 +285,7 @@ fn spawn_heartbeat(
     stop: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
     heartbeat_at: Arc<Mutex<String>>,
+    interval: Duration,
 ) -> Option<JoinHandle<()>> {
     thread::Builder::new()
         .name("ember-vault-lock".to_string())
@@ -220,7 +293,7 @@ fn spawn_heartbeat(
             while !stop.load(Ordering::Relaxed) {
                 // 心跳间隔切片等待：Drop 需要 join 本线程，整段 sleep 会让
                 // 退出最多阻塞 HEARTBEAT_INTERVAL；切成 250ms 步进随时可中断
-                let mut remaining = HEARTBEAT_INTERVAL;
+                let mut remaining = interval;
                 while remaining > Duration::ZERO && !stop.load(Ordering::Relaxed) {
                     let step = remaining.min(HEARTBEAT_STEP);
                     thread::sleep(step);
@@ -299,6 +372,8 @@ struct StaleLock {
 
 enum Staleness {
     Active,
+    /// 心跳超龄但本机持有进程仍存活：只读等待，不抢锁
+    Stalled,
     Stale(StaleLock),
 }
 
@@ -306,16 +381,28 @@ enum Staleness {
 /// 先读内容再读 mtime：若文件在这两步之间被替换，读到的 mtime 属于新文件，
 /// 只会让我们更保守地判为活跃锁，不会把新锁误判成失效。
 fn staleness(path: &Path) -> VaultResult<Staleness> {
+    staleness_at(path, SystemTime::now(), &machine_id()?)
+}
+
+/// `staleness` 的时钟与本机标识都显式传入，便于单测覆盖时钟跳变。
+fn staleness_at(path: &Path, now: SystemTime, machine_id: &str) -> VaultResult<Staleness> {
     let bytes = fs::read(path)?;
     let aged = fs::metadata(path)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
-        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .and_then(|modified| now.duration_since(modified).ok())
         .map(|age| age > STALE_AFTER)
         .unwrap_or(false);
 
     let payload = serde_json::from_slice::<LockPayload>(&bytes).ok();
     if aged {
+        // 超龄不等于失效：同机进程仍存活说明只是心跳停了（挂起或时钟前跳），
+        // 判为 Stalled 保持只读。抢锁会造成双写，而「关掉另一个实例」是可恢复的提示。
+        if let Some(payload) = payload.as_ref() {
+            if payload.machine_id == machine_id && pid_state(payload.pid) == Some(true) {
+                return Ok(Staleness::Stalled);
+            }
+        }
         let lease_token = payload.map(|value| value.lease_token).unwrap_or(0);
         return Ok(Staleness::Stale(StaleLock { bytes, lease_token }));
     }
@@ -323,7 +410,7 @@ fn staleness(path: &Path) -> VaultResult<Staleness> {
         // 半截或损坏的锁文件无法证明持有者存活，按失效处理以恢复可用性。
         return Ok(Staleness::Stale(StaleLock { bytes, lease_token: 0 }));
     };
-    if payload.machine_id != machine_id()? || pid_alive(payload.pid) {
+    if payload.machine_id != machine_id || pid_alive(payload.pid) {
         return Ok(Staleness::Active);
     }
     Ok(Staleness::Stale(StaleLock {
@@ -377,14 +464,19 @@ fn claim_stale(root: &Path, stale: &StaleLock) -> VaultResult<Option<ClaimedStal
     Ok(None)
 }
 
-fn pid_alive(pid: u32) -> bool {
-    // 无 libc 依赖：用 kill -0 探测。命令不可用时保守视为存活，避免误抢锁。
+/// pid 探测的三态：`Some(true/false)` 是确定结果，`None` 表示无法判断（命令不可用）。
+fn pid_state(pid: u32) -> Option<bool> {
     std::process::Command::new("/bin/kill")
         .arg("-0")
         .arg(pid.to_string())
         .status()
+        .ok()
         .map(|status| status.success())
-        .unwrap_or(true)
+}
+
+fn pid_alive(pid: u32) -> bool {
+    // 无 libc 依赖：用 kill -0 探测。命令不可用时保守视为存活，避免误抢锁。
+    pid_state(pid).unwrap_or(true)
 }
 
 fn machine_id() -> VaultResult<String> {
@@ -503,6 +595,7 @@ mod tests {
         let stale = match staleness(&path).unwrap() {
             Staleness::Stale(value) => value,
             Staleness::Active => panic!("伪造的死锁应判定为失效"),
+            Staleness::Stalled => panic!("pid 已死，不应判为心跳停摆"),
         };
 
         // 判定之后、rename 之前，另一个实例写入了一把新的活跃锁
@@ -555,6 +648,7 @@ mod tests {
         let stale = match staleness(&path).unwrap() {
             Staleness::Stale(value) => value,
             Staleness::Active => panic!("伪造的死锁应判定为失效"),
+            Staleness::Stalled => panic!("pid 已死，不应判为心跳停摆"),
         };
         let claimed = claim_stale(&temp.0, &stale).unwrap().expect("应能认领");
 
@@ -562,6 +656,81 @@ mod tests {
             .duration_since(fs::metadata(&claimed.temp).unwrap().modified().unwrap())
             .unwrap();
         assert!(age < Duration::from_secs(60), "认领副本的 mtime 必须刷新为当前");
+    }
+
+    #[test]
+    fn aged_lock_with_live_local_pid_is_stalled() {
+        let temp = TempRoot::new("lock-stalled");
+        let path = paths::lock_file(&temp.0);
+        fs::create_dir_all(paths::workbench(&temp.0)).unwrap();
+        let payload = forged(std::process::id(), 3);
+        fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+        drop(file);
+
+        assert!(matches!(
+            staleness_at(&path, SystemTime::now(), &payload.machine_id).unwrap(),
+            Staleness::Stalled
+        ));
+        assert!(
+            matches!(acquire(&temp.0, TEST_VAULT), Err(VaultError::Readonly)),
+            "本机进程仍存活时只能只读等待，不能抢锁"
+        );
+    }
+
+    #[test]
+    fn aged_lock_with_dead_pid_stays_stale() {
+        let temp = TempRoot::new("lock-stale-dead");
+        let path = paths::lock_file(&temp.0);
+        fs::create_dir_all(paths::workbench(&temp.0)).unwrap();
+        let payload = forged(999_999_999, 4);
+        fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+        drop(file);
+
+        assert!(matches!(
+            staleness_at(&path, SystemTime::now(), &payload.machine_id).unwrap(),
+            Staleness::Stale(_)
+        ));
+    }
+
+    #[test]
+    fn clock_rollback_keeps_foreign_lock_active() {
+        let temp = TempRoot::new("lock-rollback");
+        let path = paths::lock_file(&temp.0);
+        fs::create_dir_all(paths::workbench(&temp.0)).unwrap();
+        let mut payload = forged(999_999_999, 5);
+        payload.machine_id = "01JOTHERMACHINE0000000000".to_string();
+        fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+        // mtime 在未来：系统时钟回拨后的表现
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(SystemTime::now() + Duration::from_secs(60))
+            .unwrap();
+        drop(file);
+
+        assert!(matches!(
+            staleness_at(&path, SystemTime::now(), &machine_id().unwrap()).unwrap(),
+            Staleness::Active
+        ));
+    }
+
+    #[test]
+    fn verify_lease_ignores_concurrent_heartbeat_writes() {
+        let temp = TempRoot::new("lock-verify");
+        let path = paths::lock_file(&temp.0);
+        fs::create_dir_all(paths::workbench(&temp.0)).unwrap();
+        let machine = machine_id().unwrap();
+        let lock = create_with_interval(&path, TEST_VAULT, &machine, 1, Duration::from_millis(1))
+            .unwrap();
+
+        for _ in 0..5_000 {
+            assert!(lock.verify_lease(), "心跳写入期间不得误判租约失守");
+        }
+        drop(lock);
     }
 
     #[test]

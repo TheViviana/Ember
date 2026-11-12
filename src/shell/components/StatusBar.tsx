@@ -1,9 +1,11 @@
 import { useState, type ReactElement } from 'react';
 import { useCursorStore } from '../editor/cursor-store.ts';
+import { readonlyText } from './readonly-text.ts';
 import styles from './StatusBar.module.css';
 
 export interface StatusBarProps {
   readonly readonlyMode: boolean;
+  readonly readonlyReason: string | null;
   readonly kernelVersion: string;
   readonly documentCount: number;
   readonly activeCapabilities: number;
@@ -27,6 +29,7 @@ const Chevron = ({ collapsed }: { readonly collapsed: boolean }): ReactElement =
 
 export const StatusBar = ({
   readonlyMode,
+  readonlyReason,
   kernelVersion,
   documentCount,
   activeCapabilities,
@@ -58,7 +61,7 @@ export const StatusBar = ({
           <div className={styles.left}>
             <span className={styles.statusGroup}>
               <span className={`${styles.dot} ${readonlyMode ? styles.dotReadonly : ''}`} />
-              <span>{readonlyMode ? '只读模式' : '内核运行中'}</span>
+              <span>{readonlyMode ? readonlyText(readonlyReason) : '内核运行中'}</span>
             </span>
             <span className={styles.sep}>│</span>
             <span className={styles.statusGroup}>UTF-8</span>

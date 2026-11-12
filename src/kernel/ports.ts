@@ -22,6 +22,8 @@ export interface VaultFileEvent {
  */
 export interface VaultPort {
   readonly readonlyMode: boolean;
+  /** 只读原因（启动时由 Rust 判定，运行期固定 lockLost）；可写时为 null */
+  readonly readonlyReason: string | null;
   /** 不存在返回 null */
   read(path: VaultPath): Promise<Uint8Array | null>;
   write(path: VaultPath, bytes: Uint8Array, intent: WriteIntent): Promise<void>;

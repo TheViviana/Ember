@@ -231,6 +231,8 @@ export interface KernelEnv {
   readonly vaultId: VaultId;
   /** 未拿到库锁时为 true（G2） */
   readonly readonlyMode: boolean;
+  /** 只读原因；可写时为 null（由 Rust 的锁判定给出） */
+  readonly readonlyReason: string | null;
 }
 
 export interface Logger {

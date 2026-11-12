@@ -28,6 +28,8 @@ const fromBase64 = (value: string): Uint8Array => {
 
 export interface TauriVaultPortOptions {
   readonly readonlyMode: boolean;
+  /** Rust vault_identity 给出的只读原因 */
+  readonly readonlyReason?: string | null;
 }
 
 /**
@@ -37,10 +39,15 @@ export interface TauriVaultPortOptions {
 export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort => {
   // 运行期锁被接管后由 vault://mode 翻转；各内核服务每次写入时读这个值
   let readonly = options.readonlyMode;
+  let readonlyReason = options.readonlyReason ?? null;
 
   return {
     get readonlyMode() {
       return readonly;
+    },
+
+    get readonlyReason() {
+      return readonlyReason;
     },
 
     read: async (path) => {
@@ -116,6 +123,7 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
       let unlisten: (() => void) | null = null;
       void listen<{ readonly: boolean; reason: string | null }>('vault://mode', (event) => {
         readonly = event.payload.readonly;
+        readonlyReason = event.payload.reason;
         listener(event.payload);
       })
         .then((fn) => {

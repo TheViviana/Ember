@@ -35,6 +35,8 @@ pub struct Vault {
     id: String,
     /// 启动时是否抢到锁（只读观察者）。运行期是否仍可写由 write_health 决定。
     initially_readonly: bool,
+    /// 启动时进入只读的原因；运行期失守统一按 `LockLost` 上报。
+    startup_readonly_reason: Option<lock::ReadonlyReason>,
     /// 心跳健康标志（来自 VaultLock）：锁被接管或心跳失败时翻 false，
     /// ensure_writable 随即拒绝写入——持有方自动降级为只读。
     write_health: Option<Arc<AtomicBool>>,
@@ -52,13 +54,25 @@ impl Vault {
         fs::create_dir_all(&root)?;
         let id = ensure_identity(&root)?;
 
-        let mut guard: Option<lock::VaultLock> = match lock::acquire(&root, &id) {
+        let mut startup_readonly_reason: Option<lock::ReadonlyReason> = None;
+        let mut guard: Option<lock::VaultLock> = match lock::acquire_detailed(&root, &id) {
             Ok(value) => Some(value),
-            Err(VaultError::Readonly) => {
-                eprintln!("库已被其它实例打开，进入只读观察者模式：{}", root.display());
+            Err(lock::AcquireFailure::Readonly(reason)) => {
+                eprintln!(
+                    "库只读（{}），进入观察者模式：{}",
+                    match reason {
+                        lock::ReadonlyReason::LockedByOther => "已被其它实例打开",
+                        lock::ReadonlyReason::LockedByStalled => "另一实例心跳已停但进程仍存活",
+                        lock::ReadonlyReason::ClaimFailed => "抢锁失败",
+                        lock::ReadonlyReason::LockLost => "租约已丢失",
+                        lock::ReadonlyReason::JournalCorrupt => "journal 损坏",
+                    },
+                    root.display()
+                );
+                startup_readonly_reason = Some(reason);
                 None
             }
-            Err(error) => return Err(error),
+            Err(lock::AcquireFailure::Error(error)) => return Err(error),
         };
         let mut initially_readonly = guard.is_none();
 
@@ -73,6 +87,7 @@ impl Vault {
                     // 释放锁：其它实例（以及用户手动修复后的下一次启动）仍能打开库。
                     drop(guard.take());
                     initially_readonly = true;
+                    startup_readonly_reason = Some(lock::ReadonlyReason::JournalCorrupt);
                 }
             }
         }
@@ -85,6 +100,7 @@ impl Vault {
             root,
             id,
             initially_readonly,
+            startup_readonly_reason,
             write_health,
             _lock: Mutex::new(guard),
             write_gate: Mutex::new(()),
@@ -97,6 +113,18 @@ impl Vault {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// 当前只读原因；可写时返回 None。
+    /// 启动只读沿用判定时的原因；运行期失守一律是 `LockLost`。
+    pub fn readonly_reason(&self) -> Option<lock::ReadonlyReason> {
+        if let Some(reason) = self.startup_readonly_reason {
+            return Some(reason);
+        }
+        if !self.writable() {
+            return Some(lock::ReadonlyReason::LockLost);
+        }
+        None
     }
 
     /// 运行期健康标志：watcher 用它检测锁被接管/心跳失败后通知前端

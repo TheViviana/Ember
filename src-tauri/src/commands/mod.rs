@@ -35,6 +35,9 @@ pub struct VaultIdentity {
     #[serde(rename = "vaultId")]
     vault_id: String,
     readonly: bool,
+    /// 只读原因；可写时省略（additive 字段，老前端不受影响）
+    #[serde(rename = "readonlyReason", skip_serializing_if = "Option::is_none")]
+    readonly_reason: Option<crate::vault::lock::ReadonlyReason>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +58,7 @@ fn identity_of(vault: &Vault) -> VaultIdentity {
         vault_id: vault.id().to_string(),
         // 用 writable() 而非 readonly()：运行期锁被接管后也要如实告知前端
         readonly: !vault.writable(),
+        readonly_reason: vault.readonly_reason(),
     }
 }
 

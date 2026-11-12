@@ -18,6 +18,8 @@ export interface BootstrapOptions {
 interface VaultIdentity {
   readonly vaultId: string;
   readonly readonly: boolean;
+  /** 只读原因；可写时 Rust 侧省略该字段 */
+  readonly readonlyReason?: string;
 }
 
 /**
@@ -47,7 +49,10 @@ export const createKernel = async (options: BootstrapOptions): Promise<BootedKer
   const kernel = await bootKernel({
     vaultId,
     ports: {
-      vault: createTauriVaultPort({ readonlyMode: identity.readonly }),
+      vault: createTauriVaultPort({
+        readonlyMode: identity.readonly,
+        readonlyReason: identity.readonlyReason ?? null,
+      }),
       index: createPendingIndexPort('索引服务尚未接入（SQLite + FTS5 在 Rust 侧）'),
     },
     capabilities: options.capabilities,

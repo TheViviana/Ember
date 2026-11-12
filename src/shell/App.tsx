@@ -47,6 +47,9 @@ export const App = (): ReactElement => {
   );
   // 运行期库锁被接管后由内核广播 vault:mode，状态栏需要跟着切换
   const [readonlyMode, setReadonlyMode] = useState(kernel.env.readonlyMode);
+  const [readonlyReason, setReadonlyReason] = useState<string | null>(
+    kernel.env.readonlyReason,
+  );
   // 关窗落盘失败：阻止本次关闭并在状态栏提示；同一会话内第二次关闭直接放行
   const [closeFailures, setCloseFailures] = useState<readonly string[] | null>(null);
   const closeBlockedRef = useRef(false);
@@ -93,8 +96,10 @@ export const App = (): ReactElement => {
   // 库锁运行期失守：内核广播 vault:mode，界面切到只读
   useEffect(() => {
     setReadonlyMode(kernel.env.readonlyMode);
-    const subscription = kernel.events.on('vault:mode', ({ readonly }) => {
+    setReadonlyReason(kernel.env.readonlyReason);
+    const subscription = kernel.events.on('vault:mode', ({ readonly, reason }) => {
       setReadonlyMode(readonly);
+      setReadonlyReason(reason);
     });
     return () => {
       subscription.dispose();
@@ -219,6 +224,7 @@ export const App = (): ReactElement => {
       <Topbar
         kernelVersion={kernel.env.kernelVersion}
         readonlyMode={readonlyMode}
+        readonlyReason={readonlyReason}
         aiOpen={aiOpen}
         onToggleAi={() => {
           useMachineStore.getState().setAiPanel({ open: !aiOpen });
@@ -258,6 +264,7 @@ export const App = (): ReactElement => {
 
       <StatusBar
         readonlyMode={readonlyMode}
+        readonlyReason={readonlyReason}
         kernelVersion={kernel.env.kernelVersion}
         documentCount={documents.data?.length ?? 0}
         activeCapabilities={activeCapabilities}

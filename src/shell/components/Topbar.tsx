@@ -1,11 +1,13 @@
 import { useEffect, useState, type ReactElement } from 'react';
 import { useWindowPort } from '../kernel-provider.tsx';
 import { WindowControls } from './WindowControls.tsx';
+import { readonlyText } from './readonly-text.ts';
 import styles from './Topbar.module.css';
 
 export interface TopbarProps {
   readonly kernelVersion: string;
   readonly readonlyMode: boolean;
+  readonly readonlyReason: string | null;
   readonly aiOpen: boolean;
   readonly onToggleAi: () => void;
   readonly onOpenSettings: () => void;
@@ -16,6 +18,7 @@ const formatClock = (at: Date): string => at.toLocaleTimeString('zh-CN', { hour1
 export const Topbar = ({
   kernelVersion,
   readonlyMode,
+  readonlyReason,
   aiOpen,
   onToggleAi,
   onOpenSettings,
@@ -60,7 +63,7 @@ export const Topbar = ({
           aria-hidden="true"
         />
         <span className={`${styles.statusText} ${readonlyMode ? styles.statusTextReadonly : ''}`}>
-          {readonlyMode ? '只读模式' : '内核就绪'}
+          {readonlyMode ? readonlyText(readonlyReason) : '内核就绪'}
         </span>
         <span className={styles.clock}>{clock}</span>
         <button

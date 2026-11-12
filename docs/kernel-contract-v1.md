@@ -614,9 +614,11 @@ export interface CommandBus {
 ```ts
 // src/kernel/context.ts
 export interface KernelEnv {
-  readonly kernelVersion: string;   // "1.1.0"
+  readonly kernelVersion: string;   // "1.2.0"
   readonly vaultId: VaultId;
   readonly readonlyMode: boolean;   // 未拿到库锁时为 true
+  /** 只读原因（ReadonlyReason 的 camelCase 值）；可写时为 null */
+  readonly readonlyReason: string | null;
 }
 
 export interface KernelContext {
@@ -700,7 +702,7 @@ export interface KernelEventMap {
   'index:updated': { changedDocIds: readonly DocId[] };
   'command:executed': { id: CommandId; ok: boolean };
   'capability:state': { id: CapabilityId; active: boolean; error: string | null };
-  'vault:mode': { readonly: boolean; reason: string | null };
+  'vault:mode': { readonly: boolean; reason: string | null };   // reason 为只读原因，可写时 null
   'canvas:changed': { canvasId: CanvasId; rev: number };
   /** 内核只发意图，由 shell 打开浮窗/选择器；能力不得直接碰 UI（G1） */
   'canvas:ui': {
@@ -782,13 +784,37 @@ export class EmberError extends Error {
   检查与 `fs::rename` 之间仍有窗口，外部进程此时创建同名文件仍会被覆盖。
 - `vault_write` 的 `intent` 只接受 `user` / `capability` / `migration` / `system`，其它值返回 `invalid_payload`。
 
+### 10.2 只读原因与库锁清理的已知限制
+
+启动时 Rust 侧给出只读原因（`ReadonlyReason`，serde camelCase），随 `vault_identity` 的**可选**字段
+`readonlyReason` 与 `vault:mode` 事件的 `reason` 传到前端，状态栏/顶栏按原因显示不同文案：
+
+| 原因 | 含义 | 状态栏文案 |
+|---|---|---|
+| `lockedByOther` | 另一实例正常持锁（心跳新鲜） | 只读：另一实例已打开 |
+| `lockedByStalled` | 另一实例持锁但心跳已停，本机进程仍存活 | 只读：另一实例无响应，请关闭后重试 |
+| `claimFailed` | 判为失效后认领失败（并发抢锁输了） | 只读：抢锁失败，请重试 |
+| `lockLost` | 运行期心跳发现锁被接管或丢失 | 只读：库锁已丢失 |
+| `journalCorrupt` | journal 恢复失败，损坏现场已保留 | 只读：journal 损坏，已保留现场，需人工处理 |
+
+`readonlyReason` 是**新增可选字段**：旧调用方不传也不报错，缺失时前端回退到通用「只读模式」文案。
+
+以下四项为库锁与清理的已知限制，当前行为与不修的理由一并记录：
+
+| 项 | 当前行为 | 为什么不修 |
+|---|---|---|
+| 跨机死锁 + 时钟回拨可能长期无法回收 | 跨机共享库的失效判定依赖文件 mtime 超 30s 兜底。若持有方的机器时钟回拨/慢于观察方，`now - mtime` 可能长期不足 30s，锁被判为活跃，新实例持续只读。 | 需要可信时间源（NTP 校验或逻辑时钟），成本远超收益；只读提示明确，用户可手动删除 `.workbench/lock` 恢复。 |
+| 时钟前跳超过清扫门槛会误删孤儿判定 | 孤儿 temp 清扫按 mtime 超过 24h 判定。系统时钟前跳超过门槛时，正在进行的写入 temp 可能被误判为孤儿删掉，导致该次写入失败并报错（不静默丢数据）。 | 正确做法要引入单调时钟/进程启动时刻标记，原子写与清扫路径都要改；当前后果是单次写失败且错误上抛，可重试。 |
+| 库长期只读时孤儿 temp 永不清扫 | 清扫只在持锁且 journal 恢复成功后执行。长期只读的实例不清扫，`.workbench/` 下的孤儿 temp 与旧版 trash 目录会一直保留。 | 只读实例清扫会与持锁实例的写入竞态（可能删掉对方正在 rename 的 temp）；增长缓慢且用户可手动清理。 |
+| EROFS/权限不足不构成只读判定 | 只读判定只看库锁与 journal。文件系统只读（EROFS）或权限不足时 `readonlyMode` 仍为 false、状态栏显示可写，每次写入逐次失败并报错。 | 需要启动期写探针，会在每个库目录留下副作用，且在只读介质上探针自身失败难以与锁失败区分；错误信息已带路径，用户可判断。 |
+
 ---
 
 ## 11. 启动顺序（不可乱序）
 
 ```
 1. 解析 vault 路径 → 计算 vaultHash
-2. 获取库锁（失败 → readonlyMode = true）
+2. 获取库锁（失败 → readonlyMode = true，并记录 §10.2 的只读原因）
 3. journal 恢复（vault-format §6.2）——必须在任何写之前
 4. 打开索引：校验 schema_version / tokenizer_version，不匹配则重建（v1 未执行：无索引）
 5. 绑定端口（VaultPort / IndexPort / AiPort），由 data 层注入（v1 的 IndexPort 为占位实现）
@@ -799,8 +825,9 @@ export class EmberError extends Error {
 10. emit 'vault:mode'
 ```
 
-失败策略：3–6 任一步失败 → 启动中止并展示可复制诊断，**不允许**带着未恢复的 journal 进入可写状态。
-索引相关失败策略在索引接入后另行定义（v1 无索引，第 4 步不执行）。
+失败策略：4–6 任一步失败 → 启动中止并展示可复制诊断，**不允许**带着未恢复的 journal 进入可写状态。
+第 2 步抢不到锁 → 只读观察者；第 3 步 journal 恢复失败 → 释放锁、转只读（`journalCorrupt`），保留损坏现场等人工处理，
+同样不会进入可写状态。索引相关失败策略在索引接入后另行定义（v1 无索引，第 4 步不执行）。
 
 ---
 
@@ -810,6 +837,7 @@ export class EmberError extends Error {
   - **新增**字段或服务方法 → minor 位 +1（如 1.0.0 → 1.1.0）；
   - **删除**字段或改变已有字段语义 → major 位 +1，并同时存在两个版本的能力适配层（v1 能力仍能加载）；
   - 纯 bug 修复、接口不变 → patch 位 +1。
+- 当前 `KERNEL_VERSION = 1.2.0`（1.1.0 → 1.2.0：`KernelEnv` 与 `VaultPort` 新增 `readonlyReason`）。
 - 新增字段时，**所有 `KernelContext` 构造点必须同步**（boot 的 createKernelContext、测试桩 stubContext/scopeContext 等）；不补即类型错误，不得用可选字段或类型断言绕过。
 - 能力声明的 `requiresKernel` 与实际内核版本不兼容时，只禁用该能力，不阻塞启动。
 
