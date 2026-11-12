@@ -26,6 +26,9 @@ const ORPHAN_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// v1 起删除直接进系统回收站，库内不再产生新副本；这里只为历史库做惰性回收。
 const TRASH_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
 
+/// IPC 可接受的写入意图（vault-format §6.2）：journal 的 `kind` 只允许这四个值。
+const WRITE_INTENTS: [&str; 4] = ["user", "capability", "migration", "system"];
+
 /// 库运行态：根路径、身份、锁与写入串行化。
 pub struct Vault {
     root: PathBuf,
@@ -111,6 +114,10 @@ impl Vault {
     }
 
     pub fn write(&self, relative: &str, bytes: &[u8], intent: &str) -> VaultResult<()> {
+        // intent 会原样写进 journal 的 kind；非法值在入口拒绝，不让未定义枚举值落盘。
+        if !WRITE_INTENTS.contains(&intent) {
+            return Err(VaultError::Encoding(format!("非法的写入意图：{intent}")));
+        }
         self.ensure_writable()?;
         let (absolute, normalized) = paths::resolve(&self.root, relative)?;
         paths::ensure_not_reserved(&normalized)?;
@@ -157,6 +164,14 @@ impl Vault {
         let _gate = self.begin_write()?;
         if !source.is_file() {
             return Err(VaultError::NotFound(from.to_string()));
+        }
+        if source == target {
+            return Ok(());
+        }
+        // 目标已存在时拒绝覆盖。注意：这是降低概率而非杜绝——检查与 fs::rename 之间
+        // 仍有窗口，外部进程此时创建同名文件仍会被覆盖（POSIX rename 是覆盖语义）。
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err(VaultError::PathExists(to.to_string()));
         }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
@@ -628,6 +643,42 @@ mod tests {
         // 合法改名不受影响
         temp.vault.rename("notes/a.md", "notes/b.md").unwrap();
         assert!(temp.vault.read("notes/b.md").unwrap().is_some());
+    }
+
+    #[test]
+    fn rename_refuses_existing_target_and_keeps_both_files() {
+        let temp = TempVault::new();
+        temp.vault.write("notes/a.md", b"source", "user").unwrap();
+        temp.vault.write("notes/b.md", b"target", "user").unwrap();
+
+        let error = temp.vault.rename("notes/a.md", "notes/b.md").unwrap_err();
+        assert_eq!(error.code(), "path_exists");
+        assert_eq!(
+            temp.vault.read("notes/a.md").unwrap().unwrap().as_slice(),
+            b"source"
+        );
+        assert_eq!(
+            temp.vault.read("notes/b.md").unwrap().unwrap().as_slice(),
+            b"target"
+        );
+
+        // 目标空出来之后仍可正常改名
+        temp.vault.rename("notes/a.md", "notes/c.md").unwrap();
+        assert!(temp.vault.read("notes/c.md").unwrap().is_some());
+        assert!(temp.vault.read("notes/a.md").unwrap().is_none());
+    }
+
+    #[test]
+    fn write_rejects_unknown_intent_and_accepts_the_four_known_ones() {
+        let temp = TempVault::new();
+
+        let error = temp.vault.write("notes/a.md", b"x", "renderer").unwrap_err();
+        assert_eq!(error.code(), "invalid_payload");
+        assert!(temp.vault.read("notes/a.md").unwrap().is_none());
+
+        for intent in ["user", "capability", "migration", "system"] {
+            temp.vault.write("notes/a.md", b"x", intent).unwrap();
+        }
     }
 
     #[test]

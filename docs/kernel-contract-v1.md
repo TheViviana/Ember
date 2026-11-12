@@ -762,6 +762,24 @@ export class EmberError extends Error {
 ```
 
 规则：`code` 是稳定契约，`message` 可改（可本地化）；UI 依据 `code` 分支，不解析 `message`。
+`path_exists` 除 `docs.create` 外，也由 IPC 边界的 `vault_rename` 在目标已存在时返回。
+
+### 10.1 IPC 信任边界（v1 现状）
+
+渲染进程按**半可信**处理。Rust 侧执行路径越界、保留路径、体积上限、MIME 与 AI 端点校验，
+但不承诺对每个字段做语义校验。以下三项本轮明确不修，记录为已知限制：
+
+| 项 | 当前行为 | 本轮为什么不修 | 如果修要动什么 |
+|---|---|---|---|
+| `vault_purge` 对 renderer 开放 | 任意合法库内路径可被永久删除，绕过系统回收站（只有 `vault_remove` 走回收站）。renderer 被攻破即可不可逆删库内文件 | 文章创建失败的回滚依赖该通道；renderer 本就有全库写权限，单独收紧收益有限，且需要先设计内核侧回滚凭据 | 引入进程内一次性回滚令牌，或把回滚下沉为 Rust 事务，使该命令不再可被自由调用 |
+| `ai_chat_stream` 载荷无上限 | `messages` 条数、单条 `content` 长度、`model`、`request_id` 均无运行时约束；超大输入造成内存/CPU 峰值 | 合法长对话的合理上限尚未确定，贸然限制会切断正常使用 | 定义 `MAX_MESSAGES` / `MAX_CONTENT_BYTES` / `MAX_REQUEST_ID`，在命令入口拒绝并返回 `invalid_payload` |
+| `window_resize_frame` 坐标无界 | `x` / `y` 可为任意值（负坐标合法：副屏在主屏左侧或上方），仅宽高下限为 1 | 多显示器并集的合法坐标空间没有统一上限，需要枚举屏幕，跨平台成本高 | 按可用屏幕并集裁剪，并保留负坐标语义 |
+
+补充两条已收紧的边界：
+
+- `vault_rename` 在目标路径已存在时返回 `path_exists`，不执行重命名。这**只降低覆盖概率，不能杜绝**：
+  检查与 `fs::rename` 之间仍有窗口，外部进程此时创建同名文件仍会被覆盖。
+- `vault_write` 的 `intent` 只接受 `user` / `capability` / `migration` / `system`，其它值返回 `invalid_payload`。
 
 ---
 

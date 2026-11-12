@@ -119,6 +119,8 @@ pub async fn vault_purge(vault: State<'_, Vault>, path: String) -> VaultResult<(
     vault.purge(&path)
 }
 
+/// 目标路径已存在时返回 `path_exists`。该检查只降低覆盖概率，不能杜绝：
+/// 检查与 `fs::rename` 之间仍有窗口，外部进程此时创建同名文件仍会被覆盖。
 #[tauri::command]
 pub async fn vault_rename(vault: State<'_, Vault>, from: String, to: String) -> VaultResult<()> {
     vault.rename(&from, &to)

@@ -7,6 +7,8 @@ pub enum VaultError {
     Readonly,
     #[error("文件不存在：{0}")]
     NotFound(String),
+    #[error("目标路径已存在：{0}")]
+    PathExists(String),
     #[error("库尚未初始化")]
     Uninitialized,
     #[error("载荷编码非法：{0}")]
@@ -29,6 +31,7 @@ impl VaultError {
             VaultError::PathOutside(_) => "path_outside_vault",
             VaultError::Readonly => "vault_locked",
             VaultError::NotFound(_) => "doc_not_found",
+            VaultError::PathExists(_) => "path_exists",
             VaultError::Uninitialized => "vault_uninitialized",
             VaultError::Encoding(_) => "invalid_payload",
             VaultError::Io(_) => "io_failed",
