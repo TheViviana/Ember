@@ -199,18 +199,28 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
     reason: env.readonlyMode ? 'library lock unavailable' : null,
   });
 
+  // 单飞：关窗收尾与 KernelProvider 卸载可能同时触发，拆解只能执行一次。
+  // 失败时清空缓存以允许重试（调用方据此判断是否还能继续使用内核）。
+  let closing: Promise<void> | null = null;
+
   return {
     context,
-    shutdown: async () => {
-      watcher.dispose();
-      modeWatch?.dispose();
-      await capabilities.deactivateAll();
-      for (const registration of [...registrations].reverse()) registration.dispose();
-      await drainRefresh();
-      await docs.flush();
-      await canvas.flush();
-      await settings.flush();
-      log.info('内核已关闭');
+    shutdown: () => {
+      closing ??= (async () => {
+        watcher.dispose();
+        modeWatch?.dispose();
+        await capabilities.deactivateAll();
+        for (const registration of [...registrations].reverse()) registration.dispose();
+        await drainRefresh();
+        await docs.flush();
+        await canvas.flush();
+        await settings.flush();
+        log.info('内核已关闭');
+      })().catch((error: unknown) => {
+        closing = null;
+        throw error;
+      });
+      return closing;
     },
   };
 };

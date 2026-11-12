@@ -54,7 +54,12 @@ interface Harness {
   readonly setBody: (value: string) => void;
 }
 
-const harness = (): Harness => {
+interface HarnessOptions {
+  /** 让 docs.update 在放行后失败，用来验证失败会被向上抛出 */
+  readonly failUpdate?: boolean;
+}
+
+const harness = (options: HarnessOptions = {}): Harness => {
   const updates: Array<{ readonly body: string | undefined }> = [];
   const releases: Array<() => void> = [];
   let current = '';
@@ -67,6 +72,7 @@ const harness = (): Harness => {
     updates.push({ body: patch.body });
     // 写入挂起，由测试决定何时完成，用来稳定复现「保存中再次 persist」
     await new Promise<void>((resolve) => releases.push(resolve));
+    if (options.failUpdate === true) throw new Error('disk full');
     rev += 1;
     return {
       snapshot: snapshotOf(patch.body ?? '', rev),
@@ -155,4 +161,27 @@ void test('保存中再次 persist，flushOnClose 仍会返回并以关闭正文
 
   assert.equal(persister.getSavedBody(), '关闭正文', '最终落盘内容为关闭瞬间的正文');
   assert.equal(persister.isSaving(), false);
+});
+
+void test('保存失败向上抛出，不再只留在状态栏', async () => {
+  const { persister, releases, setBody } = harness({ failUpdate: true });
+  persister.reset(snapshotOf('初始正文', 0));
+
+  setBody('会失败的改动');
+  const saving = persister.persist();
+  await waitFor(() => releases.length === 1, '写入开始');
+  releases.shift()?.();
+
+  await assert.rejects(saving, /disk full/, 'persist 必须把失败交给调用方');
+});
+
+void test('flushOnClose 补写失败同样抛出（关窗据此阻止关闭）', async () => {
+  const { persister, releases } = harness({ failUpdate: true });
+  persister.reset(snapshotOf('初始正文', 0));
+
+  const flushing = persister.flushOnClose('关闭正文');
+  await waitFor(() => releases.length === 1, '关闭补写开始');
+  releases.shift()?.();
+
+  await assert.rejects(flushing, /disk full/, 'flushOnClose 必须把窗口内的失败抛给关窗流程');
 });

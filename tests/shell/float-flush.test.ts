@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { flushFloatEditors, registerFloatFlusher, settleFloatWrite, trackFloatWrite } from '../../src/shell/editor/float-flush.ts';
+import {
+  FloatFlushError,
+  flushFloatEditors,
+  registerFloatFlusher,
+  settleFloatWrite,
+  trackFloatWrite,
+} from '../../src/shell/editor/float-flush.ts';
 
 void test('关窗前注册的编辑器落盘回调全部执行', async () => {
   const calls: string[] = [];
@@ -21,7 +27,7 @@ void test('关窗前注册的编辑器落盘回调全部执行', async () => {
   unsubscribeB();
 });
 
-void test('注销后的回调不再执行，单个回调失败不影响其它', async () => {
+void test('注销后的回调不再执行；单个回调失败不阻断其它，失败汇总上报', async () => {
   const calls: string[] = [];
   const unsubscribeBroken = registerFloatFlusher(() => Promise.reject(new Error('disk full')));
   const unsubscribeHealthy = registerFloatFlusher(() => {
@@ -29,7 +35,12 @@ void test('注销后的回调不再执行，单个回调失败不影响其它', 
     return Promise.resolve();
   });
 
-  await flushFloatEditors();
+  await assert.rejects(
+    () => flushFloatEditors(),
+    (error: unknown) =>
+      error instanceof FloatFlushError && error.failures.some((text) => text.includes('disk full')),
+    '存在失败时必须向上抛，关窗流程据此阻止关闭',
+  );
   assert.deepEqual(calls, ['healthy'], '失败的回调不阻断其它落盘');
 
   unsubscribeBroken();
@@ -67,7 +78,7 @@ void test('没有挂起写入时立即返回', async () => {
 
 void test('写入失败也不阻塞重开（错误由保存流程自己上报）', async () => {
   trackFloatWrite('doc-b', Promise.reject(new Error('disk full')));
-  await settleFloatWrite('doc-b');
+  await assert.doesNotReject(() => settleFloatWrite('doc-b'));
 });
 
 void test('同一篇连续收尾两次：等待最后一次也完成，完成后清空记录', async () => {

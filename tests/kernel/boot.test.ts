@@ -276,3 +276,17 @@ void test('只读模式下写操作抛 vault_locked，索引仍可用（G2）', 
 
   await kernel.shutdown();
 });
+
+void test('shutdown 单飞：并发调用共享同一 promise，完成后重复调用保持幂等', async () => {
+  const vault = createMemoryVault();
+  const kernel = await boot(vault, []);
+
+  const first = kernel.shutdown();
+  const second = kernel.shutdown();
+  assert.equal(first, second, '并发关停只能执行一次拆解');
+
+  await Promise.all([first, second]);
+  await kernel.shutdown();
+  assert.equal(kernel.context.capabilities.isActive(CAPABILITY_ID), false);
+  assert.deepEqual(kernel.context.commands.list(), []);
+});

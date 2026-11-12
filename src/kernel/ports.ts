@@ -92,6 +92,9 @@ export interface WindowPort {
   /** 无法读取时返回 null */
   readFrame(): Promise<WindowFrame | null>;
   applyFrame(frame: WindowFrame): Promise<void>;
-  /** 关窗请求：回调完成后窗口才销毁；返回取消订阅函数 */
-  onCloseRequested(handler: () => Promise<void>): Promise<() => void>;
+  /**
+   * 关窗请求：回调完成后窗口才销毁。
+   * 回调返回 false 表示拒绝本次关闭（已提示用户），由实现方 preventDefault。
+   */
+  onCloseRequested(handler: () => Promise<boolean>): Promise<() => void>;
 }

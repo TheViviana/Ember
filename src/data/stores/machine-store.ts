@@ -310,6 +310,8 @@ let hydrating: Promise<void> | null = null;
 /** 磁盘是未来版本的 ui.json：本会话禁止回写，避免旧版本应用把新字段抹掉 */
 let futureDocument = false;
 let writeChain: Promise<void> = Promise.resolve();
+/** 最近一次写盘失败；flush 时上报一次后清空，写链本身保持 resolved 以便继续排后续写入 */
+let lastWriteFailure: Error | null = null;
 
 /** 由 data 层装配处注入；未注入时尺寸仅保存在内存，不影响使用。 */
 export const attachMachineUiPort = (next: MachineUiPort): void => {
@@ -438,21 +440,29 @@ const queueWrite = (): void => {
     state.panels.ai,
     state.sidebarWidth,
   );
-  writeChain = writeChain
-    .catch(() => undefined)
-    .then(async () => {
+  writeChain = writeChain.then(async () => {
+    try {
       await target.write(json);
-    })
-    .catch((error: unknown) => {
+      lastWriteFailure = null;
+    } catch (error) {
+      // 链内吞错保序：一次失败不应让后续写入被跳过；失败由 flush 上报
+      lastWriteFailure = error instanceof Error ? error : new Error(String(error));
       console.warn(
         '机器本地 ui.json 写入失败，浮窗尺寸暂存内存：',
         error instanceof Error ? error.message : String(error),
       );
-    });
+    }
+  });
 };
 
-/** 等待排队中的写入落盘（测试与关闭前使用）。 */
-export const flushMachineUiWrites = (): Promise<void> => writeChain;
+/** 等待排队中的写入落盘（测试与关闭前使用）；有失败时上报一次后清空。 */
+export const flushMachineUiWrites = async (): Promise<void> => {
+  await writeChain;
+  if (lastWriteFailure === null) return;
+  const failure = lastWriteFailure;
+  lastWriteFailure = null;
+  throw failure;
+};
 
 /** 主内容区高度 = 窗口高度 - 顶栏 52 - 状态栏 28（与 tokens.css 一致） */
 const measurePanelArea = (): PanelArea => {

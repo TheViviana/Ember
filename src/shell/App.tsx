@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import type { DocId } from '#doc-model';
 import { toErrorText } from '../kernel/errors.ts';
 import type { CapabilityState, CommandDescriptor, SettingsPatch } from '../kernel/types.ts';
-import { useKernel, useWindowPort } from './kernel-provider.tsx';
+import { runCloseFlow } from './close-flow.ts';
+import { useKernel, useKernelShutdown, useWindowPort } from './kernel-provider.tsx';
 import { AiPanel } from './ai/AiPanel.tsx';
 import { CanvasSurface } from './canvas/CanvasSurface.tsx';
 import { CommandPalette } from './commands/CommandPalette.tsx';
@@ -30,6 +31,7 @@ import styles from './App.module.css';
 export const App = (): ReactElement => {
   const kernel = useKernel();
   const windowPort = useWindowPort();
+  const shutdown = useKernelShutdown();
   const queryClient = useQueryClient();
   // 侧栏高亮 / 浮窗层级共用同一份激活状态；关闭最前窗时 store 会回退到下一扇
   const activeDocId = useFloatStore((state) => state.activeId);
@@ -45,6 +47,10 @@ export const App = (): ReactElement => {
   );
   // 运行期库锁被接管后由内核广播 vault:mode，状态栏需要跟着切换
   const [readonlyMode, setReadonlyMode] = useState(kernel.env.readonlyMode);
+  // 关窗落盘失败：阻止本次关闭并在状态栏提示；同一会话内第二次关闭直接放行
+  const [closeFailures, setCloseFailures] = useState<readonly string[] | null>(null);
+  const closeBlockedRef = useRef(false);
+  const closeFailuresRef = useRef<readonly string[] | null>(null);
 
   useShellCommands();
   useImportCommands();
@@ -98,8 +104,9 @@ export const App = (): ReactElement => {
   // 关闭/隐藏前把排队中的 ui.json 与编辑器待写内容冲掉：退出瞬间的最后一次变更不落盘就丢了
   useEffect(() => {
     const flushPendingWrites = (): void => {
-      void flushMachineUiWrites();
-      void flushFloatEditors();
+      // 页面隐藏属尽力而为：失败由编辑器自身的状态栏提示，这里只负责不产生 unhandled rejection
+      void flushMachineUiWrites().catch(() => undefined);
+      void flushFloatEditors().catch(() => undefined);
     };
     const onVisibility = (): void => {
       if (document.visibilityState === 'hidden') flushPendingWrites();
@@ -111,7 +118,30 @@ export const App = (): ReactElement => {
     let unlistenClose: (() => void) | null = null;
     void windowPort
       .onCloseRequested(async () => {
-        await Promise.allSettled([flushMachineUiWrites(), flushFloatEditors()]);
+        // 第二次关闭：用户已看到「保存失败、再次关闭将丢弃改动」的提示，放行以免窗口关不掉
+        if (closeBlockedRef.current) {
+          kernel.log.error('关窗落盘仍失败：按用户二次关闭直接放行，未保存内容可能丢失', {
+            failures: closeFailuresRef.current,
+          });
+          return true;
+        }
+        const outcome = await runCloseFlow({
+          flushers: [
+            flushMachineUiWrites,
+            flushFloatEditors,
+            () => kernel.docs.flush(),
+            () => kernel.canvas.flush(),
+          ],
+          shutdown,
+          log: kernel.log,
+        });
+        if (outcome.kind === 'close') return true;
+        // 落盘失败：拦住窗口并提示；不进入 shutdown，避免半拆解后还能继续编辑
+        closeBlockedRef.current = true;
+        closeFailuresRef.current = outcome.failures;
+        setCloseFailures(outcome.failures);
+        kernel.log.error('关窗落盘失败，已阻止关闭', { failures: outcome.failures });
+        return false;
       })
       .then((unlisten) => {
         if (disposed) unlisten();
@@ -123,7 +153,7 @@ export const App = (): ReactElement => {
       window.removeEventListener('pagehide', flushPendingWrites);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [windowPort]);
+  }, [kernel, shutdown, windowPort]);
 
   // 命令注册/注销不经过 React 状态，订阅总线后同步侧栏与命令面板
   useEffect(() => {
@@ -232,6 +262,7 @@ export const App = (): ReactElement => {
         activeCapabilities={activeCapabilities}
         capabilityCount={capabilities.length}
         commandCount={commands.length}
+        notice={closeFailures === null ? null : '保存失败，已阻止关闭；再次关闭将丢弃改动'}
       />
 
       {settingsOpen ? (

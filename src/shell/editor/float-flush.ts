@@ -3,6 +3,8 @@
  * 关闭是同步卸载，persist() 只能异步完成；同一篇文档被立刻重开时，
  * 新实例必须先等这一次写入落盘，再读取快照，否则会读到旧快照。
  */
+import { toErrorText } from '../../kernel/errors.ts';
+
 const pending = new Map<string, Promise<void>>();
 
 /**
@@ -18,9 +20,25 @@ export const registerFloatFlusher = (flush: () => Promise<void>): (() => void) =
   };
 };
 
-/** 关窗/隐藏前调用：并行等待所有编辑器落盘，单个失败不影响其余 */
+/** 关窗落盘失败汇总：同时保留全部失败原因，供状态栏与日志使用 */
+export class FloatFlushError extends Error {
+  readonly failures: readonly string[];
+
+  constructor(failures: readonly string[]) {
+    super(`关窗落盘失败 ${failures.length} 处：${failures.join('；')}`);
+    this.name = 'FloatFlushError';
+    this.failures = failures;
+  }
+}
+
+/** 关窗/隐藏前调用：并行等待所有编辑器落盘，全部执行完再汇总失败 */
 export const flushFloatEditors = async (): Promise<void> => {
-  await Promise.allSettled([...flushers].map((flush) => flush()));
+  const results = await Promise.allSettled([...flushers].map((flush) => flush()));
+  const failures: string[] = [];
+  for (const result of results) {
+    if (result.status === 'rejected') failures.push(toErrorText(result.reason));
+  }
+  if (failures.length > 0) throw new FloatFlushError(failures);
 };
 
 export const trackFloatWrite = (docId: string, write: Promise<unknown>): void => {

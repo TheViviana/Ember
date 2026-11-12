@@ -63,6 +63,8 @@ export const createFloatPersister = (deps: FloatPersisterDeps): FloatPersister =
   let pending: (() => void) | null = null;
   /** 等待「当前这轮保存结束」的完成信号；单槽 pending 会被后续 persist 覆盖，不能复用 */
   const waiters: Array<() => void> = [];
+  /** 最近一次未上报的保存失败；成功后清空，关窗时据此决定是否阻止关闭 */
+  let lastFailure: Error | null = null;
   let savedBody = '';
   let base: DocRevision | null = null;
 
@@ -99,8 +101,10 @@ export const createFloatPersister = (deps: FloatPersisterDeps): FloatPersister =
     const body = bodyOverride ?? getBody();
     if (body === null) return;
     if (saving) {
+      // 失败会在下一轮 catch 里记入 lastFailure 并由关窗流程上报；
+      // 这里必须吞掉，否则排队写入会变成 unhandled rejection。
       pending = () => {
-        void persist();
+        void persist().catch(() => undefined);
       };
       return;
     }
@@ -129,6 +133,8 @@ export const createFloatPersister = (deps: FloatPersisterDeps): FloatPersister =
     }
     const hasFrontmatter = Object.keys(frontmatter).length > 0;
     if (bodyPatch === null && !hasFrontmatter) {
+      // 没有待写内容：此前失败若已被用户改回原样，就不再阻止关闭
+      lastFailure = null;
       setPhase('saved');
       return;
     }
@@ -183,11 +189,16 @@ export const createFloatPersister = (deps: FloatPersisterDeps): FloatPersister =
         }
       }
       void queryClient.invalidateQueries({ queryKey: ['docs', 'list'] });
+      lastFailure = null;
     } catch (error) {
+      const failure = error instanceof Error ? error : new Error(toErrorText(error));
+      lastFailure = failure;
       if (!isDisposed()) {
         setPhase('error');
-        setBanner({ tone: 'alert', text: toErrorText(error) });
+        setBanner({ tone: 'alert', text: toErrorText(failure) });
       }
+      // 必须向上抛：关窗流程据此阻止关闭，否则用户会在「看起来保存成功」后丢内容
+      throw failure;
     } finally {
       saving = false;
       // 先唤醒等待者，再执行排队写入：等待者恢复后会重新检查 saving，
@@ -199,11 +210,23 @@ export const createFloatPersister = (deps: FloatPersisterDeps): FloatPersister =
     }
   };
 
-  const flushOnClose = async (body: string): Promise<void> => {
-    while (saving) {
+  /** 等待在途写入与排队写入全部结束（等待者恢复后会重新检查状态） */
+  const drainWrites = async (): Promise<void> => {
+    while (saving || pending !== null) {
       await new Promise<void>((resolve) => waiters.push(resolve));
     }
+  };
+
+  const flushOnClose = async (body: string): Promise<void> => {
+    await drainWrites();
+    // 补写失败直接向上抛；排队写入的失败记在 lastFailure 里
     await persist(body);
+    await drainWrites();
+    if (lastFailure !== null) {
+      const failure = lastFailure;
+      lastFailure = null;
+      throw failure;
+    }
   };
 
   return {

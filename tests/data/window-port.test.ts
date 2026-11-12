@@ -13,7 +13,7 @@ void test('非 Tauri 环境下窗口端口为 no-op，native 为 false', async (
   assert.equal(await port.readFrame(), null);
   await port.applyFrame({ x: 0, y: 0, width: 960, height: 640 });
 
-  const unlisten = await port.onCloseRequested(() => Promise.resolve());
+  const unlisten = await port.onCloseRequested(() => Promise.resolve(true));
   assert.equal(typeof unlisten, 'function');
   unlisten();
 });

@@ -195,11 +195,17 @@ export const useFloatDocument = ({
       await persister.flushOnClose(body);
     });
 
+    // persist 失败已经写进编辑器状态栏与 lastFailure（关窗据此拦截）；
+    // 调用点不要再 `void` 裸调用，否则会变成 unhandled rejection。
+    const persistQuietly = (): void => {
+      void persister.persist().catch(() => undefined);
+    };
+
     const scheduleSave = (): void => {
       if (timer !== null) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = null;
-        if (!disposed) void persister.persist();
+        if (!disposed) persistQuietly();
       }, DEBOUNCE_MS);
     };
     scheduleRef.current = scheduleSave;
@@ -211,7 +217,7 @@ export const useFloatDocument = ({
       dirty.current.title = true;
       setTitle(next);
       setPhase('saving');
-      void persister.persist();
+      persistQuietly();
     };
 
     const commitTags = (next: readonly string[]): void => {
@@ -220,7 +226,7 @@ export const useFloatDocument = ({
       setTags(next);
       dirty.current.tags = true;
       setPhase('saving');
-      void persister.persist();
+      persistQuietly();
     };
 
     const commitSummary = (value: string): void => {
@@ -228,7 +234,7 @@ export const useFloatDocument = ({
       summaryField.current = value;
       dirty.current.summary = true;
       setPhase('saving');
-      void persister.persist();
+      persistQuietly();
     };
 
     actionsRef.current = { commitTitle, commitTags, commitSummary };

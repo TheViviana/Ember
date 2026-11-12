@@ -105,6 +105,31 @@ void test('缩放期间不写机器状态，松手才记忆一次', async () => 
   assert.equal(port.writes.length, 1, '松手只写一次');
 });
 
+void test('ui.json 写失败：链内吞错保序，flush 只上报一次', async () => {
+  let fail = true;
+  const writes: string[] = [];
+  const port = {
+    read: () => Promise.resolve(null),
+    write: (json: string): Promise<void> => {
+      writes.push(json);
+      return fail ? Promise.reject(new Error('disk full')) : Promise.resolve();
+    },
+  };
+  attachMachineUiPort(port);
+  await hydrateMachineUi();
+  useMachineStore.setState({ floatSizes: {}, floatPositions: {} });
+
+  useMachineStore.getState().rememberFloatSize(DOC_A, { width: 640, height: 480 });
+  await assert.rejects(flushMachineUiWrites(), /disk full/, '失败必须让关窗流程可见');
+  await flushMachineUiWrites();
+
+  // 写链没有因为一次失败而中断：恢复后仍能继续写并成功落盘
+  fail = false;
+  useMachineStore.getState().rememberFloatSize(DOC_B, { width: 500, height: 400 });
+  await flushMachineUiWrites();
+  assert.equal(writes.length, 2);
+});
+
 void test('尺寸状态不进入编辑器重建依赖，缩放后仍可继续输入', () => {
   // 拆分后：编辑器会话在 use-float-document，浮窗几何在 use-float-frame
   const source = readFileSync(

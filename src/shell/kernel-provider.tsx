@@ -21,6 +21,7 @@ export interface KernelReady {
   readonly status: 'ready';
   readonly kernel: KernelContext;
   readonly window: WindowPort;
+  readonly shutdown: () => Promise<void>;
 }
 
 export interface KernelLoading {
@@ -36,6 +37,14 @@ export type KernelView = KernelReady | KernelLoading | KernelFailed;
 
 const KernelReactContext = createContext<KernelContext | null>(null);
 const WindowPortContext = createContext<WindowPort | null>(null);
+const ShutdownContext = createContext<(() => Promise<void>) | null>(null);
+
+/** 内核关停：只给关窗收尾用，不并入 KernelContext（避免污染内核契约） */
+export const useKernelShutdown = (): (() => Promise<void>) => {
+  const value = useContext(ShutdownContext);
+  if (value === null) throw new Error('useKernelShutdown 必须在 KernelProvider 内使用');
+  return value;
+};
 
 /** 只有这里能拿到 KernelContext；能力不经过 React 树，直接拿内核注入的 ctx */
 export const useKernel = (): KernelContext => {
@@ -65,7 +74,12 @@ export const KernelProvider = ({ start, children }: KernelProviderProps): ReactE
           return;
         }
         running = kernel;
-        setView({ status: 'ready', kernel: kernel.context, window: kernel.window });
+        setView({
+          status: 'ready',
+          kernel: kernel.context,
+          window: kernel.window,
+          shutdown: () => kernel.shutdown(),
+        });
       })
       .catch((error: unknown) => {
         if (!cancelled) setView({ status: 'failed', error: toErrorText(error) });
@@ -90,7 +104,9 @@ export const KernelProvider = ({ start, children }: KernelProviderProps): ReactE
   }
   return (
     <KernelReactContext.Provider value={view.kernel}>
-      <WindowPortContext.Provider value={view.window}>{children}</WindowPortContext.Provider>
+      <WindowPortContext.Provider value={view.window}>
+        <ShutdownContext.Provider value={view.shutdown}>{children}</ShutdownContext.Provider>
+      </WindowPortContext.Provider>
     </KernelReactContext.Provider>
   );
 };

@@ -59,13 +59,18 @@ export const createTauriWindowPort = (): WindowPort => ({
 
   onCloseRequested: async (handler) => {
     if (!inTauri()) return () => undefined;
-    // 不调用 preventDefault 时，Tauri 会等异步回调结束再销毁窗口
-    return getCurrentWindow().onCloseRequested(async () => {
+    // 不调用 preventDefault 时，Tauri 会等异步回调结束再销毁窗口；
+    // handler 返回 false 表示「本次不允许关闭」（调用方已提示用户）。
+    return getCurrentWindow().onCloseRequested(async (event) => {
+      let allow: boolean;
       try {
-        await handler();
-      } catch {
-        // 收尾失败也要允许关闭；具体错误由各自的写入流程上报
+        allow = await handler();
+      } catch (error) {
+        // 收尾流程自身抛错：fail-closed，先拦住窗口并留下诊断信息
+        allow = false;
+        console.error('关窗收尾异常', error);
       }
+      if (!allow) event.preventDefault();
     });
   },
 });

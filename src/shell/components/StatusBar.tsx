@@ -9,6 +9,8 @@ export interface StatusBarProps {
   readonly activeCapabilities: number;
   readonly capabilityCount: number;
   readonly commandCount: number;
+  /** 关窗落盘失败等需要常驻提示的信息；null/undefined 时不占位 */
+  readonly notice?: string | null;
 }
 
 const Chevron = ({ collapsed }: { readonly collapsed: boolean }): ReactElement => (
@@ -30,6 +32,7 @@ export const StatusBar = ({
   activeCapabilities,
   capabilityCount,
   commandCount,
+  notice,
 }: StatusBarProps): ReactElement => {
   // 只订阅光标切片：输入时只有状态栏重渲染
   const cursor = useCursorStore((state) => state.cursor);
@@ -61,6 +64,15 @@ export const StatusBar = ({
             <span className={styles.statusGroup}>UTF-8</span>
             <span className={styles.sep}>│</span>
             <span className={styles.statusGroup}>LF</span>
+            {notice === null || notice === undefined ? null : (
+              <>
+                <span className={styles.sep}>│</span>
+                <span className={styles.statusGroup} role="status" title={notice}>
+                  <span className={`${styles.dot} ${styles.dotReadonly}`} />
+                  <span>{notice}</span>
+                </span>
+              </>
+            )}
             {cursor === null ? null : (
               <>
                 <span className={styles.sep}>│</span>
