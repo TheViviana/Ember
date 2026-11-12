@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DEFAULT_ROOT, toPosix } from './lib.mjs';
+import { activeExemptions, DEFAULT_ROOT, exemptionViolations, toPosix } from './lib.mjs';
 
 /** shell 层单文件行数上限：超过即要求拆分，或逐条登记豁免理由 */
 export const SIZE_LIMIT = 600;
@@ -15,6 +15,7 @@ const SKIP_DIRS = new Set(['node_modules']);
 /**
  * 逐条豁免：只允许已登记的文件超限。
  * 条目必须写明理由；文件拆分到限额内后必须删除对应条目，否则报 size-stale。
+ * expires 是复核节点，不是失效开关：到期必须重新裁决，修复后删除条目或论证后改期。
  * 待办（本项只登记，后续单独拆分）：
  * - settings/SettingsPanel.tsx、tools/GalleryEntry.tsx
  */
@@ -22,10 +23,12 @@ export const SIZE_WHITELIST = [
   {
     file: 'src/shell/settings/SettingsPanel.tsx',
     reason: '设置面板单文件承载全部分区；待按分区拆分子组件',
+    expires: '2027-01-31',
   },
   {
     file: 'src/shell/tools/GalleryEntry.tsx',
     reason: '工具画廊单文件承载卡片、筛选与详情；待拆分展示层',
+    expires: '2027-01-31',
   },
 ];
 
@@ -86,15 +89,19 @@ function countLines(source) {
 /**
  * 检查 shell 层文件体积。
  * @param {string} root 仓库根
- * @param {{limit?: number, whitelist?: readonly {file: string, reason: string}[]}} [options]
+ * @param {{limit?: number, whitelist?: readonly {file: string, reason: string, expires: string}[]}} [options]
  */
 export function checkSize(root, options = {}) {
   const limit = options.limit ?? SIZE_LIMIT;
   const whitelist = options.whitelist ?? SIZE_WHITELIST;
   const allowed = new Map();
-  for (const entry of whitelist) allowed.set(toPosix(entry.file), entry.reason);
+  for (const entry of activeExemptions(whitelist, { now: options.now })) {
+    allowed.set(toPosix(entry.file), entry.reason);
+  }
 
-  const violations = [];
+  const violations = [
+    ...exemptionViolations(whitelist, { rule: 'size-whitelist', label: 'size', now: options.now }),
+  ];
   const seen = new Set();
   const shellDir = join(root, 'src', 'shell');
 

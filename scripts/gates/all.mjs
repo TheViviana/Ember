@@ -1,4 +1,4 @@
-import { DEFAULT_ROOT } from './lib.mjs';
+import { DEFAULT_ROOT, exemptionViolations, MODULE_EXEMPTIONS } from './lib.mjs';
 import { scanBans } from './bans.mjs';
 import { findCycles } from './cycles.mjs';
 import { checkLayers } from './layers.mjs';
@@ -15,6 +15,10 @@ const results = [
   { name: 'bans', violations: scanBans(root) },
   { name: 'size', violations: checkSize(root) },
   { name: 'csp', violations: checkCsp(root) },
+  {
+    name: 'registry',
+    violations: exemptionViolations(MODULE_EXEMPTIONS, { rule: 'gate-exempt', label: 'module' }),
+  },
 ];
 
 let failed = 0;

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { exemptionViolations } from './lib.mjs';
 
 /**
  * CSP 门禁：生产 `csp` 与开发 `devCsp` 各自对照一张指令登记表逐条断言。
@@ -17,6 +18,12 @@ import { join } from 'node:path';
 
 const CSP_FILE = 'src-tauri/tauri.conf.json';
 const INDEX_FILE = 'index.html';
+
+/**
+ * KaTeX 内联 style 属性例外的复核节点。
+ * expires 是复核节点，不是失效开关：到期必须重新裁决，收紧后删除例外或论证后改期。
+ */
+const ATTR_EXCEPTION_EXPIRES = '2027-01-31';
 
 /** 生产登记表：当前真实出现的 12 条指令，逐条精确匹配 */
 export const PROD_BASELINE = {
@@ -274,7 +281,7 @@ const checkOne = (csp, baseline, label, html) => {
   return violations;
 };
 
-export const checkCsp = (root) => {
+export const checkCsp = (root, options = {}) => {
   const conf = readConfig(root);
   if (conf instanceof Error) {
     return [{ file: CSP_FILE, rule: 'csp-json', detail: `读取失败：${conf.message}` }];
@@ -309,8 +316,14 @@ export const checkCsp = (root) => {
     ];
   }
 
+  const attrException = exemptionViolations(
+    [{ token: "style-src-attr 'unsafe-inline'", expires: ATTR_EXCEPTION_EXPIRES }],
+    { rule: 'csp-attr', label: 'csp', now: options.now },
+  );
+
   return [
     ...checkOne(csp, PROD_BASELINE, '', html),
     ...checkOne(devCsp, DEV_BASELINE, 'devCsp ', html),
+    ...attrException,
   ];
 };

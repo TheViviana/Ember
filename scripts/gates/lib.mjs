@@ -48,10 +48,60 @@ export const MODULE_LAYOUT = Object.freeze([
   { prefix: 'src/shell/', layer: 'shell' },
 ]);
 
-/** 精确文件豁免：只接受 *.d.ts（无运行期依赖的声明文件），且必须写清 reason */
+/**
+ * 精确文件豁免：只接受 *.d.ts（无运行期依赖的声明文件），且必须写清 reason。
+ * expires 是复核节点，不是失效开关：到期必须重新裁决，修复后删除条目或论证后改期。
+ */
 export const MODULE_EXEMPTIONS = Object.freeze([
-  { file: 'src/vite-env.d.ts', reason: 'Vite 客户端类型声明，无 import/export' },
+  { file: 'src/vite-env.d.ts', reason: 'Vite 客户端类型声明，无 import/export', expires: '2027-01-31' },
 ]);
+
+/**
+ * 仍在有效期内的豁免：过期或日期非法的条目不再具备放行能力。
+ * 用于 size 这类「豁免一旦到期，违规必须重新出现」的场景。
+ */
+export const activeExemptions = (entries, { now = new Date() } = {}) => {
+  const today = now.toISOString().slice(0, 10);
+  return entries.filter(
+    (entry) =>
+      typeof entry.expires === 'string' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(entry.expires) &&
+      entry.expires >= today,
+  );
+};
+
+/**
+ * 豁免条目到期校验：expires 必须是 YYYY-MM-DD；缺失、格式错误、已过期都算违规。
+ * 到期后只有两条路：修复并删除条目，或重新裁决后改期（改期要有新的理由依据）。
+ */
+export const exemptionViolations = (entries, { rule, label, now = new Date() }) => {
+  const today = now.toISOString().slice(0, 10);
+  const violations = [];
+  for (const entry of entries) {
+    const subject = entry.file ?? String(entry.match ?? entry.token ?? label);
+    const expires = entry.expires;
+    if (typeof expires !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
+      violations.push(
+        gateViolation(
+          subject,
+          `${rule}-no-expiry`,
+          `${label} 豁免缺少 expires（YYYY-MM-DD）：${subject}（今天 ${today}）`,
+        ),
+      );
+      continue;
+    }
+    if (expires < today) {
+      violations.push(
+        gateViolation(
+          subject,
+          `${rule}-expired`,
+          `${label} 豁免已于 ${expires} 到期（今天 ${today}）：${subject}；请修复后删除，或重新裁决并改期`,
+        ),
+      );
+    }
+  }
+  return violations;
+};
 
 const CODE_EXT = new Set(['.ts', '.tsx']);
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'target', 'gen', '.git']);

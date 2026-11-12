@@ -8,7 +8,7 @@ import { checkCsp } from './csp.mjs';
 import { scanBans } from './bans.mjs';
 import { findCycles } from './cycles.mjs';
 import { checkLayers } from './layers.mjs';
-import { LAYER_RULES, MODULE_EXEMPTIONS, MODULE_LAYOUT } from './lib.mjs';
+import { exemptionViolations, LAYER_RULES, MODULE_EXEMPTIONS, MODULE_LAYOUT } from './lib.mjs';
 import { stripRustComments } from './offline.mjs';
 import { checkSize, SIZE_LIMIT } from './size.mjs';
 
@@ -211,7 +211,7 @@ for (const testCase of rustCases) {
   }
 
   const passed = checkSize(tmp, {
-    whitelist: [{ file: 'src/shell/big.ts', reason: '自测豁免' }],
+    whitelist: [{ file: 'src/shell/big.ts', reason: '自测豁免', expires: '2099-12-31' }],
   });
   if (passed.length === 0) {
     process.stdout.write('✓ selftest:size 白名单条目放行\n');
@@ -222,8 +222,8 @@ for (const testCase of rustCases) {
 
   const stale = checkSize(tmp, {
     whitelist: [
-      { file: 'src/shell/big.ts', reason: '自测豁免' },
-      { file: 'src/shell/small.ts', reason: '已拆分但忘记删除' },
+      { file: 'src/shell/big.ts', reason: '自测豁免', expires: '2099-12-31' },
+      { file: 'src/shell/small.ts', reason: '已拆分但忘记删除', expires: '2099-12-31' },
     ],
   });
   const staleHit = stale.length === 1 && stale[0].rule === 'size-stale';
@@ -232,6 +232,32 @@ for (const testCase of rustCases) {
   } else {
     failures += 1;
     process.stdout.write(`✗ selftest:size 过期豁免未按预期报出：${JSON.stringify(stale)}\n`);
+  }
+
+  // 到期机制：过期条目必须同时出现 size 与 size-whitelist-expired
+  const expiredRows = checkSize(tmp, {
+    whitelist: [{ file: 'src/shell/big.ts', reason: '自测豁免', expires: '2000-01-01' }],
+  });
+  const expiredRules = expiredRows.map((row) => row.rule);
+  if (expiredRules.includes('size-whitelist-expired') && expiredRules.includes('size')) {
+    process.stdout.write('✓ selftest:size 到期豁免与超限同时报出\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:size 到期豁免未同时报出：${JSON.stringify(expiredRows)}\n`);
+  }
+
+  // 缺失 / 非法格式：都按 no-expiry 处理（未来日期已由上一条 2099 用例守卫）
+  for (const [label, entry] of [
+    ['缺少 expires', { file: 'src/shell/big.ts', reason: '自测豁免' }],
+    ['expires 格式非法', { file: 'src/shell/big.ts', reason: '自测豁免', expires: '2027/01/31' }],
+  ]) {
+    const rows = checkSize(tmp, { whitelist: [entry] });
+    if (rows.some((row) => row.rule === 'size-whitelist-no-expiry')) {
+      process.stdout.write(`✓ selftest:size 白名单${label}被拒\n`);
+    } else {
+      failures += 1;
+      process.stdout.write(`✗ selftest:size 白名单${label}未报出：${JSON.stringify(rows)}\n`);
+    }
   }
 
   const expectRule = (label, root, rule) => {
@@ -353,6 +379,13 @@ if (realSize.length === 0) {
   };
 
   expectCspPass('真实基线通过', {});
+  const expiredAttr = checkCsp(cspRoot, { now: new Date('2030-01-01') });
+  if (expiredAttr.some((v) => v.rule === 'csp-attr-expired')) {
+    process.stdout.write('✓ selftest:csp attr 例外过期被拒\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:csp attr 例外过期未报出：${JSON.stringify(expiredAttr)}\n`);
+  }
   expectCspRule(
     'script-src 出现 unsafe-eval 必须失败',
     { csp: baseCsp.replace("script-src 'self'", "script-src 'self' 'unsafe-eval'") },
@@ -749,6 +782,42 @@ if (realSize.length === 0) {
   } else {
     failures += 1;
     process.stdout.write(`✗ selftest:vite 未在 vite.config.ts 找到别名键：${JSON.stringify(missing)}\n`);
+  }
+}
+
+// 豁免到期校验：缺字段 / 非法格式 / 已过期必须报，未来日期不得误伤
+{
+  const run = (entries) => exemptionViolations(entries, { rule: 'unit', label: 'unit' });
+  const cases = [
+    ['缺 expires', [{ file: 'x' }], 'unit-no-expiry'],
+    ['格式非法', [{ file: 'x', expires: '2027/01/31' }], 'unit-no-expiry'],
+    ['已过期', [{ file: 'x', expires: '2000-01-01' }], 'unit-expired'],
+  ];
+  for (const [label, entries, rule] of cases) {
+    const rows = run(entries);
+    if (rows.length === 1 && rows[0].rule === rule) {
+      process.stdout.write(`✓ selftest:exempt ${label}被拒\n`);
+    } else {
+      failures += 1;
+      process.stdout.write(`✗ selftest:exempt ${label}未报出：${JSON.stringify(rows)}\n`);
+    }
+  }
+  if (run([{ file: 'x', expires: '2099-12-31' }]).length === 0) {
+    process.stdout.write('✓ selftest:exempt 未来日期放行\n');
+  } else {
+    failures += 1;
+    process.stdout.write('✗ selftest:exempt 未来日期被误判\n');
+  }
+}
+
+// 真实注册表必须 0 违规（防止改实现后登记表本身失守）
+{
+  const rows = exemptionViolations(MODULE_EXEMPTIONS, { rule: 'gate-exempt', label: 'module' });
+  if (rows.length === 0) {
+    process.stdout.write('✓ selftest:exempt 真实 MODULE_EXEMPTIONS 0 违规\n');
+  } else {
+    failures += 1;
+    process.stdout.write(`✗ selftest:exempt 真实 MODULE_EXEMPTIONS：${JSON.stringify(rows)}\n`);
   }
 }
 
