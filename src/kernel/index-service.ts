@@ -14,9 +14,10 @@ import type {
 } from './types.ts';
 
 /**
- * 派生数据服务（kernel-contract §4）；唯一可读索引的组件。
+ * 派生数据服务（kernel-contract §4）；目标上唯一可读索引的组件。
  * 说明：v1 还没有索引写入方——Rust 侧 SQLite/FTS5 尚未接入，
- * 启动时注入的是 `createPendingIndexPort` 占位实现（rebuild 返回空统计）。
+ * 启动时注入的是 `createPendingIndexPort` 占位实现（`available: false`）。
+ * 此时除 `watch`（空实现）外，所有方法都会抛 `index_unavailable`，包括 `rebuild`。
  */
 export interface IndexService {
   document(id: DocId): Promise<IndexedDocument | null>;

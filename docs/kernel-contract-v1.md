@@ -116,7 +116,10 @@ export interface DocService {
   rename(id: DocId, next: VaultPath, opts: WriteOptions): Promise<WriteOutcome>;
   remove(id: DocId, opts: WriteOptions): Promise<void>;
 
-  /** 等待所有进行中的写入与索引刷新落盘；关闭库、导出前必须调用 */
+  /**
+   * 等待所有进行中的写入落盘；关闭库、导出前必须调用。
+   * v1 无索引写入方，本调用不涉及索引刷新；索引接入后必须恢复 D7 的对齐保证。
+   */
   flush(): Promise<void>;
 
   /** 订阅本实例内的文档变更（外部改动也经 watcher 揉合后从这里发出） */
@@ -192,12 +195,21 @@ export interface DocFilter {
 - **D4** `remove` 把文件**移入操作系统回收站**（macOS：`NSFileManager.trashItemAtURL`），库内不保留副本；非 macOS 明确失败（`io_failed`，文案说明该平台不支持系统回收站），**不得**回退为永久删除。应用内不提供从回收站恢复的入口，恢复只能在系统回收站里完成。永久删除入口 `Vault::purge` / `vault_purge` **仅供内核回滚内部使用**（文章创建后画布写入失败），不是用户入口；`core.doc.purge` 在 v1 仍是「未实现」。
 - **D5** 所有返回值里的 `DocMeta.rev` 必须与磁盘实际内容对应；不允许返回「打算写入但未提交」的状态。
 - **D6** `read` 不做写入（adoption 不在这里发生）。
-- **D7** 任何写入完成后，索引刷新可以是异步的，但 `flush()` 返回后索引必须已对齐。
+- **D7**（目标，**v1 不成立**）任何写入完成后，索引刷新可以是异步的，但 `flush()` 返回后索引必须已对齐。
+  现状：`doc-service.flush()` 只排空写入队列（`src/kernel/doc-service.ts` 的 `flush` 实现），不触碰索引；
+  生产注入的是占位索引端口（见 §4 实现状态）。索引接入时必须同时恢复本不变量，并让 `flush()` 覆盖索引对齐。
 - **D8** `summary` 只来自 frontmatter；缺失时按 vault-format §4.3 从正文首段派生，供展示使用，**派生值不回写磁盘**；旧文档缺该键不产生诊断、不阻断读取。
 
 ---
 
 ## 4. IndexService
+
+> **实现状态（v1 未实现）**：Rust 侧 SQLite/FTS5 索引尚未接入，生产启动注入的是
+> `createPendingIndexPort` 占位端口（`available: false`，见 `src/data/bootstrap.ts`）。
+> 因此 `document` / `search` / `outbound` / `backlinks` / `stats` / `rebuild` 在运行期统一抛
+> `index_unavailable`，`watch` 为空实现。v1 没有任何 UI 或能力调用这些方法，也没有消费该错误码的界面；
+> 反链由外壳前端全库正文扫描临时实现（`src/shell/editor/backlinks.ts`），不经过本服务。
+> 下文接口与不变量是索引接入时的目标，不是当前能力。
 
 ```ts
 export interface SearchQuery {
@@ -267,11 +279,13 @@ export interface IndexEvent {
 
 不变量：
 
-- **X1** `IndexService` 是唯一可写索引的组件；其它组件只能通过它读（I3）。
-- **X2** `search` 中的中文切分必须与 `vault-format §9.3` 一致；查询串与索引串走同一 `tokenize()` 实现，禁止两处实现。
-- **X3** 未解析/歧义链接必须可查询（`stats`），不得静默丢弃（`vault-format §5.2`）。
-- **X4** `rebuild()` 可以在 `doc-service` 有并发写入时调用；实现必须基于「读文件 → 比对 hash → 写入索引」，允许最终一致，不允许把读到一半的文件写进索引。
-- **X5** 索引不可用时（文件被删/被锁），`search` 抛 `index_unavailable`，由 shell 提示「正在重建」，不得返回空结果冒充成功。
+- **X1**（目标，未实现）`IndexService` 是唯一可写索引的组件；其它组件只能通过它读（I3）。v1 没有任何索引写入方。
+- **X2**（目标，未实现）`search` 中的中文切分必须与 `vault-format §9.3` 一致；查询串与索引串走同一 `tokenize()` 实现，禁止两处实现。v1 代码中不存在 `tokenize()`。
+- **X3**（目标，未实现）未解析/歧义链接必须可查询（`stats`），不得静默丢弃（`vault-format §5.2`）。v1 的 `stats` 直接抛 `index_unavailable`。
+- **X4**（目标，未实现）`rebuild()` 可以在 `doc-service` 有并发写入时调用；实现必须基于「读文件 → 比对 hash → 写入索引」，允许最终一致，不允许把读到一半的文件写进索引。v1 的 `rebuild` 直接抛 `index_unavailable`。
+- **X5**（部分实现）索引不可用时，`search` 抛 `index_unavailable`——这一条已实现（`index-service.ts` 的 `guard`）；
+  「由 shell 提示『正在重建』」**未实现**：v1 没有库级搜索 UI，也没有任何消费 `index_unavailable` 的界面，
+  因此不存在提示路径。索引接入并出现搜索入口后，shell 必须补上该提示。任何时候都不得返回空结果冒充成功。
 
 ---
 
@@ -757,16 +771,17 @@ export class EmberError extends Error {
 1. 解析 vault 路径 → 计算 vaultHash
 2. 获取库锁（失败 → readonlyMode = true）
 3. journal 恢复（vault-format §6.2）——必须在任何写之前
-4. 打开索引：校验 schema_version / tokenizer_version，不匹配则重建
-5. 绑定端口（VaultPort / IndexPort / AiPort），由 data 层注入
+4. 打开索引：校验 schema_version / tokenizer_version，不匹配则重建（v1 未执行：无索引）
+5. 绑定端口（VaultPort / IndexPort / AiPort），由 data 层注入（v1 的 IndexPort 为占位实现）
 6. 构造服务：events → commands → settings → docs → index → editor → canvas → capabilities
 7. 注册能力（静态清单）→ 依赖校验 → 拓扑激活（跳过 disabled）
 8. 交给 shell（React 挂载，注入 KernelProvider）
-9. 启动 watcher → 初次全量对账（文件 → 索引）
+9. 启动 watcher → 初次全量对账（文件 → 索引）（v1 只做文件层对账，无索引）
 10. emit 'vault:mode'
 ```
 
-失败策略：3–6 任一步失败 → 启动中止并展示可复制诊断，**不允许**带着未恢复的 journal 或半初始化的索引进入可写状态。
+失败策略：3–6 任一步失败 → 启动中止并展示可复制诊断，**不允许**带着未恢复的 journal 进入可写状态。
+索引相关失败策略在索引接入后另行定义（v1 无索引，第 4 步不执行）。
 
 ---
 
