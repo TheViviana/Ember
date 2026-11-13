@@ -185,6 +185,13 @@ pub async fn asset_save(
     media::save(&vault, &bytes, &mime)
 }
 
+/// 删除单张图库图片：移入系统回收站（与文档删除同一落点）。
+/// 不存在按幂等成功；只读库拒绝。
+#[tauri::command]
+pub async fn asset_delete(vault: State<'_, Vault>, path: String) -> VaultResult<&'static str> {
+    media::delete(&vault, &path)
+}
+
 /// 机器标识与库锁共用 `machine-id` 文件，保证 ui.json 落在同一台机器的目录下：
 /// `~/Library/Application Support/Ember/machines/<machineId>/ui.json`，绝不写进库目录。
 fn machine_ui_file() -> VaultResult<PathBuf> {

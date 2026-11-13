@@ -7,8 +7,10 @@ import {
   type AiPanelRect,
   type PanelArea,
 } from '../../data/stores/machine-store.ts';
-import { startChat, type ChatSession, type ChatTurnInput } from '../../data/tauri/ai.ts';
+import { splitFrontmatter } from '#doc-model';
+import { startChat, describeAiError, type ChatSession, type ChatTurnInput } from '../../data/tauri/ai.ts';
 import { toErrorText } from '../../kernel/errors.ts';
+import { mindMapMutations, parseMindMap } from './canvas-mindmap.ts';
 import { useFloatStore } from '../editor/float-store.ts';
 import { createUlid, unsafeContentHash, type CanvasId, type DocId } from '#doc-model';
 import { useKernel } from '../kernel-provider.tsx';
@@ -37,6 +39,8 @@ interface Turn {
   readonly id: number;
   readonly role: 'user' | 'assistant';
   readonly content: string;
+  /** 用户手动停止：气泡要有可见的「已停止」标记，不能停在流式占位符上 */
+  readonly stopped?: boolean;
 }
 
 const SYSTEM_PROMPT =
@@ -51,6 +55,9 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
   const [turns, setTurns] = useState<readonly Turn[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
+  /** 对话引用当前文章：发送时把正文作为上下文注入（不持久化，每次发送现读） */
+  const [citeDoc, setCiteDoc] = useState(true);
+  const [mindmapBusy, setMindmapBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [busy, setBusy] = useState(false);
@@ -125,7 +132,7 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
       if (result.turns.length > 0) {
         const maxId = result.turns.length * 2; // 保守推断，避免 id 冲突
         nextIdRef.current = maxId + 1;
-        setTurns(result.turns.map((t, i) => ({ id: i + 1, role: t.role, content: t.content })));
+        setTurns(result.turns.map((t, i) => ({ id: i + 1, role: t.role, content: t.content, ...(t.stopped === true ? { stopped: true } : {}) })));
       }
       if (result.proposal !== null) {
         const p = result.proposal;
@@ -174,7 +181,7 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
           : 'idle';
       void persistSession({
         vaultId,
-        turns: turns.map((t) => ({ role: t.role, content: t.content })),
+        turns: turns.map((t) => ({ role: t.role, content: t.content, ...(t.stopped === true ? { stopped: true as const } : {}) })),
         proposal: proposal !== null ? proposalToFile(proposal) : null,
         state,
         port: sessionPortRef.current,
@@ -269,7 +276,7 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
     });
   };
 
-  const send = (): void => {
+  const send = async (): Promise<void> => {
     const text = input.trim();
     if (text === '' || streaming) return;
     if (ai.model.trim() === '') {
@@ -280,13 +287,91 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
       .filter((turn) => turn.content.trim() !== '')
       .map((turn) => ({ role: turn.role, content: turn.content }));
     setInput('');
-    stream([{ role: 'system', content: SYSTEM_PROMPT }, ...history, { role: 'user', content: text }], text);
+    // 引用当前文章：正文作为 system 上下文现读现用，不进持久化 turns
+    const messages: ChatTurnInput[] = [{ role: 'system', content: SYSTEM_PROMPT }];
+    if (citeDoc && activeDocId !== null) {
+      try {
+        const snapshot = await kernel.docs.read(activeDocId);
+        const body = splitFrontmatter(snapshot.text).body.slice(0, 8000);
+        const title = snapshot.meta.title;
+        messages.push({
+          role: 'system',
+          content:
+            `当前文章《${title}》的正文如下，回答时优先依据它；正文之外的信息以用户输入为准：\n\n${body}`,
+        });
+      } catch {
+        setError('读取当前文章失败，本次对话未附带正文。');
+      }
+    }
+    messages.push(...history, { role: 'user', content: text });
+    void stream(messages, text);
+  };
+
+  /** 把当前文章整理成思维导图落在当前画布：产物是普通画布节点，可自由拖动改写 */
+  const generateCanvasMindMap = (): void => {
+    if (mindmapBusy || streaming || busy) return;
+    if (activeDocId === null) {
+      setError('先打开一篇文档浮窗，再生成画布结构。');
+      return;
+    }
+    const capture = readCapturePoint();
+    if (capture === null) {
+      setError('画布未就绪，先打开一张画布。');
+      return;
+    }
+    setMindmapBusy(true);
+    setError(null);
+    void (async () => {
+      try {
+        const snapshot = await kernel.docs.read(activeDocId);
+        const body = splitFrontmatter(snapshot.text).body;
+        let text = '';
+        let failure: string | null = null;
+        const session = startChat(ai, [
+          { role: 'system', content: '你是 Ember 的本地知识库助手。只输出要求的 JSON，不输出解释或代码围栏之外的内容。' },
+          {
+            role: 'user',
+            content:
+              '把下面的文章整理成思维导图。只输出一个 JSON 对象：{"title":"中心主题","children":[{"title":"分支","children":[...]}]}。' +
+              '最多 3 层，每层最多 6 个节点，节点标题不超过 20 字，不得编造文章没有的内容。\n\n文章正文：\n' +
+              body.slice(0, 8000),
+          },
+        ], {
+          onDelta: (delta) => {
+            text += delta;
+          },
+          onDone: () => undefined,
+          onError: (message) => {
+            failure = message;
+          },
+        });
+        await session.done;
+        if (failure !== null) throw new Error(failure);
+        const parsed = parseMindMap(text);
+        if (parsed === null) {
+          throw new Error('AI 没有返回有效的结构 JSON，请重试。');
+        }
+        const spec = mindMapMutations(parsed, capture.point, capture.z, String(activeDocId));
+        await kernel.canvas.apply(capture.canvasId as Parameters<typeof kernel.canvas.apply>[0], spec.mutations);
+        setNotice(`已在当前画布生成思维导图：${spec.nodeCount} 节点、${spec.edgeCount} 条连线（可自由拖动改写）`);
+      } catch (cause) {
+        setError(`生成画布结构失败：${describeAiError(cause)}`);
+      } finally {
+        setMindmapBusy(false);
+      }
+    })();
   };
 
   const stop = (): void => {
     const session = sessionRef.current;
     if (session === null) return;
     void session.cancel();
+    // 给最后一个助手气泡打上「已停止」标记：半截内容和空占位都要能被识别
+    setTurns((current) =>
+      current.map((turn, index) =>
+        index === current.length - 1 && turn.role === 'assistant' ? { ...turn, stopped: true } : turn,
+      ),
+    );
     setStreaming(false);
   };
 
@@ -403,7 +488,7 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
     if (event.nativeEvent.isComposing) return;
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      send();
+      void send();
     }
   };
 
@@ -536,7 +621,18 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
             <article key={turn.id} className={`${styles.turn} ${styles[turn.role]}`}>
               <span className={styles.role}>{turn.role === 'user' ? '你' : 'AI'}</span>
               <div className={styles.bubble}>
-                {turn.content === '' ? <span className={styles.typing}>…</span> : turn.content}
+                {turn.content === '' ? (
+                  turn.stopped === true ? (
+                    '（已停止，没有收到内容）'
+                  ) : (
+                    <span className={styles.typing}>…</span>
+                  )
+                ) : (
+                  <>
+                    {turn.content}
+                    {turn.stopped === true ? <span className={styles.stoppedMark}>（已停止）</span> : null}
+                  </>
+                )}
               </div>
               {turn.role === 'assistant' && !streaming && turn.content.trim() !== '' ? (
                 <div className={styles.turnActions}>
@@ -644,6 +740,33 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
         <div className={styles.actions}>
           <button
             type="button"
+            className={`${styles.citeChip} ${citeDoc && activeDocId !== null ? styles.citeChipOn : ''}`}
+            aria-pressed={citeDoc && activeDocId !== null}
+            disabled={activeDocId === null}
+            title={
+              activeDocId === null
+                ? '先打开一篇文档浮窗，再启用正文引用'
+                : citeDoc
+                  ? '对话将带上当前文章正文作为上下文；点击关闭'
+                  : '点击开启：对话带上当前文章正文作为上下文'
+            }
+            onClick={() => {
+              setCiteDoc((value) => !value);
+            }}
+          >
+            ⎘ 引用当前文章
+          </button>
+          <button
+            type="button"
+            className={styles.citeChip}
+            disabled={mindmapBusy || streaming || busy || activeDocId === null}
+            title="把当前文章整理成思维导图，落在当前画布（生成的是普通节点，可自由拖动改写）"
+            onClick={generateCanvasMindMap}
+          >
+            {mindmapBusy ? '生成中…' : '⊸ 生成画布'}
+          </button>
+          <button
+            type="button"
             className={styles.remove}
             disabled={streaming || busy || activeDocId === null}
             title="删除当前文章（移入系统回收站）"
@@ -662,7 +785,9 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
               type="button"
               className={styles.send}
               disabled={input.trim() === ''}
-              onClick={send}
+              onClick={() => {
+                void send();
+              }}
             >
               发送
             </button>

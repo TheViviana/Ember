@@ -1,12 +1,13 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import type { DocId } from '#doc-model';
-import { toErrorText } from '../kernel/errors.ts';
+import type { CanvasId, DocId } from '#doc-model';
+import { isPermissionDenied, toErrorText } from '../kernel/errors.ts';
 import type { CommandDescriptor, SettingsPatch } from '../kernel/types.ts';
 import { runCloseFlow } from './close-flow.ts';
 import { useKernel, useKernelShutdown, useWindowPort } from './kernel-provider.tsx';
 import { AiPanel } from './ai/AiPanel.tsx';
 import { CanvasSurface } from './canvas/CanvasSurface.tsx';
+import { requestCanvasView } from './canvas/canvas-view-signal.ts';
 import { useCanvasLibrary } from './canvas/use-canvas-library.ts';
 import { CommandPalette } from './commands/CommandPalette.tsx';
 import {
@@ -28,8 +29,11 @@ import { HealthPanel } from './documents/HealthPanel.tsx';
 import { InboxPanel } from './collect/InboxPanel.tsx';
 import { layout } from './theme/tokens.ts';
 import { AttachmentPanel } from './attachments/AttachmentPanel.tsx';
+import { SplashOverlay } from './components/SplashOverlay.tsx';
 import { StatusBar } from './components/StatusBar.tsx';
 import { Topbar } from './components/Topbar.tsx';
+import { GlobalReplacePanel } from './replace/GlobalReplacePanel.tsx';
+import { exportDocPdf } from './export/print-export.ts';
 import { ToolRail } from './tools/ToolRail.tsx';
 import { SettingsPanel } from './settings/SettingsPanel.tsx';
 import { WindowChrome } from './window/WindowChrome.tsx';
@@ -49,6 +53,7 @@ export const App = (): ReactElement => {
   const activeDocId = useFloatStore((state) => state.activeId);
   const focusActive = useFocusStore((state) => state.active);
   const [aiOpen, setAiOpen] = useState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
   const [docListOpen, setDocListOpen] = useState(false);
   const [conflictOpen, setConflictOpen] = useState(false);
   const [healthOpen, setHealthOpen] = useState(false);
@@ -56,6 +61,9 @@ export const App = (): ReactElement => {
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // 开启动画：火焰阶段结束后主界面入场，淡出完成卸载启动画面
+  const [splashActive, setSplashActive] = useState(true);
+  const [splashRevealed, setSplashRevealed] = useState(false);
   const [commands, setCommands] = useState<readonly CommandDescriptor[]>(() =>
     kernel.commands.list(),
   );
@@ -73,6 +81,13 @@ export const App = (): ReactElement => {
   useImportCommands();
 
   const documents = useQuery({ queryKey: ['docs', 'list'], queryFn: () => kernel.docs.list() });
+
+  /** 当前最前浮窗文档的库内路径：状态栏展示 + 点击复制 */
+  const activeDocPath = useMemo(() => {
+    if (activeDocId === null) return null;
+    const meta = documents.data?.find((item) => String(item.id) === String(activeDocId));
+    return meta === undefined ? null : String(meta.path);
+  }, [activeDocId, documents.data]);
   const settings = useQuery({ queryKey: ['settings'], queryFn: () => kernel.settings.read() });
 
   // 外部新增/删除/改动文档时刷新列表（冲突副本也经此进入文档列表）
@@ -100,7 +115,7 @@ export const App = (): ReactElement => {
     };
   }, [kernel, queryClient]);
 
-  // 浮窗上限跟随设置（默认 8 可配置）
+  // 浮窗上限跟随设置（默认 5 可配置）
   useEffect(() => {
     const limit = settings.data?.ui.floatLimit;
     if (typeof limit === 'number') useFloatStore.getState().setLimit(limit);
@@ -247,7 +262,7 @@ export const App = (): ReactElement => {
 
   /**
    * 打开文档浮窗：统一交给浮窗 store —— 未开则新开，已开则聚焦置顶，
-   * 满上限则静默挤掉最久未激活的一扇（无提示条）。
+   * 满上限则拒绝并出提示条，挤掉哪一扇由用户显式决定。
    */
   const openFloat = useCallback((docId: DocId, focus: 'title' | null): void => {
     useFloatStore.getState().open(docId, focus);
@@ -288,14 +303,31 @@ export const App = (): ReactElement => {
     [kernel],
   );
 
-  const documentsError = documents.isError ? toErrorText(documents.error) : null;
+  const documentsError = documents.isError
+    ? isPermissionDenied(documents.error)
+      ? '无法读取库：macOS 未授予 Ember 访问「文稿」的权限。请到「系统设置 → 隐私与安全性 → 文件与文件夹」中允许，然后重新打开文档列表。'
+      : toErrorText(documents.error)
+    : null;
   const toolEntries = {
     pomodoro: settings.data?.ui.toolPomodoro === true,
-    gallery: settings.data?.ui.toolGallery === true,
+    gallery: settings.data?.ui.toolGallery !== false,
   };
+  // 今日回顾层（原左下工具入口）：与画布视图菜单共用同一份机器本地开关
+  const currentCanvasId = library.currentId;
+  const recentEditsOpen = useMachineStore(
+    (state) => state.canvasFlags[String(currentCanvasId)]?.recentEdits === true,
+  );
+  const toggleRecentEdits = useCallback((): void => {
+    const key = String(currentCanvasId);
+    if (key === 'null') return;
+    const flags = useMachineStore.getState().canvasFlags;
+    useMachineStore.getState().setCanvasFlag(key, { recentEdits: !(flags[key]?.recentEdits === true) });
+    void flushMachineUiWrites().catch(() => undefined);
+  }, [currentCanvasId]);
 
   return (
-    <div className={`${styles.root} ${focusActive ? styles.focusMode : ''}`}>
+    <>
+      <div className={`${styles.root} ${splashRevealed ? styles.revealed : styles.booting} ${focusActive ? styles.focusMode : ''}`}>
       <Topbar
         kernelVersion={kernel.env.kernelVersion}
         readonlyMode={readonlyMode}
@@ -312,6 +344,15 @@ export const App = (): ReactElement => {
           setAiOpen((value) => !value);
         }}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenReplace={() => setReplaceOpen(true)}
+        onExportPdf={() => {
+          if (activeDocId === null) return;
+          const title = documents.data?.find((item) => String(item.id) === String(activeDocId))?.title ?? '';
+          void exportDocPdf(kernel, activeDocId, title).catch((cause: unknown) => {
+            void kernel.log.error('导出 PDF 失败', { cause: String(cause) });
+          });
+        }}
+        exportDisabled={activeDocId === null}
         conflictCount={conflictCount}
         onOpenConflicts={() => {
           setConflictOpen((value) => !value);
@@ -352,6 +393,11 @@ export const App = (): ReactElement => {
             onSelectDoc={(id) => {
               openFloat(id as DocId, null);
             }}
+            onOpenCanvasLocation={(canvasId, nodeId) => {
+              library.openCanvas(canvasId as CanvasId);
+              requestCanvasView({ highlightNodeId: nodeId });
+              setDocListOpen(false);
+            }}
             onClose={() => {
               setDocListOpen(false);
             }}
@@ -390,6 +436,8 @@ export const App = (): ReactElement => {
           onOpenAttachments={() => {
             setAttachmentsOpen((value) => !value);
           }}
+          recentEditsOpen={recentEditsOpen}
+          onToggleRecentEdits={toggleRecentEdits}
         />
 
         {attachmentsOpen ? (
@@ -404,7 +452,16 @@ export const App = (): ReactElement => {
         documentCount={documents.data?.length ?? 0}
         commandCount={commands.length}
         notice={closeFailures === null ? null : '保存失败，已阻止关闭；再次关闭将丢弃改动'}
+        docPath={activeDocPath}
       />
+
+      {replaceOpen ? (
+        <GlobalReplacePanel
+          onClose={() => {
+            setReplaceOpen(false);
+          }}
+        />
+      ) : null}
 
       {settingsOpen ? (
         <SettingsPanel
@@ -413,7 +470,7 @@ export const App = (): ReactElement => {
           onClose={() => setSettingsOpen(false)}
           onPatch={patchSettings}
           onOpenHealth={() => {
-            setSettingsOpen(false);
+            // 健康检查是独立浮窗：设置面板保持打开，可同时看到两个窗口
             setHealthOpen(true);
           }}
         />
@@ -438,5 +495,15 @@ export const App = (): ReactElement => {
 
       <WindowChrome />
     </div>
+
+      {/* 启动画面放在 .root 之外：booting 期根节点 opacity:0，
+          若作为其子节点，启动画面会连同外壳一起被藏掉，永远播不出来 */}
+      {splashActive ? (
+        <SplashOverlay
+          onReveal={() => setSplashRevealed(true)}
+          onDone={() => setSplashActive(false)}
+        />
+      ) : null}
+    </>
   );
 };

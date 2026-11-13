@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{VaultError, VaultResult};
 
-use super::{atomic, paths, Vault};
+use super::{atomic, paths, trash, Vault};
 
 /// 库内图库目录：`media/<sha256 前 2 位>/<完整 sha256>.<ext>`（常量归 paths.rs 所有）。
 use paths::MEDIA_DIR;
@@ -229,6 +229,24 @@ pub fn read(vault: &Vault, relative: &str) -> VaultResult<AssetData> {
     })
 }
 
+/// 删除单张图库图片：与文档删除同一落点——移入系统回收站，绝不直接永久删除。
+/// 路径校验与 read 相同（只接受 `media/<两位分片>/<文件名>`，防目录穿越）；
+/// 文件不存在按幂等成功处理（外部先删的场景里，面板「再删一次」不该报错）。
+/// 删除也要过写闸：只读库（另一实例占用）一律拒绝。
+pub fn delete(vault: &Vault, relative: &str) -> VaultResult<&'static str> {
+    vault.ensure_writable()?;
+    asset_parts(relative).ok_or_else(|| VaultError::PathOutside(relative.to_string()))?;
+    let (absolute, _normalized) = paths::resolve(vault.root(), relative)?;
+    match fs::symlink_metadata(&absolute) {
+        Ok(_) => {
+            let destination = trash::trash(vault.root(), &absolute)?;
+            Ok(destination.as_str())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("system"),
+        Err(error) => Err(io_at(error, &absolute)),
+    }
+}
+
 /// 按内容哈希落盘：同内容只存一份，重复导入返回 deduped。
 pub fn save(vault: &Vault, bytes: &[u8], mime: &str) -> VaultResult<AssetSaved> {
     // 必须走 ensure_writable：启动未抢到锁（被另一实例占用）的只读库一律拒绝落盘。
@@ -394,6 +412,67 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn delete_moves_file_to_trash_and_list_shrinks() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        let saved = save(&vault, PNG, "image/png").unwrap();
+        assert_eq!(list(&vault).unwrap().len(), 1);
+
+        let destination = delete(&vault, &saved.path).unwrap();
+        assert!(
+            destination == "system" || destination == "internal",
+            "落点必须是 system 或 internal：{destination}"
+        );
+        assert!(
+            list(&vault).unwrap().is_empty(),
+            "删除后清单不再包含该图"
+        );
+        assert!(matches!(
+            read(&vault, &saved.path),
+            Err(VaultError::NotFound(_))
+        ));
+        // 回收站语义：文件不应还留在库内
+        assert!(!vault.root().join(&saved.path).exists());
+    }
+
+    #[test]
+    fn delete_is_idempotent_for_missing_file() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        let saved = save(&vault, PNG, "image/png").unwrap();
+        delete(&vault, &saved.path).unwrap();
+        // 外部已删：面板「再删一次」不报错
+        delete(&vault, &saved.path).unwrap();
+    }
+
+    #[test]
+    fn delete_rejects_paths_outside_media() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        assert!(matches!(
+            delete(&vault, "notes/escape.md"),
+            Err(VaultError::PathOutside(_))
+        ));
+        assert!(matches!(
+            delete(&vault, "media/../settings.json"),
+            Err(VaultError::PathOutside(_))
+        ));
+    }
+
+    #[test]
+    fn delete_is_rejected_on_readonly_vault() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        let saved = save(&vault, PNG, "image/png").unwrap();
+        drop(vault);
+        let readonly = temp.open_readonly();
+        assert!(matches!(
+            delete(&readonly, &saved.path),
+            Err(VaultError::Readonly)
+        ));
     }
 
     #[test]

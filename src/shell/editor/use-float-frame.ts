@@ -52,8 +52,15 @@ interface MoveDrag {
 const MOVE_THRESHOLD_PX = 3;
 
 const SPACE_XL = Number.parseFloat(space.xl);
+const SPACE_SM = Number.parseFloat(space.sm);
 const FLOAT_INSET_RIGHT = SPACE_XL;
 const FLOAT_INSET_BOTTOM = SPACE_XL + layout.statusbarHeight;
+/**
+ * 浮窗顶部留白：顶栏高度 + 一小段间距。
+ * 浮窗容器与顶栏一样从窗口顶端起算，若允许 top 进到 0，标题栏会被顶栏的拖拽区盖住，
+ * 指针落不到浮窗上，窗口既选不中也拖不回来。
+ */
+const FLOAT_TOP_INSET = layout.topbarHeight + SPACE_SM;
 
 const readBounds = (): FloatBounds => {
   const width = typeof window === 'undefined' ? 0 : (window.screen?.availWidth ?? 0);
@@ -112,7 +119,11 @@ export const useFloatFrame = ({ docId, defaultSlot, panelRef }: FloatFrameOption
     if (container === null) return;
     const observer = new ResizeObserver(() => {
       if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
-      const area = { width: container.clientWidth, height: container.clientHeight };
+      const area = {
+        width: container.clientWidth,
+        height: container.clientHeight,
+        topInset: FLOAT_TOP_INSET,
+      };
       // 专注几何依赖容器实测尺寸；与下面的普通帧夹紧共用同一次观测
       setContainerSize(area);
       const current = frameRef.current;
@@ -152,7 +163,11 @@ export const useFloatFrame = ({ docId, defaultSlot, panelRef }: FloatFrameOption
       savedSize ?? { width: layout.floatWidth, height: layout.floatHeight },
       bounds,
     );
-    const area = { width: container.clientWidth, height: container.clientHeight };
+    const area = {
+      width: container.clientWidth,
+      height: container.clientHeight,
+      topInset: FLOAT_TOP_INSET,
+    };
     initializedSizeRef.current = savedSize;
     initializedPositionRef.current = savedPosition;
     const base =
@@ -164,11 +179,14 @@ export const useFloatFrame = ({ docId, defaultSlot, panelRef }: FloatFrameOption
             defaultSlot,
           )
         : initialFloatFrame(area, target, { right: FLOAT_INSET_RIGHT, bottom: FLOAT_INSET_BOTTOM });
-    // 记忆位置可能来自更宽的窗口/另一块屏，恢复时按当前容器夹紧
+    // 没有位置记忆时也走一遍夹紧：小窗口下默认摆放同样不能把标题栏送进顶栏带
     applyFrame(
-      savedPosition === undefined
-        ? base
-        : moveFloatFrame({ ...base, left: savedPosition.left, top: savedPosition.top }, 0, 0, area),
+      moveFloatFrame(
+        savedPosition === undefined ? base : { ...base, left: savedPosition.left, top: savedPosition.top },
+        0,
+        0,
+        area,
+      ),
     );
   }, [applyFrame, bounds, defaultSlot, panelRef, savedPosition, savedSize]);
 
@@ -190,7 +208,11 @@ export const useFloatFrame = ({ docId, defaultSlot, panelRef }: FloatFrameOption
     suppressClickRef.current = false;
     moveRef.current = {
       start,
-      container: { width: container.clientWidth, height: container.clientHeight },
+      container: {
+        width: container.clientWidth,
+        height: container.clientHeight,
+        topInset: FLOAT_TOP_INSET,
+      },
       pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
@@ -248,8 +270,8 @@ export const useFloatFrame = ({ docId, defaultSlot, panelRef }: FloatFrameOption
     dragRef.current = {
       zone,
       start,
-      // 每次拖动重新读取工作区，换显示器后夹紧范围仍然正确
-      bounds: readBounds(),
+      // 每次拖动重新读取工作区，换显示器后夹紧范围仍然正确；顶部同样避开顶栏
+      bounds: { ...readBounds(), topInset: FLOAT_TOP_INSET },
       pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
@@ -277,8 +299,10 @@ export const useFloatFrame = ({ docId, defaultSlot, panelRef }: FloatFrameOption
     setResizing(false);
     const current = frameRef.current;
     if (current !== null) {
-      // 只在松手时记忆；拖动期间不写文档、也不写机器状态
+      // 松手时同时记忆尺寸与位置：NW/NE/SW 缩放会移动左上角，
+      // 只记尺寸会让重开时的位置回退到缩放前的旧记忆。
       rememberFloatSize(String(docId), { width: current.width, height: current.height });
+      rememberFloatPosition(String(docId), { left: current.left, top: current.top });
     }
   };
 

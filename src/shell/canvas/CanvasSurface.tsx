@@ -26,9 +26,9 @@ import { drainCanvasView, subscribeCanvasView } from './canvas-view-signal.ts';
 import { RecentEditsLayer } from './RecentEditsLayer.tsx';
 import { useMachineStore, flushMachineUiWrites } from '../../data/stores/machine-store.ts';
 import { screenToWorld, snapValue } from './geometry.ts';
-import { readAsset, saveAsset } from '../../data/tauri/asset-port.ts';
-import { createUlid } from '#doc-model';
+import { readAsset } from '../../data/tauri/asset-port.ts';
 import { useCanvasCommands, type AnchorMenuState, type MenuState } from './use-canvas-commands.ts';
+import { useCanvasImages } from './use-canvas-images.ts';
 import { useCanvasDocument } from './use-canvas-document.ts';
 import { useCanvasGestures } from './use-canvas-gestures.ts';
 import styles from './CanvasSurface.module.css';
@@ -312,64 +312,19 @@ export const CanvasSurface = ({
     setLightboxAsset(assetPath);
   }, []);
 
+  // 图片拖入/粘贴入库：核心在 use-canvas-images.ts（拖放与 ⌘V 共用）
+  const { onDropFiles } = useCanvasImages({
+    canvasId,
+    kernel,
+    viewportRef,
+    sceneRef,
+    showError: doc.showError,
+    surfaceRef,
+  });
+
   const closeAsset = useCallback((): void => {
     setLightboxAsset(null);
   }, []);
-
-  /** 拖入图片文件 → asset_save（内容去重）→ 落成图片节点 */
-  const onDropFiles = useCallback(
-    (event: React.DragEvent<HTMLDivElement>): void => {
-      if (canvasId === null) return;
-      const files = [...event.dataTransfer.files].filter((file) => file.type.startsWith('image/'));
-      if (files.length === 0) return;
-      const element = surfaceRef.current;
-      if (element === null) return;
-      const bounds = element.getBoundingClientRect();
-      const grid = sceneRef.current?.grid ?? { size: 8, snap: false };
-      let z = (sceneRef.current?.nodes.reduce((max, node) => Math.max(max, node.z), 0) ?? 0) + 1;
-      for (const [offset, file] of files.entries()) {
-        void (async () => {
-          try {
-            const dataUrl = await new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
-              reader.onerror = () => reject(new Error('读取文件失败'));
-              reader.readAsDataURL(file);
-            });
-            const marker = 'base64,';
-            const at = dataUrl.indexOf(marker);
-            if (at < 0) throw new Error('不是可用的 data URL');
-            const saved = await saveAsset(dataUrl.slice(at + marker.length), file.type);
-            const world = screenToWorld(
-              { x: event.clientX - bounds.left + offset * 24, y: event.clientY - bounds.top + offset * 24 },
-              viewportRef.current,
-            );
-            const node = {
-              id: `n_${createUlid()}`,
-              kind: 'image' as const,
-              docId: null,
-              text: null,
-              rect: {
-                x: snapValue(world.x, grid),
-                y: snapValue(world.y, grid),
-                w: 320,
-                h: 220,
-              },
-              z,
-              groupId: null,
-              meta: { assetPath: saved.path },
-            };
-            z += 1;
-            await kernel.canvas.apply(canvasId, [{ type: 'addNode', node }]);
-            if (saved.deduped) doc.showError('内容已存在，直接复用库内图片');
-          } catch (cause) {
-            doc.showError(`导入图片失败：${String(cause)}`);
-          }
-        })();
-      }
-    },
-    [canvasId, kernel, surfaceRef, viewportRef, sceneRef, doc],
-  );
 
   const fitView = useCallback((): void => {
     const element = surfaceRef.current;

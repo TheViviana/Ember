@@ -19,6 +19,8 @@ interface InlineContext {
 export interface MarkdownViewProps extends InlineContext {
   readonly markdown: string;
   readonly className?: string | undefined;
+  /** 顶层块附加内容（阅读态译文）：只在块后追加，不改变块本身的渲染 */
+  readonly renderBlockExtra?: ((block: ReadBlock, index: number) => ReactNode) | undefined;
 }
 
 const safeHref = (href: string): string | null =>
@@ -101,94 +103,87 @@ const renderInlines = (inlines: readonly ReadInline[], context: InlineContext): 
     }
   });
 
-const renderBlocks = (blocks: readonly ReadBlock[], context: InlineContext): ReactNode =>
-  blocks.map((block, index) => {
-    switch (block.kind) {
-      case 'heading': {
-        const className = [styles.heading, styles[`heading${block.depth}`]]
-          .filter((value): value is string => typeof value === 'string')
-          .join(' ');
-        const tag = `h${block.depth}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6';
-        const Heading = tag;
-        return (
-          <Heading key={index} className={className}>
-            {renderInlines(block.children, context)}
-          </Heading>
-        );
-      }
-      case 'paragraph':
-        return (
-          <p key={index} className={styles.paragraph}>
-            {renderInlines(block.children, context)}
-          </p>
-        );
-      case 'code':
-        return (
-          <pre key={index} className={styles.codeBlock} data-lang={block.lang ?? undefined}>
-            <code>{block.value}</code>
-          </pre>
-        );
-      case 'math':
-        return <MathContent key={index} tex={block.value} display />;
-      case 'table':
-        return (
-          <div key={index} className={styles.tableWrap}>
-            <table className={styles.table}>
-              <thead>
-                <tr>
-                  {block.header.map((cell, cellIndex) => (
-                    <th key={cellIndex} style={cellStyle(block.align[cellIndex])}>
-                      {renderInlines(cell, context)}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              {block.rows.length === 0 ? null : (
-                <tbody>
-                  {block.rows.map((row, rowIndex) => (
-                    <tr key={rowIndex}>
-                      {row.map((cell, cellIndex) => (
-                        <td key={cellIndex} style={cellStyle(block.align[cellIndex])}>
-                          {renderInlines(cell, context)}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              )}
-            </table>
-          </div>
-        );
-      case 'list': {
-        const items = block.items.map((item, itemIndex) => (
-          <li key={itemIndex}>{renderBlocks(item, context)}</li>
-        ));
-        return block.ordered ? (
-          <ol key={index} className={styles.list} start={block.start}>
-            {items}
-          </ol>
-        ) : (
-          <ul key={index} className={styles.list}>
-            {items}
-          </ul>
-        );
-      }
-      case 'quote':
-        return (
-          <blockquote key={index} className={styles.quote}>
-            {renderBlocks(block.children, context)}
-          </blockquote>
-        );
-      case 'rule':
-        return <hr key={index} className={styles.rule} />;
-      case 'text':
-        return (
-          <p key={index} className={styles.paragraph}>
-            {block.value}
-          </p>
-        );
+const renderBlock = (block: ReadBlock, context: InlineContext): ReactNode => {
+  switch (block.kind) {
+    case 'heading': {
+      const className = [styles.heading, styles[`heading${block.depth}`]]
+        .filter((value): value is string => typeof value === 'string')
+        .join(' ');
+      const tag = `h${block.depth}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6';
+      const Heading = tag;
+      return <Heading className={className}>{renderInlines(block.children, context)}</Heading>;
     }
-  });
+    case 'paragraph':
+      return <p className={styles.paragraph}>{renderInlines(block.children, context)}</p>;
+    case 'code':
+      return (
+        <pre className={styles.codeBlock} data-lang={block.lang ?? undefined}>
+          <code>{block.value}</code>
+        </pre>
+      );
+    case 'math':
+      return <MathContent tex={block.value} display />;
+    case 'table':
+      return (
+        <div className={styles.tableWrap}>
+          <table className={styles.table}>
+            <thead>
+              <tr>
+                {block.header.map((cell, cellIndex) => (
+                  <th key={cellIndex} style={cellStyle(block.align[cellIndex])}>
+                    {renderInlines(cell, context)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            {block.rows.length === 0 ? null : (
+              <tbody>
+                {block.rows.map((row, rowIndex) => (
+                  <tr key={rowIndex}>
+                    {row.map((cell, cellIndex) => (
+                      <td key={cellIndex} style={cellStyle(block.align[cellIndex])}>
+                        {renderInlines(cell, context)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            )}
+          </table>
+        </div>
+      );
+    case 'list': {
+      const items = block.items.map((item, itemIndex) => (
+        <li key={itemIndex}>{renderBlocks(item, context)}</li>
+      ));
+      return block.ordered ? (
+        <ol className={styles.list} start={block.start}>
+          {items}
+        </ol>
+      ) : (
+        <ul className={styles.list}>{items}</ul>
+      );
+    }
+    case 'quote':
+      return <blockquote className={styles.quote}>{renderBlocks(block.children, context)}</blockquote>;
+    case 'rule':
+      return <hr className={styles.rule} />;
+    case 'text':
+      return <p className={styles.paragraph}>{block.value}</p>;
+  }
+};
+
+const renderBlocks = (
+  blocks: readonly ReadBlock[],
+  context: InlineContext,
+  extras?: (block: ReadBlock, index: number) => ReactNode,
+): ReactNode =>
+  blocks.map((block, index) => (
+    <Fragment key={index}>
+      {renderBlock(block, context)}
+      {extras === undefined ? null : extras(block, index)}
+    </Fragment>
+  ));
 
 /** note 阅读态：mdast 渲染树 → React；只有数学公式使用 KaTeX 生成的受控 HTML。
  * memo 隔离：画布手势期间父组件高频重渲染时，markdown/className 不变的节点整体跳过。 */
@@ -197,6 +192,7 @@ export const MarkdownView = memo(function MarkdownView({
   className,
   renderImage,
   onWikiLink,
+  renderBlockExtra,
 }: MarkdownViewProps): ReactElement {
   // 拖动时组件会随 rAF 高频重渲染，解析结果按源码缓存
   const blocks = useMemo(() => readingBlocks(markdown), [markdown]);
@@ -206,7 +202,7 @@ export const MarkdownView = memo(function MarkdownView({
         .filter((value): value is string => typeof value === 'string' && value.length > 0)
         .join(' ')}
     >
-      {renderBlocks(blocks, { renderImage, onWikiLink })}
+      {renderBlocks(blocks, { renderImage, onWikiLink }, renderBlockExtra)}
     </div>
   );
 });

@@ -1,19 +1,36 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
 import type { AssetEntry } from '../../data/tauri/asset-port.ts';
-import { listAssets, saveAsset } from '../../data/tauri/asset-port.ts';
+import { deleteAsset, listAssets, saveAsset } from '../../data/tauri/asset-port.ts';
 import type { CanvasId, DocId } from '#doc-model';
 import { toErrorText } from '../../kernel/errors.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import { useFloatStore } from '../editor/float-store.ts';
+import {
+  FLOAT_ZONES,
+  resolveFloatResize,
+  type FloatBounds,
+  type FloatZone,
+} from '../editor/float-layout.ts';
+import { useMachineStore } from '../../data/stores/machine-store.ts';
 import { requestCanvasView } from '../canvas/canvas-view-signal.ts';
+import { AssetCard } from './AssetCard.tsx';
 import type { CanvasLibrary } from '../canvas/use-canvas-library.ts';
-import { useAssetImage, useNearViewport } from './asset-thumbnail.ts';
 import styles from './AttachmentPanel.module.css';
 
 export interface AttachmentPanelProps {
   readonly library: CanvasLibrary;
   readonly onClose: () => void;
+}
+
+/** 复用机器本地 ui.json 的 floatPositions/floatSizes 记录，键不与文档 id（ULID）冲突 */
+const PANEL_FLOAT_KEY = 'attachments';
+
+interface PanelFrame {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
 }
 
 
@@ -51,14 +68,28 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  /** 正在删除的资产路径（按钮 busy）；面板级 notice 显示结果 */
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const [frame, setFrame] = useState<{
-    readonly left: number;
-    readonly top: number;
-    readonly width: number;
-    readonly height: number;
-  } | null>(null);
+  /** 面板几何：初始值来自机器本地记忆（无记忆时保持 CSS 默认摆放），拖动 / 缩放松手时写回 */
+  const [frame, setFrame] = useState<PanelFrame | null>(null);
+
+  // 挂载后按记忆恢复几何；尺寸缺失时用面板当前实测尺寸补齐，避免写死一个过期默认值
+  useEffect(() => {
+    const root = rootRef.current;
+    if (root === null) return;
+    const machine = useMachineStore.getState();
+    const position = machine.floatPositions[PANEL_FLOAT_KEY];
+    if (position === undefined) return;
+    const size = machine.floatSizes[PANEL_FLOAT_KEY];
+    setFrame({
+      left: position.left,
+      top: position.top,
+      width: size?.width ?? root.offsetWidth,
+      height: size?.height ?? root.offsetHeight,
+    });
+  }, []);
 
   const assets = useQuery({ queryKey: ['assets', 'list'], queryFn: () => listAssets() });
 
@@ -176,6 +207,8 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
       }
     }
     setImporting(false);
+    // 导入写盘后必须失效资产列表查询，否则新图要重开面板才出现
+    if (saved > 0) void queryClient.invalidateQueries({ queryKey: ['assets'] });
     setNotice(
       failed === 0
         ? `已导入 ${saved} 张${deduped > 0 ? `（${deduped} 张与库内重复，直接复用）` : ''}`
@@ -184,9 +217,50 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
     void kernel.log.info('附件导入完成', { saved, deduped, failed });
   };
 
+  /** 删除资产：回收站语义；完成后失效清单与引用统计 */
+  const handleDelete = useCallback(
+    (asset: AssetEntry): void => {
+      if (deleting !== null || kernel.env.readonlyMode) return;
+      setDeleting(asset.path);
+      void (async () => {
+        try {
+          const destination = await deleteAsset(asset.path);
+          void queryClient.invalidateQueries({ queryKey: ['assets'] });
+          void queryClient.invalidateQueries({ queryKey: ['attachments'] });
+          setNotice(
+            destination === 'system'
+              ? `已删除 ${asset.name}（移入系统回收站）`
+              : `已删除 ${asset.name}（系统回收站不可用，已移入库内回收目录 .workbench/trash，30 天后自动清理）`,
+          );
+          setExpanded((current) => (current === asset.path ? null : current));
+        } catch (cause) {
+          setNotice(`删除失败：${toErrorText(cause)}`);
+        } finally {
+          setDeleting(null);
+        }
+      })();
+    },
+    [deleting, kernel, queryClient],
+  );
+
   const titleOfDoc = (srcId: string): string => {
     const meta = (documents.data ?? []).find((item) => String(item.id) === srcId);
     return meta === undefined || meta.title.trim().length === 0 ? '未命名' : meta.title;
+  };
+
+  /** 面板缩放边界：与浮窗同源的夹紧规则，顶部避开顶栏带 */
+  const panelBounds = (): FloatBounds => ({
+    maxWidth: window.innerWidth - 16,
+    maxHeight: window.innerHeight - 16,
+    minWidth: 320,
+    minHeight: 240,
+    topInset: 8,
+  });
+
+  const persistFrame = (next: PanelFrame): void => {
+    const machine = useMachineStore.getState();
+    machine.rememberFloatPosition(PANEL_FLOAT_KEY, { left: next.left, top: next.top });
+    machine.rememberFloatSize(PANEL_FLOAT_KEY, { width: next.width, height: next.height });
   };
 
   const beginDrag = (event: ReactPointerEvent<HTMLElement>): void => {
@@ -215,39 +289,35 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
     const onUp = (): void => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      // 松手才写记忆；拖动期间不写机器状态
+      const current = rootRef.current?.getBoundingClientRect();
+      if (current !== undefined) {
+        persistFrame({ left: current.left, top: current.top, width: current.width, height: current.height });
+      }
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   };
 
-  const beginResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+  /** 四角缩放：对角固定，几何运算复用浮窗的 resolveFloatResize */
+  const beginResize = (zone: FloatZone, event: ReactPointerEvent<HTMLDivElement>): void => {
     const rect = rootRef.current?.getBoundingClientRect();
     if (rect === undefined) return;
     event.preventDefault();
     event.stopPropagation();
-    const start = {
-      x: event.clientX,
-      y: event.clientY,
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-      height: rect.height,
-    };
-    setFrame({ left: start.left, top: start.top, width: start.width, height: start.height });
+    const start: PanelFrame = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    const bounds = panelBounds();
+    setFrame(start);
     const onMove = (moveEvent: PointerEvent): void => {
-      const width = Math.min(
-        Math.max(start.width - (moveEvent.clientX - start.x), 320),
-        window.innerWidth - start.left - 8,
-      );
-      const height = Math.min(
-        Math.max(start.height + (moveEvent.clientY - start.y), 240),
-        window.innerHeight - start.top - 8,
-      );
-      setFrame({ left: start.left, top: start.top, width, height });
+      setFrame(resolveFloatResize(zone, start, moveEvent.clientX - event.clientX, moveEvent.clientY - event.clientY, bounds));
     };
     const onUp = (): void => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      const current = rootRef.current?.getBoundingClientRect();
+      if (current !== undefined) {
+        persistFrame({ left: current.left, top: current.top, width: current.width, height: current.height });
+      }
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -365,6 +435,8 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
       <div className={styles.grid}>
         {filtered.map((asset) => (
           <AssetCard
+            onDelete={handleDelete}
+            deletable={!kernel.env.readonlyMode && deleting === null}
             key={asset.path}
             asset={asset}
             expanded={expanded === asset.path}
@@ -388,98 +460,19 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
         ))}
       </div>
 
-      <div
-        className={styles.resizeHandle}
-        role="separator"
-        aria-label="拖动调整附件面板尺寸"
-        title="拖动调整尺寸"
-        onPointerDown={beginResize}
-      />
-    </div>
-  );
-};
-
-interface AssetCardProps {
-  readonly asset: AssetEntry;
-  readonly expanded: boolean;
-  readonly docRefs: readonly { readonly srcId: string; readonly line: number; readonly raw: string }[];
-  readonly canvasRefs: readonly { readonly canvasId: string; readonly canvasTitle: string; readonly nodeId: string }[];
-  readonly usageLoading: boolean;
-  readonly titleOfDoc: (srcId: string) => string;
-  readonly onToggle: () => void;
-  readonly onOpenDoc: (srcId: string) => void;
-  readonly onOpenCanvas: (canvasId: string, nodeId: string) => void;
-}
-
-const AssetCard = ({
-  asset,
-  expanded,
-  docRefs,
-  canvasRefs,
-  usageLoading,
-  titleOfDoc,
-  onToggle,
-  onOpenDoc,
-  onOpenCanvas,
-}: AssetCardProps): ReactElement => {
-  const cardRef = useRef<HTMLDivElement | null>(null);
-  const near = useNearViewport(cardRef);
-  const image = useAssetImage(asset.path, near);
-
-  return (
-    <div className={styles.card} ref={cardRef}>
-      <button
-        type="button"
-        className={styles.thumbButton}
-        title={expanded ? '收起引用位置' : '查看被引用位置'}
-        onClick={onToggle}
-      >
-        {image.dataUrl !== null ? (
-          <img className={styles.thumb} src={image.dataUrl} alt={asset.name} draggable={false} />
-        ) : (
-          <span className={styles.thumbPlaceholder}>{image.loading ? '…' : '图'}</span>
-        )}
-      </button>
-      <p className={styles.name} title={asset.path}>
-        {asset.name}
-      </p>
-      <p className={styles.meta}>
-        {usageLoading
-          ? '统计中…'
-          : `${docRefs.length} 篇文档 · ${canvasRefs.length} 张画布引用`}
-      </p>
-      {expanded ? (
-        <div className={styles.usages}>
-          {docRefs.length === 0 && canvasRefs.length === 0 ? (
-            <p className={styles.usageEmpty}>还没有任何引用</p>
-          ) : null}
-          {docRefs.map((ref) => (
-            <button
-              key={`${ref.srcId}-${ref.line}`}
-              type="button"
-              className={styles.usageRow}
-              title={ref.raw}
-              onClick={() => {
-                onOpenDoc(ref.srcId);
-              }}
-            >
-              文档：{titleOfDoc(ref.srcId)}
-            </button>
-          ))}
-          {canvasRefs.map((ref) => (
-            <button
-              key={`${ref.canvasId}-${ref.nodeId}`}
-              type="button"
-              className={styles.usageRow}
-              onClick={() => {
-                onOpenCanvas(ref.canvasId, ref.nodeId);
-              }}
-            >
-              画布：{ref.canvasTitle}（飞到图片节点）
-            </button>
-          ))}
-        </div>
-      ) : null}
+      {FLOAT_ZONES.map((zone) => (
+        <div
+          key={zone}
+          className={styles.resizeHandle}
+          data-zone={zone}
+          role="separator"
+          aria-label={`拖动调整附件面板尺寸（${zone}）`}
+          title="拖动调整尺寸"
+          onPointerDown={(event) => {
+            beginResize(zone, event);
+          }}
+        />
+      ))}
     </div>
   );
 };

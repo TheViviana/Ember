@@ -133,3 +133,27 @@
   color: var(--ember-text-secondary);
   font-weight: 500;
 }
+
+/* 文档路径按钮：与状态组同视觉，但可点击复制；路径过长时中间省略 */
+.pathButton {
+  max-width: 260px;
+  overflow: hidden;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: inherit;
+  color: var(--ember-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.pathButton:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}

@@ -143,7 +143,10 @@ impl Vault {
         paths::ensure_not_reserved(&normalized)?;
         let _gate = self.begin_write()?;
         match fs::symlink_metadata(&absolute) {
-            Ok(_) => trash::trash(&self.root, &absolute),
+            Ok(_) => {
+                trash::trash(&self.root, &absolute)?;
+                Ok(())
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(with_path(error.into(), &absolute)),
         }

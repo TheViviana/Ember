@@ -10,6 +10,8 @@ export interface FloatTitleProps {
   readonly statusTone: StatusTone;
   /** 阅读时长（分钟）；null 表示正文为空，不展示 */
   readonly readingMinutes: number | null;
+  /** 字数（CJK 字 + 非 CJK 词）；null 表示正文为空，不展示 */
+  readonly wordCount: number | null;
   /** 打开浮窗时直接进入标题编辑（新建文章后） */
   readonly autoFocus: boolean;
   /** 当前浮窗是否处于专注模式；决定按钮图标与提示 */
@@ -28,6 +30,7 @@ export const FloatTitle = ({
   statusText,
   statusTone,
   readingMinutes,
+  wordCount,
   autoFocus,
   focused,
   onCommit,
@@ -119,6 +122,14 @@ export const FloatTitle = ({
           title="阅读时长：中文 300 字/分钟、其他 200 词/分钟，向上取整"
         >
           {readingMinutes} 分钟
+        </span>
+      )}
+      {wordCount === null ? null : (
+        <span
+          className={styles.reading}
+          title="字数：中文字符逐字计数，其他语言按空白分词计数"
+        >
+          {wordCount.toLocaleString('zh-Hans-CN')} 字
         </span>
       )}
 

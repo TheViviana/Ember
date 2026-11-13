@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Ember 需要访问文稿文件夹以读取或导出你在其中存放的知识库与备份。</string>
+</dict>
+</plist>

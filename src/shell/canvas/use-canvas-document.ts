@@ -154,6 +154,9 @@ export const useCanvasDocument = (canvasId: CanvasId | null) => {
     const element = surfaceRef.current;
     if (element === null) return undefined;
     const onWheel = (event: WheelEvent): void => {
+      // 浮窗编辑器 / 附件面板等覆盖层内部的滚轮交给它们自己滚动，不缩放画布
+      const target = event.target as HTMLElement | null;
+      if (target !== null && target.closest('[data-canvas-overlay]') !== null) return;
       event.preventDefault();
       const rect = element.getBoundingClientRect();
       const anchor = { x: event.clientX - rect.left, y: event.clientY - rect.top };

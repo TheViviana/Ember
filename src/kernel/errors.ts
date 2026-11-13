@@ -18,6 +18,7 @@ export type EmberErrorCode =
   | 'duplicate_extension'
   | 'canvas_invalid'
   | 'io_failed'
+  | 'permission_denied'
   | 'startup_failed';
 
 export class EmberError extends Error {
@@ -46,4 +47,21 @@ export const toErrorText = (value: unknown): string => {
     if (message !== null) return code === null ? message : `${code}: ${message}`;
   }
   return String(value);
+};
+
+/** 取任意抛出物的稳定错误码；Tauri IPC 的拒绝值是 `{ code, message }` 而不是 EmberError */
+export const errorCodeOf = (value: unknown): string | null => {
+  if (isEmberError(value)) return value.code;
+  if (typeof value === 'object' && value !== null) {
+    const code = (value as Record<string, unknown>).code;
+    return typeof code === 'string' ? code : null;
+  }
+  return null;
+};
+
+/** 权限被拒（macOS TCC 未授权「文稿」等）不能被当成空文档展示 */
+export const isPermissionDenied = (value: unknown): boolean => {
+  if (errorCodeOf(value) === 'permission_denied') return true;
+  // 兼容旧错误码/机器上尚未重编译的后端：至少按文案兜底识别
+  return /Permission denied|Operation not permitted|EPERM|EACCES/i.test(toErrorText(value));
 };

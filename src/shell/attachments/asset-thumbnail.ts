@@ -29,6 +29,7 @@ const THUMB_MAX_EDGE = 256;
 /**
  * 大图降采样成 ≤256px 的 PNG：react-query 缓存里驻留的是缩略图而不是整图 base64。
  * GIF 不降采样（会丢动画）；环境缺 OffscreenCanvas 或解码失败时回落原图。
+ * 返回值是完整的 data URL，调用方可直接用作 <img src>。
  */
 const downscaleThumbnail = async (mime: string, base64: string): Promise<string> => {
   const original = `data:${mime};base64,${base64}`;
@@ -58,21 +59,20 @@ const downscaleThumbnail = async (mime: string, base64: string): Promise<string>
 export const useAssetImage = (path: string, enabled: boolean): AssetImage => {
   const query = useQuery({
     queryKey: ['asset', 'thumb', path],
-    queryFn: async () => {
+    queryFn: async (): Promise<string> => {
       const asset = await readAsset(path);
       try {
-        return { mime: asset.mime, data: await downscaleThumbnail(asset.mime, asset.data) };
+        return await downscaleThumbnail(asset.mime, asset.data);
       } catch {
         // 解码/降采样失败：回落原图，缩略图仍可显示
-        return asset;
+        return `data:${asset.mime};base64,${asset.data}`;
       }
     },
     enabled,
     staleTime: 5 * 60_000,
   });
   return {
-    dataUrl:
-      query.data === undefined ? null : `data:${query.data.mime};base64,${query.data.data}`,
+    dataUrl: query.data ?? null,
     error: query.error === null ? null : toErrorText(query.error),
     loading: enabled && query.isPending,
   };

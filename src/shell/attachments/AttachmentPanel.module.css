@@ -35,30 +35,76 @@
   cursor: grabbing;
 }
 
+/* 四角缩放手柄：热区 14px，L 形角标指明方向；角位与浮窗手柄一致 */
 .resizeHandle {
   position: absolute;
-  left: 0;
-  bottom: 0;
   width: 14px;
   height: 14px;
-  cursor: nesw-resize;
   z-index: 2;
 }
 
 .resizeHandle::after {
   content: '';
   position: absolute;
-  left: 3px;
-  bottom: 3px;
   width: 7px;
   height: 7px;
-  border-left: 1px solid var(--ember-border-strong);
-  border-bottom: 1px solid var(--ember-border-strong);
-  border-bottom-left-radius: 2px;
+  border: 0 solid var(--ember-border-strong);
 }
 
 .resizeHandle:hover::after {
   border-color: var(--ember-border-glow);
+}
+
+.resizeHandle[data-zone='nw'] {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.resizeHandle[data-zone='nw']::after {
+  top: 3px;
+  left: 3px;
+  border-top-width: 1px;
+  border-left-width: 1px;
+}
+
+.resizeHandle[data-zone='ne'] {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+
+.resizeHandle[data-zone='ne']::after {
+  top: 3px;
+  right: 3px;
+  border-top-width: 1px;
+  border-right-width: 1px;
+}
+
+.resizeHandle[data-zone='sw'] {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+.resizeHandle[data-zone='sw']::after {
+  bottom: 3px;
+  left: 3px;
+  border-bottom-width: 1px;
+  border-left-width: 1px;
+}
+
+.resizeHandle[data-zone='se'] {
+  bottom: 0;
+  right: 0;
+  cursor: nwse-resize;
+}
+
+.resizeHandle[data-zone='se']::after {
+  bottom: 3px;
+  right: 3px;
+  border-bottom-width: 1px;
+  border-right-width: 1px;
 }
 
 .headerIcon {
@@ -292,4 +338,70 @@
   font-family: var(--font-body);
   font-size: var(--text-2xs);
   color: var(--ember-text-muted);
+}
+
+/* ── 资产删除：展开区确认条 ─────────────────────────────────── */
+
+.deleteButton {
+  margin-top: var(--space-xs);
+  padding: 2px var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.deleteButton:hover {
+  border-color: var(--ember-danger);
+  color: var(--ember-danger);
+}
+
+.deleteButton:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.deleteConfirm {
+  margin-top: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--ember-danger);
+  border-radius: var(--radius-sm);
+  background: var(--ember-danger-tint, rgb(248 113 113 / 8%));
+}
+
+.deleteWarn {
+  margin: 0;
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-primary);
+}
+
+.deleteActions {
+  display: flex;
+  gap: var(--space-xs);
+  margin-top: var(--space-xs);
+}
+
+.deleteYes {
+  flex: 1;
+  height: 24px;
+  border: 1px solid var(--ember-danger);
+  border-radius: var(--radius-sm);
+  background: var(--ember-danger);
+  color: var(--ember-text-on-accent, #fff);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.deleteNo {
+  flex: 1;
+  height: 24px;
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-size: var(--text-2xs);
+  cursor: pointer;
 }

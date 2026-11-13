@@ -1,0 +1,269 @@
+/* 启动画面：余烬点燃。
+ * 火星打两下闪（划火柴）→ 琥珀火苗长出并摇曳 → 白热化收进余烬 →
+ * 波纹扩散掩护字标入场。
+ * 纯 CSS 动画，全部走设计令牌；启动叙事整体约 2s，
+ * 每段动画内部仍使用 --ease-out，卸载淡出与外壳入场共用 --duration-slow。 */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--layer-chrome) + 1);
+  display: grid;
+  place-items: center;
+  background: var(--ember-bg-deep);
+  transition: opacity var(--duration-slow) var(--ease-out);
+}
+
+/* 淡出交给 transition，卸载由组件计时器负责 */
+.closing {
+  opacity: 0;
+}
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.emberWrap {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--space-2xl);
+  height: var(--space-2xl);
+}
+
+/* 波纹：火苗白热化收进余烬的瞬间向外扩散一圈，掩护字标入场 */
+.ripple {
+  position: absolute;
+  width: var(--space-sm);
+  height: var(--space-sm);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--ember-warning-glow);
+  opacity: 0;
+  animation: emberRipple 900ms var(--ease-out) 1150ms forwards;
+}
+
+@keyframes emberRipple {
+  0% {
+    opacity: 0.8;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(14);
+  }
+}
+
+/* 余烬：火星打两下闪（划火柴）→ 火苗长出 → 白热化冷却成主色余烬 */
+.ember {
+  width: var(--space-md);
+  height: var(--space-md);
+  border-radius: var(--radius-full);
+  background: radial-gradient(circle, var(--ember-warning) 0%, var(--ember-warning) 55%, transparent 80%);
+  box-shadow: 0 0 12px var(--ember-warning-glow);
+  opacity: 0;
+  animation: emberIgnite 1400ms var(--ease-out) forwards;
+}
+
+@keyframes emberIgnite {
+  0% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  8% {
+    opacity: 1;
+    transform: scale(0.5);
+  }
+  /* 划火柴式的两下快闪：火星在「点着/熄灭」间抖动 */
+  14% {
+    opacity: 0.3;
+  }
+  20% {
+    opacity: 1;
+    transform: scale(0.7);
+  }
+  28% {
+    opacity: 0.35;
+  }
+  38% {
+    opacity: 1;
+    transform: scale(0.9);
+    box-shadow: 0 0 18px var(--ember-warning-glow), 0 0 44px var(--ember-warning-glow);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 26px var(--ember-warning-glow), 0 0 64px var(--ember-warning-glow);
+  }
+  100% {
+    transform: scale(0.9);
+    background: radial-gradient(circle, var(--ember-primary) 0%, var(--ember-warning) 50%, transparent 80%);
+    box-shadow: 0 0 20px var(--ember-primary-glow), 0 0 56px var(--ember-warning-glow);
+  }
+}
+
+/* 火苗：从余烬上长出的琥珀色泪滴，摇曳两下后收进白热余烬 */
+.flame {
+  position: absolute;
+  left: 50%;
+  bottom: 50%;
+  width: var(--space-md);
+  height: var(--space-lg);
+  margin-left: calc(var(--space-md) / -2);
+  background: radial-gradient(ellipse at 50% 85%, var(--ember-warning) 0%, var(--ember-warning) 40%, transparent 72%);
+  border-radius: 50% 50% 50% 50% / 62% 62% 38% 38%;
+  filter: blur(1.5px);
+  transform-origin: 50% 100%;
+  animation: emberFlame 1400ms var(--ease-out) forwards;
+}
+
+@keyframes emberFlame {
+  0%,
+  34% {
+    opacity: 0;
+    transform: scale(0.15);
+  }
+  46% {
+    opacity: 0.85;
+    transform: scale(0.5);
+  }
+  56% {
+    opacity: 1;
+    transform: scale(0.8);
+  }
+  /* 摇曳：火苗左右摆 + 高度抖动 */
+  64% {
+    transform: scale(0.62, 0.85) skewX(4deg);
+  }
+  72% {
+    transform: scale(0.85, 1.05) skewX(-4deg);
+  }
+  80% {
+    transform: scale(0.7, 0.9) skewX(3deg);
+  }
+  88% {
+    opacity: 1;
+    transform: scale(0.95, 1.1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.3, 0.4);
+  }
+}
+
+/* 火苗内芯：偏白热，比外焰晚一拍出现，增强层次 */
+.flameCore {
+  position: absolute;
+  left: 50%;
+  bottom: 50%;
+  width: var(--space-sm);
+  height: var(--space-md);
+  margin-left: calc(var(--space-sm) / -2);
+  background: radial-gradient(ellipse at 50% 85%, var(--ember-text-primary) 0%, var(--ember-warning) 65%, transparent 88%);
+  border-radius: 50% 50% 50% 50% / 62% 62% 38% 38%;
+  filter: blur(0.5px);
+  transform-origin: 50% 100%;
+  animation: emberFlameCore 1400ms var(--ease-out) forwards;
+}
+
+@keyframes emberFlameCore {
+  0%,
+  42% {
+    opacity: 0;
+    transform: scale(0.15);
+  }
+  56% {
+    opacity: 0.9;
+    transform: scale(0.6);
+  }
+  72% {
+    opacity: 0.8;
+    transform: scale(0.7, 0.9);
+  }
+  88% {
+    opacity: 1;
+    transform: scale(0.85, 1.05);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+}
+
+.wordmark {
+  display: flex;
+  gap: var(--space-md);
+  margin-top: var(--space-xl);
+  font-family: var(--font-display);
+  font-size: 40px;
+  font-weight: 600;
+  color: var(--ember-text-primary);
+  user-select: none;
+}
+
+.letter {
+  opacity: 0;
+  transform: translateY(8px);
+  /* 入场延迟由组件按字符序号内联设置 */
+  animation: emberLetter 480ms var(--ease-out) forwards;
+  text-shadow: 0 0 16px var(--ember-primary-glow);
+}
+
+@keyframes emberLetter {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.status {
+  margin: var(--space-lg) 0 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--ember-text-muted);
+  opacity: 0;
+  animation: emberStatus 400ms var(--ease-out) 1300ms forwards;
+}
+
+@keyframes emberStatus {
+  to {
+    opacity: 1;
+  }
+}
+
+/* 等宽省略号：WebKit 支持伪元素 content 逐帧切换；不支持时静态无点，可接受降级 */
+.status::after {
+  content: '';
+  display: inline-block;
+  width: 20px;
+  text-align: left;
+  animation: emberDots 1.4s infinite;
+}
+
+@keyframes emberDots {
+  0% {
+    content: '';
+  }
+  25% {
+    content: '.';
+  }
+  50% {
+    content: '..';
+  }
+  75% {
+    content: '...';
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ember,
+  .flame,
+  .flameCore,
+  .ripple,
+  .letter,
+  .status {
+    animation-duration: 1ms;
+    animation-delay: 0ms;
+  }
+}

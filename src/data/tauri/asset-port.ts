@@ -42,3 +42,10 @@ export const readAsset = (path: string): Promise<AssetData> => invoke<AssetData>
 /** 导入图片：内容与声明的 MIME 必须一致，同内容返回 deduped。 */
 export const saveAsset = (data: string, mime: string): Promise<AssetSaved> =>
   invoke<AssetSaved>('asset_save', { data, mime });
+
+/** 删除单张图片落点：system = 系统回收站；internal = 库内回收目录（30 天后自动清理）。 */
+export type AssetDeleteDestination = 'system' | 'internal';
+
+/** 删除单张图片：优先系统回收站，权限不足时自动降级为库内回收目录；不存在按幂等成功。 */
+export const deleteAsset = (path: string): Promise<AssetDeleteDestination> =>
+  invoke<AssetDeleteDestination>('asset_delete', { path });

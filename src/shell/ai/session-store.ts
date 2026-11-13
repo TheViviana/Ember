@@ -5,10 +5,11 @@ import { toErrorText } from '../../kernel/errors.ts';
 
 // -------- 持久化文件 schema --------
 
-/** 持久化 turns：只存 role + content，id 恢复时重新编号 */
+/** 持久化 turns：只存 role + content（stopped 是用户手动停止标记），id 恢复时重新编号 */
 export interface AiSessionTurn {
   readonly role: 'user' | 'assistant';
   readonly content: string;
+  readonly stopped?: boolean;
 }
 
 /** 持久化 proposal：与 proposal.ts 的 Proposal 字段对齐但 rev 不持久化 */
@@ -101,7 +102,12 @@ const validateAndNormalize = (raw: unknown): AiSessionFileV1 | null => {
       const role = (t as Record<string, unknown>).role;
       const content = (t as Record<string, unknown>).content;
       if ((role === 'user' || role === 'assistant') && typeof content === 'string') {
-        turns.push({ role, content });
+        const stopped = (t as Record<string, unknown>).stopped;
+        turns.push({
+          role,
+          content,
+          ...(stopped === true ? { stopped: true } : {}),
+        });
       }
       if (turns.length >= MAX_INBOUND_TURNS) break;
     }

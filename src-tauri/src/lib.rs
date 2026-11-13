@@ -9,7 +9,9 @@ use tauri::Manager;
 
 use crate::vault::watcher::Watcher;
 
-/// 库根：`EMBER_VAULT` 优先，缺省 `~/Documents/EmberVault`。
+/// 库根：`EMBER_VAULT` 优先；否则若历史默认库 `~/Documents/EmberVault` 已存在则沿用
+/// （老用户授权已缓存，不会重复弹窗）；否则落到 `~/Library/Application Support/Ember/vault`
+/// （应用数据目录不受 macOS 文稿 TCC 保护，新用户零弹窗）。
 fn resolve_root() -> PathBuf {
     if let Ok(value) = std::env::var("EMBER_VAULT") {
         if !value.is_empty() {
@@ -17,7 +19,15 @@ fn resolve_root() -> PathBuf {
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join("Documents").join("EmberVault")
+    let legacy = PathBuf::from(&home).join("Documents").join("EmberVault");
+    if legacy.is_dir() {
+        return legacy;
+    }
+    PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("Ember")
+        .join("vault")
 }
 
 /// 启动阶段建库失败（身份损坏、schemaVersion 不受支持等）。
@@ -59,6 +69,7 @@ pub fn run() {
             commands::asset_list,
             commands::asset_read,
             commands::asset_save,
+            commands::asset_delete,
             commands::machine_ui_read,
             commands::machine_ui_write,
             commands::machine_ai_read,

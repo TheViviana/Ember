@@ -20,6 +20,9 @@ export interface TopbarProps {
   readonly conflictCount: number;
   readonly onOpenConflicts: () => void;
   readonly onOpenSettings: () => void;
+  readonly onOpenReplace: () => void;
+  readonly onExportPdf: () => void;
+  readonly exportDisabled: boolean;
 }
 
 const formatClock = (at: Date): string => at.toLocaleTimeString('zh-CN', { hour12: false });
@@ -36,6 +39,9 @@ export const Topbar = ({
   conflictCount,
   onOpenConflicts,
   onOpenSettings,
+  onOpenReplace,
+  onExportPdf,
+  exportDisabled,
 }: TopbarProps): ReactElement => {
   const windowPort = useWindowPort();
   const [clock, setClock] = useState(() => formatClock(new Date()));
@@ -76,6 +82,9 @@ export const Topbar = ({
           aiOpen={aiOpen}
           onToggleAi={onToggleAi}
           onOpenSettings={onOpenSettings}
+          onOpenReplace={onOpenReplace}
+          onExportPdf={onExportPdf}
+          exportDisabled={exportDisabled}
         />
 
         <CanvasSwitcher library={library} />

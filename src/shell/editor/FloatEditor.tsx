@@ -1,4 +1,6 @@
+import { redo, undo } from '@codemirror/commands';
 import { EditorView } from '@codemirror/view';
+import { useQuery } from '@tanstack/react-query';
 import {
   useCallback,
   useEffect,
@@ -20,7 +22,10 @@ import { useFloatStore } from './float-store.ts';
 import { useFocusStore } from './focus-store.ts';
 import { PHASE, type Notice } from './float-editor-model.ts';
 import {
+  insertCodeBlock,
+  insertHorizontalRule,
   insertLink,
+  insertTable,
   toggleBlock,
   toggleHeading,
   toggleInline,
@@ -30,11 +35,13 @@ import {
 } from './format-commands.ts';
 import { FormatToolbar } from './FormatToolbar.tsx';
 import { ReadingView } from './ReadingView.tsx';
+import { useTranslation } from '../ai/use-translation.ts';
 import { BacklinksPanel } from './BacklinksPanel.tsx';
 import { HistoryPanel } from './HistoryPanel.tsx';
 import { OutlinePanel } from './OutlinePanel.tsx';
 import { FloatTagBar } from './FloatTagBar.tsx';
 import { FloatTitle } from './FloatTitle.tsx';
+import { useFloatAiActions } from './use-float-ai-actions.ts';
 import { useFloatDocument } from './use-float-document.ts';
 import { useFloatFrame } from './use-float-frame.ts';
 import styles from './FloatEditor.module.css';
@@ -69,8 +76,13 @@ export const FloatEditor = ({
   active = true,
 }: FloatEditorProps): ReactElement => {
   const kernel = useKernel();
+  // 与 App / 设置面板共用同一份缓存：settings:changed 会 setQueryData，这里随之重渲染
+  const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: () => kernel.settings.read() });
+  const lineNumbers = settingsQuery.data?.ui.editorLineNumbers !== false;
   /** 选区 AI 的内联结果：流式内容、替换与撤销都只在本次运行内 */
   const inlineAi = useInlineAi(kernel, docId);
+  /** 整篇双语对照：译文只活在阅读态视图里，切换模式即清空 */
+  const translation = useTranslation();
   /** Esc 仲裁层 id：每个浮窗实例独立（多浮窗时后挂载者持有 Esc） */
   const escLayerId = useId();
   const inlineCloseRef = useRef(inlineAi.close);
@@ -83,6 +95,7 @@ export const FloatEditor = ({
     onCursor,
     active,
     inlineCloseRef,
+    lineNumbers,
   });
   const frame = useFloatFrame({ docId, defaultSlot, panelRef: doc.panelRef });
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -163,6 +176,38 @@ export const FloatEditor = ({
     insertLink(view);
   }, [doc]);
 
+  const applyCodeBlock = useCallback((): void => {
+    const view = doc.viewRef.current;
+    if (view === null) return;
+    insertCodeBlock(view);
+  }, [doc]);
+
+  const applyHorizontalRule = useCallback((): void => {
+    const view = doc.viewRef.current;
+    if (view === null) return;
+    insertHorizontalRule(view);
+  }, [doc]);
+
+  const applyTable = useCallback((): void => {
+    const view = doc.viewRef.current;
+    if (view === null) return;
+    insertTable(view);
+  }, [doc]);
+
+  const aiActions = useFloatAiActions(kernel, doc, inlineAi);
+
+  const applyUndo = useCallback((): void => {
+    const view = doc.viewRef.current;
+    if (view === null) return;
+    undo(view);
+  }, [doc]);
+
+  const applyRedo = useCallback((): void => {
+    const view = doc.viewRef.current;
+    if (view === null) return;
+    redo(view);
+  }, [doc]);
+
   /** 进入阅读：记录滚动位置与正文快照，只隐藏 EditorView，不销毁 */
   const enterReadMode = useCallback((): void => {
     const view = doc.viewRef.current;
@@ -186,6 +231,48 @@ export const FloatEditor = ({
     }
     enterReadMode();
   }, [enterReadMode, modeRef, setMode]);
+
+  const translateRestore = translation.restore;
+  const translateStart = translation.start;
+  const translateState = translation.state;
+
+  /** 点「翻译」：编辑态先落到阅读态（用同一份正文快照），再进行中可停止、完成后可收起 */
+  const startTranslation = useCallback((): void => {
+    if (translateState.phase === 'running') {
+      translateRestore();
+      return;
+    }
+    if (translateState.phase === 'done') {
+      translateRestore();
+      return;
+    }
+    const view = doc.viewRef.current;
+    if (view === null) return;
+    const markdown = modeRef.current === 'read' ? doc.readMarkdown : view.state.doc.toString();
+    if (modeRef.current !== 'read') enterReadMode();
+    translateStart(markdown);
+  }, [doc, enterReadMode, modeRef, translateRestore, translateStart, translateState.phase]);
+
+  // 译文只属于阅读态：退回编辑、换文档或关闭浮窗都不保留
+  useEffect(() => {
+    if (mode !== 'read') translateRestore();
+  }, [docId, mode, translateRestore]);
+
+  const translateLabel =
+    translateState.phase === 'running'
+      ? `翻译中 ${translateState.done}/${translateState.total}`
+      : translateState.phase === 'done'
+        ? '收起译文'
+        : '翻译';
+  const translateTitle =
+    translateState.phase === 'running'
+      ? '停止翻译'
+      : translateState.phase === 'done'
+        ? '收起译文，只保留原文'
+        : translation.ready
+          ? '整篇翻译，译文显示在每段下方'
+          : '先在设置里配置 AI 提供方与模型';
+  const translateDisabled = translateState.phase === 'idle' && !translation.ready;
 
   // 退出阅读：焦点先回编辑器，再把进入前的滚动位置写回去（focus 可能触发滚动）
   useLayoutEffect(() => {
@@ -280,6 +367,7 @@ export const FloatEditor = ({
           statusText={phaseInfo.text}
           statusTone={phaseInfo.tone}
           readingMinutes={doc.readingMinutes}
+          wordCount={doc.wordCount}
           autoFocus={focus === 'title' && active}
           focused={focused}
           onCommit={(value) => {
@@ -313,6 +401,11 @@ export const FloatEditor = ({
         onSummaryCommit={(value) => {
           doc.actionsRef.current?.commitSummary(value);
         }}
+        onAiSummary={
+          aiActions.aiModelReady && doc.phase !== 'error' ? aiActions.generateAiSummary : null
+        }
+        aiSummaryBusy={aiActions.aiSummaryBusy}
+        aiSummaryError={aiActions.aiSummaryError}
       />
 
       <FormatToolbar
@@ -323,16 +416,56 @@ export const FloatEditor = ({
         onBlock={applyBlockFormat}
         onHeading={applyHeading}
         onLink={applyLink}
+        onCodeBlock={applyCodeBlock}
+        onHorizontalRule={applyHorizontalRule}
+        onTable={applyTable}
+        onContinue={aiActions.applyContinue}
+        continueDisabled={!aiActions.aiModelReady || kernel.env.readonlyMode}
         onToggleMode={toggleMode}
         onHistory={() => {
           setHistoryOpen(true);
         }}
+        onUndo={applyUndo}
+        onRedo={applyRedo}
+        translateLabel={translateLabel}
+        translateTitle={translateTitle}
+        translateDisabled={translateDisabled}
+        onTranslate={startTranslation}
       />
 
       <div className={styles.content}>
+        {doc.loadFailure === null ? null : (
+          <div className={styles.loadFailure} role="alert">
+            <p className={styles.loadFailureTitle}>
+              {doc.loadFailure.kind === 'permission' ? '无法读取这篇文档' : '读取失败'}
+            </p>
+            <p className={styles.loadFailureText}>
+              {doc.loadFailure.kind === 'permission'
+                ? 'macOS 没有授予 Ember 访问「文稿」文件夹的权限，所以正文显示不出来。文件仍在磁盘上，没有被清空。'
+                : '读取这篇文档时出错，正文暂不可用。'}
+            </p>
+            <p className={styles.loadFailureHint}>
+              {doc.loadFailure.kind === 'permission'
+                ? '请到「系统设置 → 隐私与安全性 → 文件与文件夹」中允许 Ember 访问「文稿」，然后点重试。'
+                : doc.loadFailure.text}
+            </p>
+            <button
+              type="button"
+              className={styles.loadFailureRetry}
+              onClick={doc.retryLoad}
+            >
+              重试
+            </button>
+          </div>
+        )}
         <div className={styles.host} ref={doc.setHost} hidden={mode === 'read'} />
         {mode === 'read' ? (
-          <ReadingView markdown={doc.readMarkdown} onWikiLink={doc.openWikiTarget} />
+          <ReadingView
+            markdown={doc.readMarkdown}
+            onWikiLink={doc.openWikiTarget}
+            translations={translateState.entries}
+            note={translateState.note}
+          />
         ) : (
           <>
             <OutlinePanel

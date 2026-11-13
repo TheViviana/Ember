@@ -190,3 +190,10 @@
   font-size: var(--text-2xs);
   color: var(--ember-text-muted);
 }
+
+/* 简介动作组：AI 简介与收起/展开并排 */
+.summaryActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}

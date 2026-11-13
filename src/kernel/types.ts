@@ -274,8 +274,10 @@ export interface VaultSettings {
     readonly recentCanvasIds?: readonly string[];
     /** 左下角工具入口（能力化，默认关闭）：番茄钟 */
     readonly toolPomodoro?: boolean;
-    /** 左下角工具入口（能力化，默认关闭）：附件面板 */
+    /** 左下角工具入口：图库（附件面板），缺省（老 settings.json 无此键）按开启处理 */
     readonly toolGallery?: boolean;
+    /** 编辑器左侧行号：缺省（老 settings.json 无此键）按开启处理 */
+    readonly editorLineNumbers?: boolean;
     readonly theme: 'ember-black';
     readonly [key: string]: unknown;
   };

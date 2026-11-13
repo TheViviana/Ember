@@ -99,9 +99,9 @@ pub fn default_destination(vault: &Vault) -> String {
         .unwrap_or_else(std::env::temp_dir);
     let stamp = clock::now_iso8601();
     let date = stamp.get(..10).unwrap_or(stamp.as_str());
-    // 没有 ~/Documents 的机器退回家目录，避免预填一个不能用的父路径
-    let documents = home.join("Documents");
-    let base = if documents.is_dir() { documents } else { home };
+    // 不探测 `~/Documents` 是否存在：避免在设置面板加载时就触发 macOS 文稿授权弹窗；
+    // 真正导出时由 `export()` 校验父目录，不存在会给出明确错误。
+    let base = home.join("Documents");
     base.join(format!("Ember Export {} {date}", safe_name(&vault_name(vault))))
         .to_string_lossy()
         .to_string()

@@ -9,7 +9,8 @@ import type {
 } from '#canvas-engine';
 import type { DocId } from '#doc-model';
 import type { CanvasClipboard } from './clipboard.ts';
-import { DEFAULT_NODE_SIZE, boundsOfRects, fitViewport, snapValue, type AnchorSide } from './geometry.ts';
+import { DEFAULT_NODE_SIZE, boundsOfRects, fitViewport, snapValue, worldToScreen, screenToWorld, type AnchorSide } from './geometry.ts';
+import { layout } from '../theme/tokens.ts';
 
 export const NODE_COLORS = ['primary', 'secondary', 'success', 'warning', 'danger'] as const;
 export type NodeColor = (typeof NODE_COLORS)[number];
@@ -74,6 +75,33 @@ export const centeredNodeRect = (
   w: size.w,
   h: size.h,
 });
+
+/**
+ * 把节点中心夹紧到可视区内：高缩放下卡片的屏幕尺寸很大，
+ * 中心若贴着视口边缘（如 153% 缩放时在窗口右缘右键），卡片大半会落在可视区外。
+ * 屏幕坐标下夹紧后换回世界坐标；上下留出顶栏与状态栏带。
+ */
+export const visibleNodeCenter = (
+  center: CanvasPoint,
+  viewport: Viewport,
+  canvas: { readonly width: number; readonly height: number },
+  size: { readonly w: number; readonly h: number } = DEFAULT_NODE_SIZE,
+): CanvasPoint => {
+  const halfW = (size.w * viewport.zoom) / 2;
+  const halfH = (size.h * viewport.zoom) / 2;
+  const screen = worldToScreen(center, viewport);
+  const minX = halfW + 8;
+  const minY = layout.topbarHeight + halfH + 8;
+  const maxX = Math.max(minX, canvas.width - halfW - 8);
+  const maxY = Math.max(minY, canvas.height - layout.statusbarHeight - halfH - 8);
+  return screenToWorld(
+    {
+      x: Math.min(Math.max(screen.x, minX), maxX),
+      y: Math.min(Math.max(screen.y, minY), maxY),
+    },
+    viewport,
+  );
+};
 
 export type CommandPlan =
   | {

@@ -6,6 +6,7 @@ import {
   clampFloatLimit,
   closeFloatWindow,
   deriveStackOrder,
+  evictLeastRecentAndOpen,
   initialFloatData,
   leastRecentWindow,
   openFloatWindow,
@@ -24,7 +25,11 @@ const DOC_H = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V9');
 const DOC_I = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1W2');
 
 /** 以自定义上限构造初始状态（上限来自设置，测试不依赖全局默认值） */
-const withLimit = (limit: number): FloatStoreData => ({ ...initialFloatData, limit });
+const withLimit = (limit: number): FloatStoreData => ({
+  ...initialFloatData,
+  limit,
+  notice: null,
+});
 
 const openAll = (ids: readonly DocId[], limit = 8): FloatStoreData =>
   ids.reduce<FloatStoreData>(
@@ -35,29 +40,53 @@ const openAll = (ids: readonly DocId[], limit = 8): FloatStoreData =>
 const docIds = (state: FloatStoreData): readonly string[] =>
   state.windows.map((window) => String(window.docId));
 
-void test('默认上限 8：第 9 篇静默挤掉最久未激活的一扇，无提示', () => {
-  const full = openAll([DOC_A, DOC_B, DOC_C, DOC_D, DOC_E, DOC_F, DOC_G, DOC_H], 8);
-  assert.equal(full.windows.length, 8);
-
-  const ninth = openFloatWindow(full, DOC_I, 'title');
-  assert.equal(ninth.result, 'opened');
-  assert.equal(ninth.state.windows.length, 8, '挤掉一扇后仍是 8 扇');
-  assert.ok(!docIds(ninth.state).includes(String(DOC_A)), '最久未激活的 A 被挤掉');
-  assert.equal(String(ninth.state.activeId), String(DOC_I));
-});
-
-void test('上限 5：满额打开自动挤掉 LRU，返回 opened 而不是拒绝', () => {
+void test('默认上限 5：第 6 篇被拒绝并记录提示，窗口列表不动', () => {
   const full = openAll([DOC_A, DOC_B, DOC_C, DOC_D, DOC_E], 5);
   assert.equal(full.windows.length, 5);
 
   const sixth = openFloatWindow(full, DOC_F, 'title');
-  assert.equal(sixth.result, 'opened');
-  assert.equal(sixth.state.windows.length, 5);
-  assert.deepEqual(docIds(sixth.state), [DOC_B, DOC_C, DOC_D, DOC_E, DOC_F].map(String));
-  assert.equal(String(sixth.state.activeId), String(DOC_F));
+  assert.equal(sixth.result, 'limit');
+  assert.deepEqual(docIds(sixth.state), docIds(full), '满额拒绝：不挤掉任何一扇');
+  assert.equal(String(sixth.state.activeId), String(full.activeId), '当前窗不变');
+  assert.equal(sixth.state.notice?.requestedDocId, DOC_F);
+  assert.equal(sixth.state.notice?.requestedFocus, 'title');
+  assert.equal(sixth.state.notice?.evictedDocId, DOC_A, '提示里给出最久未激活的候选');
 });
 
-void test('同一篇重复打开只聚焦：nonce 递增、窗口数不变、意图更新', () => {
+void test('默认上限 8：第 9 篇同样拒绝并记录提示', () => {
+  const full = openAll([DOC_A, DOC_B, DOC_C, DOC_D, DOC_E, DOC_F, DOC_G, DOC_H], 8);
+  assert.equal(full.windows.length, 8);
+
+  const ninth = openFloatWindow(full, DOC_I, null);
+  assert.equal(ninth.result, 'limit');
+  assert.equal(ninth.state.windows.length, 8, '窗口列表原样保留');
+  assert.equal(ninth.state.notice?.evictedDocId, DOC_A);
+});
+
+void test('显式挤掉：只关最久未激活的一扇并打开目标，提示清空', () => {
+  const full = openAll([DOC_A, DOC_B, DOC_C, DOC_D, DOC_E], 5);
+  const raised = activateFloatWindow(full, DOC_A);
+
+  const next = evictLeastRecentAndOpen(raised, DOC_F, 'title');
+  assert.equal(next.result, 'opened');
+  assert.deepEqual(docIds(next.state), [
+    String(DOC_A),
+    String(DOC_C),
+    String(DOC_D),
+    String(DOC_E),
+    String(DOC_F),
+  ].map(String), '刚激活过的 A 保留，LRU 的 B 被挤掉');
+  assert.equal(String(next.state.activeId), String(DOC_F));
+  assert.equal(next.state.notice, null);
+});
+
+void test('显式挤掉在窗口列表为空时退化为普通打开', () => {
+  const next = evictLeastRecentAndOpen(withLimit(5), DOC_A, null);
+  assert.equal(next.result, 'opened');
+  assert.deepEqual(docIds(next.state), [String(DOC_A)]);
+});
+
+void test('同一篇重复打开只聚焦：nonce 递增、窗口数不变、意图更新、提示清空', () => {
   const first = openFloatWindow(withLimit(8), DOC_A, null);
   assert.equal(first.result, 'opened');
 
@@ -67,6 +96,7 @@ void test('同一篇重复打开只聚焦：nonce 递增、窗口数不变、意
   assert.equal(again.state.windows[0]?.nonce, 2);
   assert.equal(again.state.windows[0]?.focus, 'title');
   assert.equal(String(again.state.activeId), String(DOC_A));
+  assert.equal(again.state.notice, null);
 });
 
 void test('激活顺序派生 z：后激活者 z 更大，且不单独存 z', () => {
@@ -113,21 +143,28 @@ void test('LRU 跟随激活变化：刚激活过的窗口不会被优先挤掉',
   const raised = activateFloatWindow(state, DOC_A);
   assert.equal(String(leastRecentWindow(raised.windows)?.docId), String(DOC_B));
 
-  const opened = openFloatWindow(raised, DOC_F, 'title');
-  assert.equal(opened.result, 'opened');
-  assert.deepEqual(docIds(opened.state), [
-    String(DOC_A),
-    String(DOC_C),
-    String(DOC_D),
-    String(DOC_E),
-    String(DOC_F),
-  ]);
-  assert.equal(String(opened.state.activeId), String(DOC_F));
+  const rejected = openFloatWindow(raised, DOC_F, 'title');
+  assert.equal(rejected.result, 'limit', '满额只拒绝，不自动挤掉');
+  assert.equal(rejected.state.notice?.evictedDocId, DOC_B, '候选是最久未激活的 B');
 });
 
 void test('重复激活当前窗不推进 tick，避免无意义的 z 抖动', () => {
   const state = openAll([DOC_A, DOC_B]);
   assert.equal(activateFloatWindow(state, DOC_B), state);
+});
+
+void test('提示条生命周期：关闭请求窗或候选窗都会让提示失效', () => {
+  const full = openAll([DOC_A, DOC_B, DOC_C, DOC_D, DOC_E], 5);
+  const rejected = openFloatWindow(full, DOC_F, null);
+  assert.notEqual(rejected.state.notice, null);
+
+  // 关闭待挤掉的那扇 → 提示失效
+  const closedCandidate = closeFloatWindow(rejected.state, rejected.state.notice?.evictedDocId ?? DOC_A);
+  assert.equal(closedCandidate.notice, null);
+
+  // 关闭请求中的那扇不存在于列表，重新构造：关闭其它窗不影响提示
+  const stillThere = closeFloatWindow(rejected.state, DOC_C);
+  assert.notEqual(stillThere.notice, null, '无关窗口关闭不影响提示');
 });
 
 void test('clampFloatLimit：上限夹取到 1..12，非整数向下取整', () => {
@@ -153,6 +190,7 @@ for (const entry of ENTRIES) {
     assert.equal(result.state.windows[0]?.nonce, 1);
     assert.equal(result.state.windows[0]?.focus, entry.focus);
     assert.equal(String(result.state.activeId), String(DOC_A));
+    assert.equal(result.state.notice, null);
   });
 
   void test(`入口「${entry.name}」：已开（后台） → 聚焦置顶，不新增窗口`, () => {
@@ -169,17 +207,19 @@ for (const entry of ENTRIES) {
     assert.equal(String(order[order.length - 1]?.docId), String(DOC_A), '聚焦后 z 最大');
   });
 
-  void test(`入口「${entry.name}」：已满 → 静默挤掉 LRU 并打开目标`, () => {
+  void test(`入口「${entry.name}」：已满 → 拒绝并出提示，不自动挤掉`, () => {
     const full = openAll([DOC_A, DOC_B, DOC_C, DOC_D, DOC_E], 5);
     const result = openFloatWindow(full, DOC_F, entry.focus);
-    assert.equal(result.result, 'opened');
-    assert.equal(result.state.windows.length, 5);
-    assert.ok(!docIds(result.state).includes(String(DOC_A)), 'LRU 被挤掉');
-    assert.ok(docIds(result.state).includes(String(DOC_F)), '目标已打开');
+    assert.equal(result.result, 'limit');
+    assert.deepEqual(docIds(result.state), docIds(full), '窗口列表原样保留');
+    assert.ok(!docIds(result.state).includes(String(DOC_F)), '目标未打开');
+    assert.equal(result.state.notice?.requestedDocId, DOC_F);
+    assert.equal(result.state.notice?.requestedFocus, entry.focus);
+    assert.equal(result.state.notice?.evictedDocId, DOC_A);
   });
 }
 
-void test('store.setLimit：运行中调整上限并夹取', () => {
+void test('store.setLimit：运行中调整上限并夹取，不裁剪已开浮窗', () => {
   useFloatStore.setState(initialFloatData);
   useFloatStore.getState().setLimit(3);
   assert.equal(useFloatStore.getState().limit, 3);
@@ -188,12 +228,38 @@ void test('store.setLimit：运行中调整上限并夹取', () => {
   for (const docId of [DOC_A, DOC_B, DOC_C]) {
     store.open(docId, null);
   }
-  // 第 4 篇：上限 3 → 挤掉最久未激活的 A
-  assert.equal(store.open(DOC_D, null), 'opened');
+  // 上限 3 已满：第 4 篇被拒绝，已开的 3 扇原样保留
+  assert.equal(store.open(DOC_D, null), 'limit');
   assert.equal(useFloatStore.getState().windows.length, 3);
-  assert.ok(!docIds(useFloatStore.getState()).includes(String(DOC_A)));
+  assert.deepEqual(docIds(useFloatStore.getState()), [String(DOC_A), String(DOC_B), String(DOC_C)]);
+
+  // 调小上限也不裁剪：超出部分保持打开，后续新开被拒绝
+  useFloatStore.getState().setLimit(2);
+  assert.equal(useFloatStore.getState().windows.length, 3, '已开浮窗不被静默关闭');
+  assert.equal(useFloatStore.getState().open(DOC_D, null), 'limit');
 
   useFloatStore.getState().setLimit(99);
   assert.equal(useFloatStore.getState().limit, 12);
+  assert.equal(useFloatStore.getState().open(DOC_D, null), 'opened');
+  useFloatStore.setState(initialFloatData);
+});
+
+void test('store.evictLeastRecentAndOpen 与 dismissNotice', () => {
+  useFloatStore.setState(initialFloatData);
+  useFloatStore.getState().setLimit(2);
+  const store = useFloatStore.getState();
+  store.open(DOC_A, null);
+  store.open(DOC_B, null);
+  assert.equal(store.open(DOC_C, null), 'limit');
+  assert.notEqual(useFloatStore.getState().notice, null);
+
+  // 知道了：只清提示，不动窗口
+  useFloatStore.getState().dismissNotice();
+  assert.equal(useFloatStore.getState().notice, null);
+  assert.equal(useFloatStore.getState().windows.length, 2);
+
+  // 显式挤掉：关掉 LRU 的 A，打开 C
+  assert.equal(useFloatStore.getState().evictLeastRecentAndOpen(DOC_C, null), 'opened');
+  assert.deepEqual(docIds(useFloatStore.getState()), [String(DOC_B), String(DOC_C)]);
   useFloatStore.setState(initialFloatData);
 });

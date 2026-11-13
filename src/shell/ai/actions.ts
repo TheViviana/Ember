@@ -7,7 +7,8 @@ export type AiActionId =
   | 'explain'
   | 'extend'
   | 'define'
-  | 'research';
+  | 'research'
+  | 'continue';
 
 /**
  * 产物的落盘方式：
@@ -88,3 +89,16 @@ export const AI_ACTIONS: readonly AiActionDefinition[] = [
 
 export const findAiAction = (id: AiActionId): AiActionDefinition | undefined =>
   AI_ACTIONS.find((action) => action.id === id);
+
+/**
+ * 续写是唯一的光标级操作（无选区）：以光标前的正文为上下文接着写。
+ * 不进选区菜单，走格式工具栏的「续写」按钮。
+ */
+export const AI_CONTINUE_ACTION: AiActionDefinition = {
+  id: 'continue',
+  label: '续写',
+  apply: 'insert',
+  instruction:
+    '续写下面的正文：紧接着「已有正文」的末尾继续写，保持语气、人称与格式一致；' +
+    '不要重复已有内容、不要总结、不要输出任何前后缀或解释。只输出续写的新内容。',
+};

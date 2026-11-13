@@ -9,9 +9,12 @@ import styles from './ToolRail.module.css';
 export interface ToolRailProps {
   /** 工具能力化开关（settings.ui.tool*，默认全关）：关闭时入口不出现 */
   readonly entries: { readonly pomodoro: boolean; readonly gallery: boolean };
-  /** 附件面板入口（与左下角按钮同一开关态，面板本体由 App 挂载） */
+  /** 图库（附件面板）入口（与左下角按钮同一开关态，面板本体由 App 挂载） */
   readonly onOpenAttachments: () => void;
   readonly attachmentsOpen: boolean;
+  /** 今日回顾层：机器本地记忆，按当前画布开关（层本体由 CanvasSurface 挂载） */
+  readonly recentEditsOpen: boolean;
+  readonly onToggleRecentEdits: () => void;
 }
 
 /**
@@ -20,7 +23,13 @@ export interface ToolRailProps {
  * 入口增删只影响它自己的位置，前面的按钮不会被顶动。
  * 同一时间只展开一个工具面板，避免两个浮层在左下角互相遮挡。
  */
-export const ToolRail = ({ entries, onOpenAttachments, attachmentsOpen }: ToolRailProps): ReactElement => {
+export const ToolRail = ({
+  entries,
+  onOpenAttachments,
+  attachmentsOpen,
+  recentEditsOpen,
+  onToggleRecentEdits,
+}: ToolRailProps): ReactElement => {
   const [panel, setPanel] = useState<ToolPanelKey | null>(null);
 
   // 命令总线的「打开某面板」与横排按钮共用同一份开关状态
@@ -69,12 +78,21 @@ export const ToolRail = ({ entries, onOpenAttachments, attachmentsOpen }: ToolRa
           type="button"
           className={entryStyles.entry}
           aria-expanded={attachmentsOpen}
-          title="附件面板"
+          title="图库（附件面板）"
           onClick={onOpenAttachments}
         >
-          ◧ 附件
+          ◧ 图库
         </button>
       ) : null}
+      <button
+        type="button"
+        className={entryStyles.entry}
+        aria-expanded={recentEditsOpen}
+        title="今日回顾（最近编辑的文档）"
+        onClick={onToggleRecentEdits}
+      >
+        今日回顾
+      </button>
       <FloatSwitcher />
     </div>
   );

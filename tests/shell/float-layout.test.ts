@@ -116,6 +116,32 @@ void test('拖动浮窗：跟手移动，整块夹在容器内', () => {
   });
 });
 
+void test('顶部留出外壳高度：拖到最顶也停在顶栏下方，比容器高时同样不越界', () => {
+  const container = { width: 1200, height: 800, topInset: 60 };
+  assert.deepEqual(moveFloatFrame(START, -9999, -9999, container), {
+    left: 0,
+    top: 60,
+    width: 600,
+    height: 400,
+  });
+  // 浮窗比容器还高时钉在留白下沿，标题栏仍可点
+  const tall: FloatFrame = { left: 0, top: 60, width: 600, height: 900 };
+  assert.deepEqual(moveFloatFrame(tall, 0, -50, container), {
+    left: 0,
+    top: 60,
+    width: 600,
+    height: 900,
+  });
+  // 恢复记忆位置时也按同样下限夹紧
+  assert.equal(moveFloatFrame({ ...START, top: 0 }, 0, 0, container).top, 60);
+});
+
+void test('向北放大同样受顶部留白约束', () => {
+  const frame: FloatFrame = { left: 100, top: 60, width: 600, height: 400 };
+  const next = resolveFloatResize('nw', frame, 0, -200, { ...ROOMY, topInset: 60 });
+  assert.equal(next.top, 60);
+});
+
 void test('首次摆放贴住右下角，尺寸只来自记忆值', () => {
   assert.deepEqual(initialFloatFrame({ width: 1200, height: 800 }, { width: 640, height: 480 }, { right: 24, bottom: 50 }), {
     left: 536,

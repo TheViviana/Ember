@@ -6,7 +6,7 @@ import type { KernelContext } from '../../kernel/context.ts';
 import type { DocRevision } from '../../kernel/types.ts';
 import { findAiAction, type AiActionId, type AiApplyMode } from './actions.ts';
 import { readonlyText } from '../components/readonly-text.ts';
-import { buildSelectionPrompt, SYSTEM_PROMPT } from './context.ts';
+import { buildContinuePrompt, buildSelectionPrompt, SYSTEM_PROMPT } from './context.ts';
 import { undoLabel, undoProposalDoc, type UndoAction } from './proposal.ts';
 
 /** 相对浮窗面板左上角的选区矩形，进入内联块后即冻结 */
@@ -66,6 +66,8 @@ interface RunMeta {
  * 选区 AI 的内联会话：流式结果、丢弃、替换与撤销都只活在当前浮窗内，
  * 不写 ui.json，也不用 localStorage。同一时间只保留一个内联块。
  */
+export type InlineAi = ReturnType<typeof useInlineAi>;
+
 export const useInlineAi = (kernel: KernelContext, docId: DocId) => {
   const ai = useMachineStore((state) => state.ai);
   const [run, setRun] = useState<InlineRun | null>(null);
@@ -114,7 +116,15 @@ export const useInlineAi = (kernel: KernelContext, docId: DocId) => {
         return;
       }
       const action = findAiAction(input.action);
-      if (action === undefined || input.to <= input.from || input.text.trim() === '') return;
+      if (action === undefined) return;
+      // 续写是光标级操作（from === to），text 里装的是光标前的上下文；
+      // 其余操作必须有非空选区
+      const isContinue = input.action === 'continue';
+      if (isContinue) {
+        if (input.from !== input.to || input.text.trim() === '') return;
+      } else if (input.to <= input.from || input.text.trim() === '') {
+        return;
+      }
 
       cancelSession();
       runIdRef.current += 1;
@@ -159,11 +169,14 @@ export const useInlineAi = (kernel: KernelContext, docId: DocId) => {
             base: meta.rev,
             from: input.from,
             to: input.to,
-            selected: input.text,
+            // 续写没有选区：偏移处是空串，落盘前的区间复核仍然成立
+            selected: isContinue ? '' : input.text,
             title: meta.title,
             readBody: input.readBody,
           };
-          const prompt = buildSelectionPrompt(action.id, meta.title, input.text);
+          const prompt = isContinue
+            ? buildContinuePrompt(meta.title, input.text)
+            : buildSelectionPrompt(action.id, meta.title, input.text);
           const session = startChat(
             ai,
             [
@@ -312,7 +325,11 @@ export const useInlineAi = (kernel: KernelContext, docId: DocId) => {
           ...current,
           phase: 'replaced',
           busy: false,
-          notice: inserting ? '已插入到选区之后' : '已替换选中文本',
+          notice: inserting
+            ? current.action === 'continue'
+              ? '已在光标处续写'
+              : '已插入到选区之后'
+            : '已替换选中文本',
           undoText: inserting ? `撤销插入《${meta.title}》` : undoLabel(undo),
         }));
       } catch (cause) {

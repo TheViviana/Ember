@@ -66,6 +66,8 @@ const normalizeSettings = (raw: unknown, fallback: VaultSettings): VaultSettings
     typeof floatLimitRaw === 'number' && Number.isFinite(floatLimitRaw)
       ? Math.min(Math.max(Math.trunc(floatLimitRaw), 1), 12)
       : undefined;
+  // 老 settings.json 没有该键：缺省开启行号，保持既有观感
+  const editorLineNumbers = rawUi['editorLineNumbers'] !== false;
   const recentCanvasIds = Array.isArray(rawUi['recentCanvasIds'])
     ? rawUi['recentCanvasIds']
         .filter((item): item is string => typeof item === 'string')
@@ -100,6 +102,7 @@ const normalizeSettings = (raw: unknown, fallback: VaultSettings): VaultSettings
       ...(defaultCanvasId === undefined ? {} : { defaultCanvasId }),
       ...(overviewCanvasId === undefined ? {} : { overviewCanvasId }),
       ...(floatLimit === undefined ? {} : { floatLimit }),
+      editorLineNumbers,
       ...(recentCanvasIds === undefined ? {} : { recentCanvasIds }),
       ...(() => {
         const flags: Record<string, boolean> = {};

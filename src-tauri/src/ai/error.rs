@@ -15,6 +15,8 @@ pub enum AiError {
     RateLimited,
     #[error("请求超时")]
     Timeout,
+    #[error("连接服务超时")]
+    ConnectTimeout,
     #[error("网络请求失败")]
     Network,
     #[error("模型不可用：可能未下载或名称不对")]
@@ -39,6 +41,7 @@ impl AiError {
             AiError::Unauthorized => "ai_unauthorized",
             AiError::RateLimited => "ai_rate_limited",
             AiError::Timeout => "ai_timeout",
+            AiError::ConnectTimeout => "ai_connect_timeout",
             AiError::Network => "ai_network",
             AiError::ModelUnavailable => "ai_model_unavailable",
             AiError::UnsupportedProvider => "ai_unsupported_provider",

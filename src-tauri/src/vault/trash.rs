@@ -5,17 +5,65 @@
 //!
 //! `unsafe` 只允许出现在本文件：objc2 的 FFI 边界集中在这里，每处都写明前置条件。
 
+#[cfg(target_os = "macos")]
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{VaultError, VaultResult};
 
-/// 非 macOS：明确报错，而不是悄悄永久删除。
-#[cfg(not(target_os = "macos"))]
-pub fn trash(_root: &Path, absolute: &Path) -> VaultResult<()> {
-    Err(VaultError::IoAt {
-        path: absolute.display().to_string(),
-        message: "当前平台不支持系统回收站，删除被拒绝（不会永久删除文件）".to_string(),
-    })
+#[cfg(target_os = "macos")]
+use super::paths;
+
+
+
+/// 删除落点：system = 系统回收站；internal = 库内回收目录（30 天后启动清扫回收）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrashDestination {
+    System,
+    Internal,
+}
+
+impl TrashDestination {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrashDestination::System => "system",
+            TrashDestination::Internal => "internal",
+        }
+    }
+}
+
+/// 用户删除的唯一入口：优先系统回收站；系统回收站不可用时降级为库内回收目录。
+///
+/// 常见降级场景：库在 `~/Documents` 下时，macOS 只授予了文稿目录的 TCC 权限，
+/// 而系统回收站要写 `~/.Trash`——同一授权域之外，`trashItemAtURL` 会报
+/// 「you don't have permission to access it」。降级动作是库内的普通 rename
+/// （`.workbench/trash/<ULID>/`，30 天后由启动清扫回收），不需要任何额外权限，
+/// 文件同样可找回，绝不静默永久删除。
+pub fn trash(root: &Path, absolute: &Path) -> VaultResult<TrashDestination> {
+    #[cfg(target_os = "macos")]
+    {
+        // 1) NSFileManager：有 ~/.Trash 写权限（全盘授权、或库不在 TCC 域内）时最快
+        if trash_system(root, absolute).is_ok() {
+            return Ok(TrashDestination::System);
+        }
+        // 2) Finder 代删：只有「文稿」授权的库（如 ~/Documents/EmberVault）写不了
+        //    ~/.Trash，但有全盘权限的 Finder 可以——macOS 标准绕行，首次会请求
+        //    「控制 Finder」的自动化授权。落点同样是系统回收站。
+        if trash_via_finder(absolute).is_ok() {
+            return Ok(TrashDestination::System);
+        }
+        // 3) 库内回收目录：前两者都不可用时兜底（30 天后启动清扫回收，可找回）
+        trash_internal(root, absolute).map(|()| TrashDestination::Internal)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // 非 macOS：无系统回收站 API，保持既有契约——明确拒绝，绝不永久删除
+        let _ = (root, absolute);
+        Err(VaultError::IoAt {
+            path: absolute.display().to_string(),
+            message: "当前平台不支持系统回收站，删除被拒绝（不会永久删除文件）".to_string(),
+        })
+    }
 }
 
 /// 把 `absolute` 移入系统回收站，并校验转移结果。
@@ -25,7 +73,7 @@ pub fn trash(_root: &Path, absolute: &Path) -> VaultResult<()> {
 /// 2. 系统返回的 `resultingItemURL` 必须存在；
 /// 3. 落点不得仍在库根内（防止 API 把文件挪进 `.workbench/` 之类的地方）。
 #[cfg(target_os = "macos")]
-pub fn trash(root: &Path, absolute: &Path) -> VaultResult<()> {
+fn trash_system(root: &Path, absolute: &Path) -> VaultResult<()> {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2_foundation::{NSFileManager, NSNumber, NSString, NSURL, NSURLVolumeIsLocalKey};
@@ -104,6 +152,75 @@ pub fn trash(root: &Path, absolute: &Path) -> VaultResult<()> {
     Ok(())
 }
 
+/// 让 Finder 代为入篓：Finder 持有全盘权限，能写入 `~/.Trash`。
+/// 适用场景：应用只有「文稿」TCC 授权、`trashItemAtURL` 报权限不足的日常库。
+/// 首次调用会触发一次「Ember 想控制 Finder」的自动化授权；拒绝则此路永久失败，
+/// 上层自动落到库内回收目录。校验口径与系统回收站一致：源文件必须消失。
+#[cfg(target_os = "macos")]
+fn trash_via_finder(absolute: &Path) -> VaultResult<()> {
+    // AppleScript 字符串转义：反斜杠与双引号（库内路径可含空格与 CJK，双引号包裹即可）
+    let escaped = absolute
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let script = format!(
+        "tell application \"Finder\" to delete (POSIX file \"{escaped}\" as alias)"
+    );
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .map_err(|error| io_at(absolute, &format!("无法调用 Finder：{error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(io_at(
+            absolute,
+            &format!("Finder 删除失败：{}", stderr.trim()),
+        ));
+    }
+    // 校验：源文件必须已离开库内
+    if std::fs::symlink_metadata(absolute).is_ok() {
+        return Err(io_at(
+            absolute,
+            "Finder 调用成功，但源文件仍在库内",
+        ));
+    }
+    Ok(())
+}
+
+/// 降级落点：库内回收目录 `.workbench/trash/<ULID>/<文件名>`。
+/// 普通 rename，不依赖任何 TCC 授权；30 天后由启动清扫（sweep_expired_trash）回收。
+#[cfg(target_os = "macos")]
+fn trash_internal(root: &Path, absolute: &Path) -> VaultResult<()> {
+    let ulid = crate::vault::ulid::generate();
+    let dir = root.join(paths::WORKBENCH_DIR).join("trash").join(&ulid);
+    fs::create_dir_all(&dir).map_err(|error| io_at(&dir, &error.to_string()))?;
+    let file_name = absolute
+        .file_name()
+        .ok_or_else(|| VaultError::PathOutside(absolute.display().to_string()))?;
+    let target = dir.join(file_name);
+    fs::rename(absolute, &target).map_err(|error| io_at(absolute, &error.to_string()))?;
+    // 校验：源已消失、落点存在（与系统回收站同一验收口径）
+    if symlink_metadata_ok(absolute) {
+        return Err(io_at(
+            absolute,
+            "库内回收目录移动后源文件仍在库内",
+        ));
+    }
+    if !target.is_file() {
+        return Err(io_at(
+            absolute,
+            "库内回收目录落点不存在，无法确认删除结果",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn symlink_metadata_ok(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
 /// 卷类型裁决：拿不到结论时按失败处理（fail-closed），避免把库外文件误移。
 #[cfg(target_os = "macos")]
 fn ensure_local_volume(is_local: Option<bool>, absolute: &Path) -> VaultResult<()> {
@@ -137,6 +254,8 @@ fn io_at(absolute: &Path, message: &str) -> VaultError {
     }
 }
 
+
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -157,5 +276,31 @@ mod tests {
     #[test]
     fn local_volume_passes_precheck() {
         ensure_local_volume(Some(true), Path::new("/tmp/x.md")).unwrap();
+    }
+
+    #[test]
+    fn internal_trash_fallback_moves_file_into_workbench_trash() {
+        let seq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("ember-trash-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("media").join("aa").join("test.png");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"png").unwrap();
+
+        trash_internal(&root, &file).unwrap();
+
+        // 源消失
+        assert!(!file.exists());
+        // 落点在库内回收目录：.workbench/trash/<ULID>/test.png
+        let trash_dir = root.join(paths::WORKBENCH_DIR).join("trash");
+        let mut entries = std::fs::read_dir(&trash_dir).unwrap();
+        let entry = entries.next().unwrap().unwrap();
+        let restored = entry.path().join("test.png");
+        assert!(restored.is_file(), "落点应存在：{}", restored.display());
+        assert!(std::fs::read(&restored).unwrap() == b"png");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

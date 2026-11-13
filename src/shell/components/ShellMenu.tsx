@@ -11,6 +11,9 @@ export interface ShellMenuProps {
   readonly aiOpen: boolean;
   readonly onToggleAi: () => void;
   readonly onOpenSettings: () => void;
+  readonly onOpenReplace: () => void;
+  readonly onExportPdf: () => void;
+  readonly exportDisabled: boolean;
 }
 
 const LAYER_ID = 'shell-menu';
@@ -25,6 +28,9 @@ export const ShellMenu = ({
   aiOpen,
   onToggleAi,
   onOpenSettings,
+  onOpenReplace,
+  onExportPdf,
+  exportDisabled,
 }: ShellMenuProps): ReactElement => {
   const [open, setOpen] = useState(false);
   const [section, setSection] = useState<'filter' | 'bookmarks' | null>(null);
@@ -163,6 +169,26 @@ export const ShellMenu = ({
               ⚙
             </span>
             设置
+          </button>
+          <button type="button" className={styles.item} onClick={run(onOpenReplace)}>
+            <span className={styles.icon} aria-hidden="true">
+              ⇄
+            </span>
+            全局替换
+          </button>
+
+          <p className={styles.sectionLabel}>导出</p>
+          <button
+            type="button"
+            className={styles.item}
+            disabled={exportDisabled}
+            title={exportDisabled ? '先打开一篇文档浮窗再导出' : '把当前浮窗文档打印为 PDF（走系统打印对话框）'}
+            onClick={run(onExportPdf)}
+          >
+            <span className={styles.icon} aria-hidden="true">
+              ⎙
+            </span>
+            导出当前文档 PDF
           </button>
 
           <p className={styles.sectionLabel}>导入</p>

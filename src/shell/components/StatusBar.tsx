@@ -11,6 +11,8 @@ export interface StatusBarProps {
   readonly commandCount: number;
   /** 关窗落盘失败等需要常驻提示的信息；null/undefined 时不占位 */
   readonly notice?: string | null;
+  /** 当前最前浮窗文档的库内路径；null 表示没有打开的文档 */
+  readonly docPath?: string | null;
 }
 
 const Chevron = ({ collapsed }: { readonly collapsed: boolean }): ReactElement => (
@@ -32,10 +34,26 @@ export const StatusBar = ({
   documentCount,
   commandCount,
   notice,
+  docPath = null,
 }: StatusBarProps): ReactElement => {
   // 只订阅光标切片：输入时只有状态栏重渲染
   const cursor = useCursorStore((state) => state.cursor);
   const [collapsed, setCollapsed] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  /** 点击复制文档路径；复制结果用短暂反馈代替剪贴板权限提示 */
+  const copyPath = (): void => {
+    if (docPath === null || docPath.length === 0) return;
+    void navigator.clipboard
+      .writeText(docPath)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => {
+          setCopied(false);
+        }, 1200);
+      })
+      .catch(() => undefined);
+  };
 
   return (
     <footer className={styles.statusbar} data-collapsed={collapsed ? 'true' : 'false'}>
@@ -78,6 +96,19 @@ export const StatusBar = ({
                 <span className={styles.statusGroup}>
                   行 {cursor.line}，列 {cursor.column}
                 </span>
+              </>
+            )}
+            {docPath === null || docPath.length === 0 ? null : (
+              <>
+                <span className={styles.sep}>│</span>
+                <button
+                  type="button"
+                  className={styles.pathButton}
+                  title={`点击复制文档路径：${docPath}`}
+                  onClick={copyPath}
+                >
+                  {copied ? '已复制 ✓' : docPath}
+                </button>
               </>
             )}
           </div>

@@ -64,7 +64,10 @@
 
 .edgeHit {
   fill: none;
-  stroke: transparent;
+  /* 不能用全透明描边：WKWebView 对 alpha=0 的 stroke 不做指针命中，
+   * 连线左键会整个点不中。2% 不透明度肉眼不可见，但命中测试有效。 */
+  stroke: var(--ember-edge);
+  stroke-opacity: 0.02;
   stroke-width: calc(var(--ember-edge-hit-width) / var(--viewport-zoom));
   pointer-events: stroke;
   cursor: pointer;

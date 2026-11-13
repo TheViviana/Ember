@@ -267,6 +267,10 @@ fn parse_model_names(bytes: &[u8]) -> AiResult<Vec<String>> {
 }
 
 fn map_request_error(error: reqwest::Error) -> AiError {
+    // 连接超时与读超时要分开：连接都没建立时，前端不能宣称「已连上」
+    if error.is_timeout() && error.is_connect() {
+        return AiError::ConnectTimeout;
+    }
     if error.is_timeout() {
         AiError::Timeout
     } else {

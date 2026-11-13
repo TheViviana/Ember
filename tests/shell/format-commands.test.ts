@@ -118,5 +118,7 @@ void test('普通文本不误报格式状态', () => {
     quote: false,
     list: null,
     inCodeBlock: false,
+    canUndo: false,
+    canRedo: false,
   });
 });

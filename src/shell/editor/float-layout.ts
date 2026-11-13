@@ -28,6 +28,8 @@ export interface FloatBounds {
   readonly maxHeight: number;
   readonly minWidth?: number;
   readonly minHeight?: number;
+  /** 顶部被外壳（顶栏）占用的高度：缩放时标题栏同样不能进入这一带 */
+  readonly topInset?: number;
 }
 
 export interface FloatInset {
@@ -38,6 +40,12 @@ export interface FloatInset {
 export interface FloatContainer {
   readonly width: number;
   readonly height: number;
+  /**
+   * 顶部被外壳（顶栏）占用的高度。
+   * 浮窗容器与顶栏同源、都从窗口顶端开始，标题栏一旦进入这条带就会被顶栏盖住，
+   * 指针落在顶栏的拖拽区上，浮窗既激活不了也拖不回来。
+   */
+  readonly topInset?: number;
 }
 
 const clamp = (value: number, min: number, max: number): number => Math.min(Math.max(value, min), max);
@@ -72,7 +80,9 @@ export const resolveFloatResize = (
 
   const size = clampFloatSize({ width, height }, bounds);
   const left = zone.includes('w') ? start.left + (start.width - size.width) : start.left;
-  const top = zone.includes('n') ? start.top + (start.height - size.height) : start.top;
+  const rawTop = zone.includes('n') ? start.top + (start.height - size.height) : start.top;
+  // 向北放大时左上角会顶进顶栏带，按同样的下限挡住，标题栏保持可点
+  const top = Math.max(bounds.topInset ?? 0, rawTop);
 
   return {
     left: Math.round(left),
@@ -98,12 +108,20 @@ export const moveFloatFrame = (
   deltaX: number,
   deltaY: number,
   container: FloatContainer,
-): FloatFrame => ({
-  left: Math.round(clampAxis(start.left + deltaX, start.width, container.width, false)),
-  top: Math.round(clampAxis(start.top + deltaY, start.height, container.height, true)),
-  width: start.width,
-  height: start.height,
-});
+): FloatFrame => {
+  const topInset = Math.max(0, container.topInset ?? 0);
+  // 纵向：至少留出外壳高度；比容器还高时也钉在这条线上，标题栏始终可点
+  const top =
+    Number.isFinite(container.height) && container.height > 0
+      ? clamp(start.top + deltaY, topInset, Math.max(topInset, container.height - start.height))
+      : start.top + deltaY;
+  return {
+    left: Math.round(clampAxis(start.left + deltaX, start.width, container.width, false)),
+    top: Math.round(top),
+    width: start.width,
+    height: start.height,
+  };
+};
 
 /** 首次打开时靠右下角摆放；之后尺寸与位置由 docId 记忆恢复。 */
 export const initialFloatFrame = (

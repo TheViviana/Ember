@@ -1,5 +1,9 @@
+import { useQuery } from '@tanstack/react-query';
 import { useEffect, useMemo, type ReactElement } from 'react';
+import type { DocId } from '#doc-model';
 import { cssVars } from '../canvas/css-vars.ts';
+import { useKernel } from '../kernel-provider.tsx';
+import { openFloatSwitcher } from './float-switcher-signal.ts';
 import type { CursorPosition } from './cursor.ts';
 import { FloatEditor } from './FloatEditor.tsx';
 import { deriveStackOrder, useFloatStore } from './float-store.ts';
@@ -14,11 +18,14 @@ export interface FloatLayerProps {
 /**
  * 多浮窗层：只订阅窗口元数据，不持有正文/光标/保存状态。
  * z 序由激活顺序派生；点击任意一扇通过捕获阶段置顶。
- * 满额时浮窗 store 会静默挤掉最久未激活的一扇，这里不再有挤占提示条。
+ * 满额时浮窗 store 拒绝新开并出提示条，挤掉哪一扇由用户显式决定。
  */
 export const FloatLayer = ({ onCursor }: FloatLayerProps): ReactElement => {
+  const kernel = useKernel();
   const windows = useFloatStore((state) => state.windows);
   const activeId = useFloatStore((state) => state.activeId);
+  const limit = useFloatStore((state) => state.limit);
+  const notice = useFloatStore((state) => state.notice);
   const focusActive = useFocusStore((state) => state.active);
   const focusDocId = useFocusStore((state) => state.docId);
 
@@ -46,6 +53,23 @@ export const FloatLayer = ({ onCursor }: FloatLayerProps): ReactElement => {
     for (const entry of stack) map.set(String(entry.docId), entry.z);
     return map;
   }, [stack]);
+
+  const documents = useQuery({ queryKey: ['docs', 'list'], queryFn: () => kernel.docs.list() });
+  const titleById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const doc of documents.data ?? []) {
+      map.set(String(doc.id), doc.title);
+    }
+    return map;
+  }, [documents.data]);
+
+  const titleOf = (docId: DocId): string => {
+    const title = titleById.get(String(docId));
+    return title === undefined || title.trim().length === 0 ? '未命名文档' : title;
+  };
+  const requestedTitle = notice === null ? '' : titleOf(notice.requestedDocId);
+  const evictedTitle =
+    notice === null || notice.evictedDocId === null ? '' : titleOf(notice.evictedDocId);
 
   return (
     <>
@@ -82,6 +106,46 @@ export const FloatLayer = ({ onCursor }: FloatLayerProps): ReactElement => {
           </div>
         );
       })}
+      {notice === null || focusActive ? null : (
+        <div className={styles.notice} data-canvas-overlay role="status">
+          <p className={styles.noticeText}>
+            浮窗已达上限 {limit} 篇，未打开《{requestedTitle}》。
+          </p>
+          <div className={styles.noticeActions}>
+            {notice.evictedDocId === null ? null : (
+              <button
+                type="button"
+                className={styles.primary}
+                onClick={() => {
+                  useFloatStore
+                    .getState()
+                    .evictLeastRecentAndOpen(notice.requestedDocId, notice.requestedFocus);
+                }}
+              >
+                关闭最久未激活的《{evictedTitle}》并打开
+              </button>
+            )}
+            <button
+              type="button"
+              className={styles.secondary}
+              onClick={() => {
+                openFloatSwitcher();
+              }}
+            >
+              查看已打开
+            </button>
+            <button
+              type="button"
+              className={styles.secondary}
+              onClick={() => {
+                useFloatStore.getState().dismissNotice();
+              }}
+            >
+              知道了
+            </button>
+          </div>
+        </div>
+      )}
     </>
   );
 };

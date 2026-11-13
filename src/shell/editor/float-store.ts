@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import type { DocId } from '#doc-model';
 
 /** 文章浮窗上限的默认值（可在设置里调整，settings.ui.floatLimit） */
-export const DEFAULT_FLOAT_LIMIT = 8;
+export const DEFAULT_FLOAT_LIMIT = 5;
 /** 浮窗上限的合法区间（与 settings-service 的归一化一致） */
 export const FLOAT_LIMIT_MIN = 1;
 export const FLOAT_LIMIT_MAX = 12;
@@ -18,22 +18,35 @@ export interface FloatWindow {
   readonly lastActiveAt: number;
 }
 
+/** 满额拒绝时的提示：谁没打开、可以挤掉谁（由用户显式确认，绝不自动挤） */
+export interface FloatLimitNotice {
+  readonly requestedDocId: DocId;
+  readonly requestedFocus: 'title' | null;
+  /** 满额时最久未激活的窗口；null 表示没有可挤掉的窗口 */
+  readonly evictedDocId: DocId | null;
+}
+
 export interface FloatStoreData {
   readonly windows: readonly FloatWindow[];
   readonly activeId: DocId | null;
   /** 单调计数，代替 Date.now()，让激活顺序可预测、可测试 */
   readonly tick: number;
-  /** 当前上限：来自设置，满额时静默挤掉最久未激活的一扇 */
+  /** 当前上限：来自设置，满额时拒绝新开并出提示条 */
   readonly limit: number;
+  /** 满额拒绝提示；打开成功或用户关闭提示后为 null */
+  readonly notice: FloatLimitNotice | null;
 }
 
-export type FloatOpenResult = 'opened' | 'focused';
+export type FloatOpenResult = 'opened' | 'focused' | 'limit';
 
 export interface FloatStore extends FloatStoreData {
   readonly open: (docId: DocId, focus: 'title' | null) => FloatOpenResult;
   readonly close: (docId: DocId) => void;
   readonly activate: (docId: DocId) => void;
   readonly setLimit: (limit: number) => void;
+  /** 用户在提示条上显式点击「关闭最久未看的一篇并打开」时调用 */
+  readonly evictLeastRecentAndOpen: (docId: DocId, focus: 'title' | null) => FloatOpenResult;
+  readonly dismissNotice: () => void;
 }
 
 export const initialFloatData: FloatStoreData = {
@@ -41,6 +54,7 @@ export const initialFloatData: FloatStoreData = {
   activeId: null,
   tick: 0,
   limit: DEFAULT_FLOAT_LIMIT,
+  notice: null,
 };
 
 export const clampFloatLimit = (value: number): number =>
@@ -86,7 +100,7 @@ export const deriveStackOrder = (
 
 /**
  * 打开 / 聚焦：已开只更新激活序号与 nonce；
- * 满额时静默挤掉最久未激活的一扇再打开（多文档浮窗：默认 8 可配置，去掉挤占提示）。
+ * 满额拒绝并记录提示（用户可显式挤掉或关闭提示），绝不静默关掉已开浮窗。
  */
 export const openFloatWindow = (
   state: FloatStoreData,
@@ -107,30 +121,50 @@ export const openFloatWindow = (
         activeId: docId,
         tick,
         limit: state.limit,
+        notice: null,
       },
     };
   }
 
-  const base =
-    state.windows.length >= state.limit
-      ? (() => {
-          const oldest = leastRecentWindow(state.windows);
-          return oldest === null
-            ? state.windows
-            : state.windows.filter((window) => !sameDoc(window.docId, oldest.docId));
-        })()
-      : state.windows;
+  if (state.windows.length >= state.limit) {
+    const oldest = leastRecentWindow(state.windows);
+    return {
+      result: 'limit',
+      state: {
+        ...state,
+        notice: {
+          requestedDocId: docId,
+          requestedFocus: focus,
+          evictedDocId: oldest === null ? null : oldest.docId,
+        },
+      },
+    };
+  }
 
   const tick = state.tick + 1;
   return {
     result: 'opened',
     state: {
-      windows: [...base, { docId, focus, nonce: 1, lastActiveAt: tick }],
+      windows: [...state.windows, { docId, focus, nonce: 1, lastActiveAt: tick }],
       activeId: docId,
       tick,
       limit: state.limit,
+      notice: null,
     },
   };
+};
+
+/** 用户显式确认挤掉：只关最久未激活的一扇并打开请求的那篇 */
+export const evictLeastRecentAndOpen = (
+  state: FloatStoreData,
+  docId: DocId,
+  focus: 'title' | null,
+): { readonly state: FloatStoreData; readonly result: FloatOpenResult } => {
+  const oldest = leastRecentWindow(state.windows);
+  if (oldest === null) return openFloatWindow(state, docId, focus);
+  const withoutOldest = closeFloatWindow(state, oldest.docId);
+  const next = openFloatWindow({ ...withoutOldest, notice: null }, docId, focus);
+  return next;
 };
 
 export const closeFloatWindow = (state: FloatStoreData, docId: DocId): FloatStoreData => {
@@ -140,7 +174,14 @@ export const closeFloatWindow = (state: FloatStoreData, docId: DocId): FloatStor
     state.activeId !== null && sameDoc(state.activeId, docId)
       ? (mostRecentWindow(windows)?.docId ?? null)
       : state.activeId;
-  return { ...state, windows, activeId };
+  // 提示里任一相关窗口被关闭（请求的或待挤掉的）都让提示失效，避免指向已不存在的窗口
+  const notice =
+    state.notice !== null &&
+    (sameDoc(state.notice.requestedDocId, docId) ||
+      (state.notice.evictedDocId !== null && sameDoc(state.notice.evictedDocId, docId)))
+      ? null
+      : state.notice;
+  return { ...state, windows, activeId, notice };
 };
 
 export const activateFloatWindow = (state: FloatStoreData, docId: DocId): FloatStoreData => {
@@ -172,23 +213,16 @@ export const useFloatStore = create<FloatStore>((set, get) => ({
   },
   setLimit: (limit) => {
     const next = clampFloatLimit(limit);
-    // 上限调小立即裁剪到新上限：设置语义就是「最多同时 N 扇」
-    set((state) => {
-      if (state.windows.length <= next) return { limit: next };
-      // 裁掉最久未激活的，保留最近激活的 next 扇
-      const keep = [...state.windows]
-        .sort(
-          (left, right) =>
-            right.lastActiveAt - left.lastActiveAt ||
-            String(right.docId).localeCompare(String(left.docId)),
-        )
-        .slice(0, next);
-      const keepIds = new Set(keep.map((window) => String(window.docId)));
-      const activeId =
-        state.activeId !== null && keepIds.has(String(state.activeId))
-          ? state.activeId
-          : (keep[0]?.docId ?? null);
-      return { limit: next, windows: keep, activeId };
-    });
+    // 只改上限，不裁剪已开浮窗：静默关窗就是这次要修掉的行为。
+    // 已开数超过新上限时，后续打开会被拒绝并出提示条，用户可自行关闭多余的浮窗。
+    set({ limit: next });
+  },
+  evictLeastRecentAndOpen: (docId, focus) => {
+    const next = evictLeastRecentAndOpen(get(), docId, focus);
+    set(next.state);
+    return next.result;
+  },
+  dismissNotice: () => {
+    set((state) => (state.notice === null ? state : { ...state, notice: null }));
   },
 }));

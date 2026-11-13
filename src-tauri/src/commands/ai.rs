@@ -103,7 +103,16 @@ pub fn ai_key_status(state: State<'_, AiState>, config: AiConfigInput) -> AiResu
 
 #[tauri::command]
 pub fn ai_key_delete(state: State<'_, AiState>, config: AiConfigInput) -> AiResult<()> {
-    state.keys.delete(&config.account()?)
+    let account = config.account()?;
+    match state.keys.delete(&account) {
+        Ok(()) => Ok(()),
+        // 钥匙串整体不可用时，可读状态只剩会话内存，而 delete 已经把它清掉——
+        // 此时报「删除失败」反而会让界面停在「已保存」的假象，按成功回报。
+        Err(AiError::KeychainUnavailable) if matches!(state.keys.read(&account), Err(AiError::KeychainUnavailable)) => {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// 连接测试：发一条最小请求并读完流。

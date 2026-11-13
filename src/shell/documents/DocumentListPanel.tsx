@@ -1,7 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
+import { unsafeDocId } from '#doc-model';
 import type { DocMeta } from '../../kernel/types.ts';
+import { toErrorText } from '../../kernel/errors.ts';
+import { isEmberError } from '../../kernel/errors.ts';
 import { useEscLayer, isEscTop } from '../esc-arbiter.ts';
 import { clampVisible, growVisible, SIDEBAR_INITIAL } from '../components/list-window.ts';
+import { useMachineStore } from '../../data/stores/machine-store.ts';
+import { DUPLICATE_DOC_COMMAND } from '../commands/shell-commands.ts';
+import { useKernel } from '../kernel-provider.tsx';
+import { readonlyText } from '../components/readonly-text.ts';
 import styles from './DocumentListPanel.module.css';
 
 export interface DocumentListPanelProps {
@@ -11,7 +19,12 @@ export interface DocumentListPanelProps {
   readonly activeDocId: string | null;
   readonly onSelectDoc: (id: string) => void;
   readonly onClose: () => void;
+  /** 在画布中定位：飞到该文档的文章卡片节点（App 侧接线：openCanvas + 高亮 + 关面板） */
+  readonly onOpenCanvasLocation: (canvasId: string, nodeId: string) => void;
 }
+
+/** 面板宽度在机器本地 ui.json floatSizes 里的记忆键（不与文档 ULID 冲突） */
+const SIDEBAR_WIDTH_KEY = 'document-list';
 
 /**
  * 可召出的文档列表浮层（过渡期入口：⌘K 统一搜索落地前，保证随时可浏览文档）。
@@ -24,10 +37,33 @@ export const DocumentListPanel = ({
   activeDocId,
   onSelectDoc,
   onClose,
+  onOpenCanvasLocation,
 }: DocumentListPanelProps): ReactElement => {
+  const kernel = useKernel();
+  const queryClient = useQueryClient();
   const [query, setQuery] = useState('');
   const [visibleDocs, setVisibleDocs] = useState(SIDEBAR_INITIAL);
-  const [width, setWidth] = useState<number | null>(null);
+  /**
+   * 右键菜单 / 删除确认共用同一个锚点：直接覆盖在条目本身之上（跟随条目矩形），
+   * 视觉中心始终停在正在操作的那篇文档上，不在面板顶部与条目之间来回跳。
+   * top/bottom 是条目矩形的上下缘：底部条目空间不足时浮层向上翻（底边对齐条目底边）。
+   */
+  interface ItemOverlay {
+    readonly docId: string;
+    readonly path: string;
+    readonly title: string;
+    readonly left: number;
+    readonly top: number;
+    readonly bottom: number;
+    readonly w: number;
+  }
+  const [menu, setMenu] = useState<ItemOverlay | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<ItemOverlay | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [notice, setNotice] = useState<{ readonly tone: 'ok' | 'error'; readonly text: string } | null>(null);
+  const [width, setWidth] = useState<number | null>(
+    () => useMachineStore.getState().floatSizes[SIDEBAR_WIDTH_KEY]?.width ?? null,
+  );
   const sentinelRef = useRef<HTMLLIElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -87,9 +123,149 @@ export const DocumentListPanel = ({
     };
   }, [onClose]);
 
+  // 右键菜单：Esc / 外点关闭（菜单比面板晚入栈，Esc 先关菜单）
+  useEscLayer('doc-list-menu', menu !== null);
+  useEffect(() => {
+    if (menu === null) return undefined;
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('[data-doc-menu]') !== null) return;
+      setMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      if (!isEscTop('doc-list-menu')) return;
+      event.preventDefault();
+      setMenu(null);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [menu]);
+
+  // ---- 右键菜单动作 ----
+
+  const openMenu = useCallback(
+    (event: React.MouseEvent, doc: DocMeta): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      setConfirmDelete(null);
+      // 菜单直接盖在条目上：取条目矩形，宽度与条目一致
+      const target = event.currentTarget;
+      const rect = target instanceof Element ? target.getBoundingClientRect() : null;
+      setMenu({
+        docId: String(doc.id),
+        path: String(doc.path),
+        title: doc.title,
+        left: rect?.left ?? event.clientX,
+        top: rect?.top ?? event.clientY,
+        bottom: rect?.bottom ?? event.clientY,
+        w: rect?.width ?? 220,
+      });
+    },
+    [],
+  );
+
+  const copyPath = useCallback((path: string): void => {
+    void navigator.clipboard
+      .writeText(path)
+      .then(() => setNotice({ tone: 'ok', text: '已复制文档路径' }))
+      .catch(() => setNotice({ tone: 'error', text: '复制失败：剪贴板不可用' }));
+    setMenu(null);
+  }, []);
+
+  /** 在画布中定位：由 App 侧完成 openCanvas + 高亮 + 关面板；本面板只负责查询 */
+  const locateInCanvas = useCallback((): void => {
+    const item = menu;
+    if (item === null) return;
+    setMenu(null);
+    void (async () => {
+      try {
+        const locations = await kernel.canvas.locateDoc(unsafeDocId(item.docId));
+        if (locations.length === 0) {
+          setNotice({ tone: 'error', text: `《${item.title}》没有文章卡片节点，从库拖入即可生成` });
+          return;
+        }
+        const first = locations[0];
+        if (first !== undefined) onOpenCanvasLocation(String(first.canvasId), String(first.nodeId));
+      } catch (cause) {
+        setNotice({ tone: 'error', text: `画布定位失败：${toErrorText(cause)}` });
+      }
+    })();
+  }, [kernel, menu, onOpenCanvasLocation]);
+
+  const duplicateDoc = useCallback((item: { readonly docId: string; readonly title: string }): void => {
+    setMenu(null);
+    void kernel.commands
+      .execute(DUPLICATE_DOC_COMMAND, { docId: unsafeDocId(item.docId) })
+      .then((result) => {
+        if (!result.ok && result.error !== null) setNotice({ tone: 'error', text: result.error });
+      })
+      .catch((cause) => {
+        setNotice({ tone: 'error', text: `创建副本失败：${toErrorText(cause)}` });
+      });
+  }, [kernel]);
+
+  /** 删除：base 取当前磁盘 revision；stale 时提示刷新重试，绝不盲删 */
+  const removeDoc = useCallback((item: { readonly docId: string; readonly title: string }): void => {
+    setConfirmDelete(null);
+    setDeleting(true);
+    void (async () => {
+      try {
+        const snapshot = await kernel.docs.read(unsafeDocId(item.docId));
+        await kernel.docs.remove(unsafeDocId(item.docId), { base: snapshot.meta.rev, intent: 'user' });
+        void queryClient.invalidateQueries({ queryKey: ['docs', 'list'] });
+        setNotice({ tone: 'ok', text: `已删除《${item.title}》文件（移入系统回收站）` });
+      } catch (cause) {
+        if (isEmberError(cause) && cause.code === 'stale_revision') {
+          setNotice({ tone: 'error', text: `《${item.title}》刚被修改过，请刷新列表后重试` });
+        } else {
+          setNotice({ tone: 'error', text: `删除失败：${toErrorText(cause)}` });
+        }
+      } finally {
+        setDeleting(false);
+      }
+    })();
+  }, [kernel, queryClient]);
+
+  /**
+   * 覆盖层纵向定位：默认顶边对齐条目顶边；条目下方放不下时向上翻
+   * （底边对齐条目底边）。effectiveBottom 给底部状态栏/工具横排让位。
+   */
+  const MENU_HEIGHT = 212;
+  const CONFIRM_HEIGHT = 148;
+  const EFFECTIVE_BOTTOM_MARGIN = 72;
+  const anchorY = (overlay: ItemOverlay, height: number): number => {
+    const effectiveBottom = window.innerHeight - EFFECTIVE_BOTTOM_MARGIN;
+    if (overlay.top + height <= effectiveBottom) return overlay.top;
+    const flipped = overlay.bottom - height;
+    return Math.max(60, Math.min(flipped, effectiveBottom - height));
+  };
+
+  /** 双击宽度手柄：回到默认宽度并清掉记忆 */
+  const onResizeReset = (): void => {
+    setWidth(null);
+    useMachineStore.getState().forgetFloat(SIDEBAR_WIDTH_KEY);
+  };
+
+  /**
+   * 双击靠手动检测：onResizeStart 里 preventDefault 会吞掉浏览器合成的 dblclick，
+   * 两次快速按下（<400ms）视为复位意图。
+   */
+  const lastHandleDownAtRef = useRef(0);
   const onResizeStart = (event: ReactPointerEvent<HTMLDivElement>): void => {
     event.preventDefault();
     event.stopPropagation();
+    const now = performance.now();
+    if (now - lastHandleDownAtRef.current < 400) {
+      lastHandleDownAtRef.current = 0;
+      onResizeReset();
+      return;
+    }
+    lastHandleDownAtRef.current = now;
     const startX = event.clientX;
     const startWidth = rootRef.current?.getBoundingClientRect().width ?? 320;
     const max = Math.min(560, window.innerWidth * 0.6);
@@ -99,6 +275,13 @@ export const DocumentListPanel = ({
     const onUp = (): void => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      // 松手才记忆宽度；重开面板时按记忆恢复
+      const current = rootRef.current?.getBoundingClientRect().width;
+      if (current !== undefined) {
+        useMachineStore
+          .getState()
+          .rememberFloatSize(SIDEBAR_WIDTH_KEY, { width: current, height: current });
+      }
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -146,7 +329,12 @@ export const DocumentListPanel = ({
         ) : null}
         <ul className={styles.items}>
           {filtered.slice(0, visibleDocs).map((meta) => (
-            <li key={String(meta.id)}>
+            <li
+              key={String(meta.id)}
+              onContextMenu={(event) => {
+                openMenu(event, meta);
+              }}
+            >
               <button
                 type="button"
                 className={`${styles.item} ${activeDocId === String(meta.id) ? styles.itemActive : ''}`}
@@ -173,12 +361,130 @@ export const DocumentListPanel = ({
         </ul>
       </div>
 
+      {confirmDelete === null ? null : (
+        <div
+          className={styles.deleteConfirm}
+          role="alertdialog"
+          aria-label="确认删除文档"
+          style={{
+            left: confirmDelete.left,
+            top: anchorY(confirmDelete, CONFIRM_HEIGHT),
+            width: confirmDelete.w,
+          }}
+        >
+          <p className={styles.deleteText}>
+            删除《{confirmDelete.title}》？文件将移入系统回收站，可在回收站找回。
+          </p>
+          <div className={styles.deleteActions}>
+            <button
+              type="button"
+              className={styles.deleteYes}
+              disabled={deleting}
+              onClick={() => {
+                removeDoc(confirmDelete);
+              }}
+            >
+              {deleting ? '删除中…' : '删除'}
+            </button>
+            <button
+              type="button"
+              className={styles.deleteNo}
+              onClick={() => {
+                setConfirmDelete(null);
+              }}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {notice === null ? null : (
+        <p
+          className={notice.tone === 'ok' ? styles.noticeOk : styles.noticeError}
+          role="status"
+          onClick={() => {
+            setNotice(null);
+          }}
+        >
+          {notice.text}
+        </p>
+      )}
+
+      {menu === null ? null : (
+        <div
+          className={styles.contextMenu}
+          data-doc-menu=""
+          role="menu"
+          aria-label={`文档操作：${menu.title}`}
+          style={{ left: menu.left, top: anchorY(menu, MENU_HEIGHT), width: menu.w }}
+        >
+          <button
+            type="button"
+            className={styles.menuItem}
+            role="menuitem"
+            onClick={() => {
+              const item = menu;
+              setMenu(null);
+              onSelectDoc(item.docId);
+              onClose();
+            }}
+          >
+            打开浮窗
+          </button>
+          <button
+            type="button"
+            className={styles.menuItem}
+            role="menuitem"
+            onClick={() => {
+              locateInCanvas();
+            }}
+          >
+            在画布中定位
+          </button>
+          <button
+            type="button"
+            className={styles.menuItem}
+            role="menuitem"
+            onClick={() => {
+              duplicateDoc(menu);
+            }}
+          >
+            创建副本
+          </button>
+          <button
+            type="button"
+            className={styles.menuItem}
+            role="menuitem"
+            onClick={() => {
+              copyPath(menu.path);
+            }}
+          >
+            复制路径
+          </button>
+          <button
+            type="button"
+            className={`${styles.menuItem} ${styles.menuDanger}`}
+            role="menuitem"
+            disabled={kernel.env.readonlyMode}
+            title={kernel.env.readonlyMode ? readonlyText(kernel.env.readonlyReason) : '移入系统回收站，可找回'}
+            onClick={() => {
+              // 确认条原地替换菜单：位置、宽度都继承条目锚点，视线不跳动
+              setConfirmDelete(menu);
+              setMenu(null);
+            }}
+          >
+            删除…
+          </button>
+        </div>
+      )}
+
       <div
         className={styles.resizeHandle}
         role="separator"
         aria-orientation="vertical"
         aria-label="拖动调整文档面板宽度"
-        title="拖动调整宽度"
+        title="拖动调整宽度；双击复位"
         onPointerDown={onResizeStart}
       />
     </div>

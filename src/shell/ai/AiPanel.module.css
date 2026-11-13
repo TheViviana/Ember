@@ -157,6 +157,12 @@
   color: var(--ember-text-muted);
 }
 
+/* 手动停止后的标记：跟在半截内容或空占位之后，与正文颜色区分 */
+.stoppedMark {
+  color: var(--ember-text-muted);
+  font-size: var(--text-xs);
+}
+
 .error {
   margin: 0;
   padding: var(--space-sm) var(--space-lg);
@@ -341,4 +347,28 @@
 .stop {
   border-color: var(--ember-danger, #f87171);
   color: var(--ember-danger, #f87171);
+}
+
+/* 引用当前文章 / 生成画布：可切换胶囊与动作按钮 */
+.citeChip {
+  height: 24px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.citeChip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.citeChipOn {
+  border-color: var(--ember-primary);
+  background: var(--ember-primary-tint-soft);
+  color: var(--ember-text-accent);
 }

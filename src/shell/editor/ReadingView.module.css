@@ -17,3 +17,20 @@
 .scroll .article {
   overflow: visible;
 }
+
+/* 双语对照：译文紧跟在原段落下方，只用文本节点与既有 token */
+.translation {
+  margin: calc(var(--space-sm) * -1) 0 var(--space-md);
+  padding-left: var(--space-sm);
+  border-left: 2px solid var(--ember-border-strong);
+  color: var(--ember-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.note {
+  margin: 0 0 var(--space-sm);
+  color: var(--ember-text-muted);
+  font-size: var(--text-xs);
+}

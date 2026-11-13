@@ -21,7 +21,8 @@ export const emberEditorTheme = EditorView.theme(
       lineHeight: '1.7',
     },
     '.cm-content': {
-      padding: `${space.lg} ${space.xl}`,
+      // 两侧留白随浮窗宽度伸缩：窄窗收窄（不挤压正文），宽窗回到常规留白
+      padding: `${space.lg} clamp(${space.sm}, 4%, ${space.xl})`,
       caretColor: colors.primary,
     },
     '.cm-line': {

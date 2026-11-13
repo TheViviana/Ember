@@ -2,13 +2,13 @@ import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { markdown } from '@codemirror/lang-markdown';
 import { bracketMatching } from '@codemirror/language';
-import { EditorState } from '@codemirror/state';
+import { Compartment, EditorState } from '@codemirror/state';
 import {
   drawSelection,
   EditorView,
   highlightActiveLine,
   keymap,
-  lineNumbers,
+  lineNumbers as lineNumbersGutter,
   placeholder,
 } from '@codemirror/view';
 import { useQueryClient } from '@tanstack/react-query';
@@ -20,7 +20,7 @@ import {
   type RefObject,
 } from 'react';
 import type { DocId } from '#doc-model';
-import { toErrorText } from '../../kernel/errors.ts';
+import { isPermissionDenied, toErrorText } from '../../kernel/errors.ts';
 import type { Disposable, DocChange, DocSnapshot } from '../../kernel/types.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import { subscribeFloatJump } from './float-jump.ts';
@@ -38,6 +38,7 @@ import {
   type WikiPrompt,
 } from './float-editor-model.ts';
 import { createFloatPersister, hasPendingWrite, type FloatPersister } from './float-persist.ts';
+import { observeFloatHostBox } from './float-host-box.ts';
 import { createOutlineTracker, type OutlineTracker } from './float-outline.ts';
 import type { FormatState } from './format-commands.ts';
 import { EMPTY_FORMAT_STATE, formatStateAt, sameFormatState } from './format-commands.ts';
@@ -45,7 +46,9 @@ import { collectWikiLinks, incrementalDecorationPlugin } from './incremental-dec
 import type { OutlineHeading } from './outline.ts';
 import { estimateReadingMinutes } from './reading-time.ts';
 import { slashCommands } from './slash-commands.ts';
-import { findWikiLinkAt, isInsideCode } from './wiki-link.ts';
+import { countWords } from './word-count.ts';
+import { wikiCompletionSource } from './wiki-completion.ts';
+import { editorDomHandlers } from './editor-dom.ts';
 import type { SelectionAnchor } from '../ai/SelectionAiMenu.tsx';
 import type { ToolbarMode } from './FormatToolbar.tsx';
 import { useFloatLinks } from './use-float-links.ts';
@@ -56,6 +59,8 @@ export interface FloatDocumentOptions {
   readonly focusNonce: number;
   readonly onCursor: (position: CursorPosition | null) => void;
   readonly active: boolean;
+  /** 左侧行号：来自库设置，切换时只重配 gutter，不重建编辑器 */
+  readonly lineNumbers: boolean;
   readonly inlineCloseRef: RefObject<() => void>;
 }
 
@@ -70,6 +75,7 @@ export const useFloatDocument = ({
   onCursor,
   active,
   inlineCloseRef,
+  lineNumbers,
 }: FloatDocumentOptions) => {
   const kernel = useKernel();
   const queryClient = useQueryClient();
@@ -88,6 +94,10 @@ export const useFloatDocument = ({
   useEffect(() => {
     focusRef.current = focus;
   }, [focus]);
+  // 行号走 ref + Compartment：切换设置只重配这一项，撤销栈、选区与滚动都不丢
+  const lineNumbersRef = useRef(lineNumbers);
+  lineNumbersRef.current = lineNumbers;
+  const lineNumbersCompartmentRef = useRef<Compartment | null>(null);
   const [host, setHost] = useState<HTMLDivElement | null>(null);
   const [phase, setPhase] = useState<SavePhase>('saving');
   const [formatState, setFormatState] = useState<FormatState>(EMPTY_FORMAT_STATE);
@@ -111,9 +121,17 @@ export const useFloatDocument = ({
   const outlineRef = useRef<readonly OutlineHeading[]>([]);
   /** 阅读时长（分钟）：空正文为 null，不展示 */
   const [readingMinutes, setReadingMinutes] = useState<number | null>(null);
+  /** 字数统计：空正文为 null，不展示 */
+  const [wordCount, setWordCount] = useState<number | null>(null);
   const [wikiPrompt, setWikiPrompt] = useState<WikiPrompt | null>(null);
   /** 选区菜单锚点：相对本浮窗左上角；null = 不显示 */
   const [selectionAnchor, setSelectionAnchor] = useState<SelectionAnchor | null>(null);
+  /**
+   * 读取失败与"空文档"必须分开：permission 表示 macOS 未授权读取库目录，
+   * 正文区要显示权限说明而不是一片空白。
+   */
+  const [loadFailure, setLoadFailure] = useState<{ kind: 'permission' | 'error'; text: string } | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   const panelRef = useRef<HTMLElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -122,6 +140,11 @@ export const useFloatDocument = ({
 
   const links = useFloatLinks(kernel, tags, setWikiPrompt);
   const { openWikiLink, openWikiTarget, knownTags, documents } = links;
+  // [[ 补全候选走 ref：编辑器会话只创建一次，文档清单必须保持新鲜
+  const documentsRef = useRef<readonly { id: string; path: string; title: string; aliases: readonly string[] }[]>([]);
+  useEffect(() => {
+    documentsRef.current = documents.data ?? [];
+  }, [documents.data]);
 
   const titleField = useRef('');
   const tagsField = useRef<readonly string[]>([]);
@@ -129,6 +152,14 @@ export const useFloatDocument = ({
   const dirty = useRef<Record<MetaField, boolean>>({ title: false, tags: false, summary: false });
   const scheduleRef = useRef<() => void>(() => undefined);
   const actionsRef = useRef<FloatActions | null>(null);
+
+  // 行号设置变化时只重配 gutter：不重建视图，撤销栈、选区与滚动位置全部保留
+  useEffect(() => {
+    const view = viewRef.current;
+    const compartment = lineNumbersCompartmentRef.current;
+    if (view === null || compartment === null) return;
+    view.dispatch({ effects: compartment.reconfigure(lineNumbers ? [lineNumbersGutter()] : []) });
+  }, [lineNumbers]);
 
   useEffect(() => {
     if (host === null) return undefined;
@@ -146,12 +177,19 @@ export const useFloatDocument = ({
     setOutline([]);
     setActiveOutline(-1);
     setReadingMinutes(null);
+    setWordCount(null);
     setWikiPrompt(null);
+    setLoadFailure(null);
     // 换文档回到编辑态：阅读快照与滚动记忆都不属于新文档
     modeRef.current = 'edit';
     setMode('edit');
     setReadMarkdown('');
     readScrollRef.current = 0;
+
+    // 容器尺寸变化时补测量；盒子真正可见后再创建视图（原因见 float-host-box.ts）
+    const hostBox = observeFloatHostBox(host, () => {
+      viewRef.current?.requestMeasure();
+    });
 
     const persister = createFloatPersister({
       kernel,
@@ -183,6 +221,7 @@ export const useFloatDocument = ({
         setSummary(summaryField.current);
         setHasSummary(frontmatter.summary !== null);
         setReadingMinutes(estimateReadingMinutes(savedBody));
+        setWordCount(countWords(savedBody)?.total ?? null);
       }
     };
 
@@ -253,10 +292,12 @@ export const useFloatDocument = ({
         setPhase('idle');
 
         const savedBody = persister.getSavedBody();
+        const lineNumbersCompartment = new Compartment();
+        lineNumbersCompartmentRef.current = lineNumbersCompartment;
         const state = EditorState.create({
           doc: savedBody,
           extensions: [
-            lineNumbers(),
+            lineNumbersCompartment.of(lineNumbersRef.current ? [lineNumbersGutter()] : []),
             history(),
             drawSelection(),
             highlightActiveLine(),
@@ -268,34 +309,26 @@ export const useFloatDocument = ({
             ...emberEditorThemeExtensions,
             markdown(),
             slashCommands({
-              kernel,
+              commands: kernel.commands,
               docId,
               onError: (message) => {
                 if (!disposed) setBanner({ tone: 'alert', text: message });
               },
+              extraSources: [
+                wikiCompletionSource({ getDocuments: () => documentsRef.current }),
+              ],
             }),
             incrementalDecorationPlugin(collectWikiLinks),
-            EditorView.domEventHandlers({
-              click: (event, editor) => {
-                const element = event.target;
-                if (!(element instanceof Element) || element.closest('.ember-wikilink') === null) {
-                  return false;
-                }
-                const pos = editor.posAtCoords({ x: event.clientX, y: event.clientY });
-                if (pos === null) return false;
-                const link = findWikiLinkAt(editor.state.doc, pos);
-                if (link === null) return false;
-                // 代码块与行内代码里的 [[...]] 继续不参与跳转
-                if (isInsideCode(editor.state, pos)) return false;
-                event.preventDefault();
+            editorDomHandlers({
+              onWikiClick: (link) => {
+                if (link === null) return;
                 openWikiLink(link);
-                return true;
               },
-              contextmenu: () => {
-                // 右键菜单优先：选区菜单先收起，不与它抢位置
+              clearSelectionMenu: () => {
                 setSelectionAnchor(null);
-                return false;
               },
+              setBanner,
+              isDisposed: () => disposed,
             }),
             EditorView.updateListener.of((update) => {
               if (activeRef.current && (update.selectionSet || update.docChanged)) {
@@ -338,6 +371,7 @@ export const useFloatDocument = ({
               }
               if (update.docChanged) {
                 tracker?.schedule();
+                if (!disposed) setWordCount(countWords(update.state.doc.toString())?.total ?? null);
                 // 外部重载会替换整篇正文：阅读态跟着刷新，避免停留在旧快照
                 if (modeRef.current === 'read') setReadMarkdown(update.state.doc.toString());
               }
@@ -347,6 +381,10 @@ export const useFloatDocument = ({
             }),
           ],
         });
+
+        // 容器还没有盒子（隐藏 / 高度为 0）时不建视图，等它真正参与布局
+        await hostBox.wait();
+        if (disposed) return;
 
         view = new EditorView({ state, parent: host });
         viewRef.current = view;
@@ -431,6 +469,10 @@ export const useFloatDocument = ({
         if (!disposed) {
           setPhase('error');
           setBanner({ tone: 'alert', text: toErrorText(error) });
+          setLoadFailure({
+            kind: isPermissionDenied(error) ? 'permission' : 'error',
+            text: toErrorText(error),
+          });
         }
       }
     };
@@ -439,6 +481,8 @@ export const useFloatDocument = ({
 
     return () => {
       disposed = true;
+      hostBox.dispose();
+      lineNumbersCompartmentRef.current = null;
       persisterRef.current = null;
       unregisterFlusher();
       scheduleRef.current = () => undefined;
@@ -466,7 +510,11 @@ export const useFloatDocument = ({
       // 浮窗关闭 / 切换文档：状态栏不能停在上一份文档的行列号
       if (activeRef.current) onCursorRef.current(null);
     };
-  }, [docId, host, kernel, inlineCloseRef, openWikiLink, queryClient]);
+  }, [docId, host, kernel, inlineCloseRef, openWikiLink, queryClient, reloadNonce]);
+
+  const retryLoad = useCallback(() => {
+    setReloadNonce((nonce) => nonce + 1);
+  }, []);
 
   // 只有最前窗响应打开意图：再次打开同一篇时把焦点还给正文 / 标题，不重建 EditorView
   const handledFocusNonce = useRef(0);
@@ -509,6 +557,8 @@ export const useFloatDocument = ({
     setHost,
     phase,
     banner,
+    loadFailure,
+    retryLoad,
     title,
     tags,
     summary,
@@ -524,6 +574,7 @@ export const useFloatDocument = ({
     outline,
     activeOutline,
     readingMinutes,
+    wordCount,
     wikiPrompt,
     setWikiPrompt,
     selectionAnchor,

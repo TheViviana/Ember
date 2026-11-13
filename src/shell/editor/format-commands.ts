@@ -1,10 +1,11 @@
+import { redoDepth, undoDepth } from '@codemirror/commands';
 import { syntaxTree } from '@codemirror/language';
 import { EditorSelection, type EditorState, type Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 
 export type InlineFormat = 'bold' | 'italic' | 'strike' | 'code';
 export type BlockFormat = 'quote' | 'ul' | 'ol' | 'task';
-export type HeadingLevel = 1 | 2;
+export type HeadingLevel = 1 | 2 | 3;
 
 export interface FormatState {
   readonly bold: boolean;
@@ -16,6 +17,9 @@ export interface FormatState {
   readonly list: BlockFormat | null;
   /** 代码块内禁用工具栏，避免把标记写进代码 */
   readonly inCodeBlock: boolean;
+  /** 撤销 / 重做可用性：直接读历史深度，按钮置灰用 */
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
 }
 
 export const EMPTY_FORMAT_STATE: FormatState = {
@@ -27,6 +31,8 @@ export const EMPTY_FORMAT_STATE: FormatState = {
   quote: false,
   list: null,
   inCodeBlock: false,
+  canUndo: false,
+  canRedo: false,
 };
 
 const MARKERS: Record<InlineFormat, string> = {
@@ -62,7 +68,9 @@ export const sameFormatState = (left: FormatState, right: FormatState): boolean 
   left.heading === right.heading &&
   left.quote === right.quote &&
   left.list === right.list &&
-  left.inCodeBlock === right.inCodeBlock;
+  left.inCodeBlock === right.inCodeBlock &&
+  left.canUndo === right.canUndo &&
+  left.canRedo === right.canRedo;
 
 /**
  * 单字符标记（* ~ `）不能把双字符标记的一半当作自己的边界。
@@ -293,6 +301,81 @@ export const insertLink = (view: EditorView): void => {
   view.focus();
 };
 
+/** 代码块：选区落在 ``` 围栏之间，空选区则插入一对围栏并居中光标 */
+export const insertCodeBlock = (view: EditorView): void => {
+  const { state } = view;
+  const spec = state.changeByRange((range) => {
+    const fence = '```';
+    if (range.empty) {
+      return {
+        changes: { from: range.from, to: range.to, insert: `${fence}\n\n${fence}` },
+        range: EditorSelection.cursor(range.from + fence.length + 1),
+      };
+    }
+    const text = state.sliceDoc(range.from, range.to);
+    return {
+      changes: { from: range.from, to: range.to, insert: `${fence}\n${text}\n${fence}` },
+      range: EditorSelection.cursor(range.from + fence.length + 1),
+    };
+  });
+  view.dispatch({ ...spec, userEvent: 'input.format' });
+  view.focus();
+};
+
+/** 水平分割线：在当前行下方插入独立的 `---` 段落 */
+export const insertHorizontalRule = (view: EditorView): void => {
+  const state = view.state;
+  const line = state.doc.lineAt(state.selection.main.head);
+  const insert = line.text.trim().length === 0 ? `---\n` : `\n---\n`;
+  view.dispatch({
+    changes: { from: line.to, to: line.to, insert },
+    selection: EditorSelection.cursor(line.to + insert.length),
+    userEvent: 'input.format',
+  });
+  view.focus();
+};
+
+/** 表格模板：3 列表头 + 对齐行 + 2 行空单元格 */
+export const TABLE_SNIPPET = '| 列一 | 列二 | 列三 |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |';
+
+export interface TableInsertion {
+  readonly from: number;
+  readonly to: number;
+  readonly insert: string;
+  /** 光标落点：表头第一个单元格内，直接输入列名 */
+  readonly cursor: number;
+}
+
+/**
+ * 纯函数出口：计算表格插入位置。
+ * 当前行有内容时插到该行下方（保留一个空行分隔，否则 GFM 不识别表格）；
+ * 空行就地替换。
+ */
+export const tableInsertion = (state: EditorState): TableInsertion => {
+  const line = state.doc.lineAt(state.selection.main.head);
+  const empty = line.text.trim().length === 0;
+  const from = empty ? line.from : line.to;
+  const prefix = empty ? '' : '\n\n';
+  const firstCellEnd = TABLE_SNIPPET.indexOf('列一') + '列一'.length;
+  return {
+    from,
+    to: from,
+    insert: `${prefix}${TABLE_SNIPPET}`,
+    cursor: from + prefix.length + firstCellEnd,
+  };
+};
+
+export const insertTable = (view: EditorView): void => {
+  const plan = tableInsertion(view.state);
+  view.dispatch({
+    changes: { from: plan.from, to: plan.to, insert: plan.insert },
+    selection: EditorSelection.cursor(plan.cursor),
+    scrollIntoView: true,
+    userEvent: 'input.format',
+  });
+  view.focus();
+};
+
 /** 只依赖语法树节点的公开结构，避免把 @lezer/common 变成直接依赖 */
 interface SyntaxAncestor {
   readonly name: string;
@@ -337,6 +420,10 @@ export const formatStateAt = (state: EditorState): FormatState => {
       case 'SetextHeading2':
         heading = 2;
         break;
+      case 'ATXHeading3':
+      case 'SetextHeading3':
+        heading = 3;
+        break;
       case 'Blockquote':
         quote = true;
         break;
@@ -361,5 +448,16 @@ export const formatStateAt = (state: EditorState): FormatState => {
     if (TASK_PREFIX.test(line.text.slice(indentLength(line.text)))) list = 'task';
   }
 
-  return { bold, italic, strike, code, heading, quote, list, inCodeBlock };
+  return {
+    bold,
+    italic,
+    strike,
+    code,
+    heading,
+    quote,
+    list,
+    inCodeBlock,
+    canUndo: undoDepth(state) > 0,
+    canRedo: redoDepth(state) > 0,
+  };
 };

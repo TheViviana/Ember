@@ -6,7 +6,13 @@ import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from 'react';
-import type { CanvasNode, CanvasPoint, CanvasRect, CanvasScene, Viewport } from '#canvas-engine';
+import type {
+  CanvasNode,
+  CanvasPoint,
+  CanvasRect,
+  CanvasScene,
+  Viewport,
+} from '#canvas-engine';
 import { createUlid } from '#doc-model';
 import type { CanvasId } from '#doc-model';
 import { useKernel } from '../kernel-provider.tsx';
@@ -23,13 +29,15 @@ import {
 import {
   anchorHitRadius,
   edgeGeometry,
+  hitTestEdge,
   hitTestNodeWithAnchors,
   nodesInRect,
   normalizeRect,
   resizeRect,
   screenToWorld,
 } from './geometry.ts';
-import { nodeIdAt, resolveResizeCorner, isTypingTarget } from './surface-hit.ts';
+import { nodeIdAt, resolveResizeCorner, isTypingTarget, EDGE_HIT_SCREEN_PX } from './surface-hit.ts';
+import { useCanvasDeleteKey } from './use-canvas-delete-key.ts';
 import type { AnchorMenuState } from './use-canvas-commands.ts';
 
 /** 直接写节点元素上的几何变量：拖动 / 缩放的每帧路径，不经过 React */
@@ -223,6 +231,20 @@ export const useCanvasGestures = (options: CanvasGestureOptions) => {
     };
   }, [discardDraft, paintNodeRect]);
 
+  // Delete / Backspace：删除选中的连线或节点（独立 hook，见 use-canvas-delete-key.ts）
+  useCanvasDeleteKey({
+    gestureActiveRef: gestureRef,
+    connectActiveRef: connectRef,
+    canvasId,
+    selectedNodes: selected,
+    selectedEdgeId,
+    onDeleted: () => {
+      setSelected(new Set());
+      setSelectedEdgeId(null);
+    },
+    reportError,
+  });
+
   const localPoint = (event: ReactPointerEvent<HTMLDivElement>): CanvasPoint => {
     const rect = event.currentTarget.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
@@ -267,8 +289,10 @@ export const useCanvasGestures = (options: CanvasGestureOptions) => {
       return;
     }
 
-    // 选中节点的四角：显式手柄优先，缩得很小时再用几何热区兜底
-    if (event.button === 0 && !space && nodeId !== null && selected.has(nodeId)) {
+    // 选中节点的四角：显式手柄优先，缩得很小时再用几何热区兜底。
+    // 未选中时按住角部同样进入缩放（与主流画布一致），并顺带选中该节点——
+    // 否则「拖角」会被下面的拖动分支接管，表现为移动而非缩放。
+    if (event.button === 0 && !space && nodeId !== null) {
       const node = nodeIndex.get(nodeId);
       const cornerElement =
         event.target instanceof Element ? event.target.closest('[data-resize-corner]') : null;
@@ -280,6 +304,7 @@ export const useCanvasGestures = (options: CanvasGestureOptions) => {
       );
       if (corner !== null && node !== undefined) {
         event.preventDefault();
+        if (!selected.has(nodeId)) setSelected(new Set([nodeId]));
         setSelectedEdgeId(null);
         setEditingId(null);
         clearMenu();
@@ -333,6 +358,16 @@ export const useCanvasGestures = (options: CanvasGestureOptions) => {
     }
 
     if (!event.shiftKey) setSelected(new Set());
+    // 左键点连线：SVG 透明描边在部分 WebView 收不到 pointer 事件，用几何命中兜底
+    if (scene !== null) {
+      const edgeId = hitTestEdge(scene, world, EDGE_HIT_SCREEN_PX / viewportRef.current.zoom);
+      if (edgeId !== null) {
+        event.preventDefault();
+        setSelectedEdgeId(edgeId);
+        clearMenu();
+        return;
+      }
+    }
     setSelectedEdgeId(null);
     const rect = { x: world.x, y: world.y, w: 0, h: 0 };
     marqueeRef.current = rect;

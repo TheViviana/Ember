@@ -514,3 +514,93 @@
   background: var(--ember-bg-hover);
   color: var(--ember-text-muted);
 }
+
+/* ── 写作活动热力图（关于） ─────────────────────────────── */
+
+.heatmap {
+  margin-top: var(--space-lg);
+}
+
+.heatmapGrid {
+  display: flex;
+  gap: var(--space-xs);
+  margin-top: var(--space-sm);
+  overflow-x: auto;
+}
+
+.heatmapWeekdays {
+  display: grid;
+  grid-template-rows: repeat(7, 12px);
+  gap: 3px;
+  flex: 0 0 auto;
+}
+
+.heatmapWeekday {
+  font-size: 9px;
+  line-height: 12px;
+  color: var(--ember-text-muted);
+}
+
+.heatmapWeekdayHidden {
+  visibility: hidden;
+  font-size: 9px;
+  line-height: 12px;
+}
+
+.heatmapCells {
+  display: flex;
+  gap: 3px;
+}
+
+.heatmapColumn {
+  display: grid;
+  grid-template-rows: repeat(7, 12px);
+  gap: 3px;
+}
+
+.heatmapCell {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--ember-bg-hover);
+}
+
+.heatmapCell0 {
+  background: var(--ember-bg-hover);
+}
+
+.level1 {
+  background: var(--ember-primary-tint-weak);
+}
+
+.level2 {
+  background: var(--ember-primary-tint);
+}
+
+.level3 {
+  background: var(--ember-primary);
+  opacity: 0.65;
+}
+
+.level4 {
+  background: var(--ember-primary);
+}
+
+.heatmapFuture {
+  background: transparent;
+  border: 1px dashed var(--ember-border);
+}
+
+.heatmapLegend {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: var(--space-sm) 0 0;
+  font-size: var(--text-xs);
+  color: var(--ember-text-secondary);
+}
+
+.heatmapLegendScale {
+  display: inline-flex;
+  gap: 3px;
+}

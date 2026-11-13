@@ -88,6 +88,48 @@
   min-height: 0;
 }
 
+/* 读取失败：权限被拒与空文档必须分开，正文区不能再是一片空白 */
+.loadFailure {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-sm);
+  padding: var(--space-xl);
+  background: var(--ember-bg-surface);
+}
+
+.loadFailureTitle {
+  margin: 0;
+  font-size: var(--text-lg);
+  color: var(--ember-text-primary);
+}
+
+.loadFailureText,
+.loadFailureHint {
+  margin: 0;
+  max-width: 42em;
+  color: var(--ember-text-muted);
+  line-height: var(--leading-relaxed);
+}
+
+.loadFailureRetry {
+  align-self: flex-start;
+  margin-top: var(--space-xs);
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--ember-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--ember-bg-elevated);
+  color: var(--ember-text-primary);
+  cursor: pointer;
+}
+
+.loadFailureRetry:hover {
+  background: var(--ember-bg-hover);
+}
+
 /* 阅读态只隐藏编辑器；作者样式的 display:flex 会压过 UA 的 [hidden] */
 .host[hidden] {
   display: none;

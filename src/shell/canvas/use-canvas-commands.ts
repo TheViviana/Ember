@@ -16,6 +16,7 @@ import type { AnchorDoc } from './anchor-menu.ts';
 import { readClipboard, writeClipboard } from './clipboard.ts';
 import {
   centeredNodeRect,
+  visibleNodeCenter,
   planAnchorEdge,
   planCommand,
   planEdgeLabel,
@@ -120,6 +121,12 @@ export const useCanvasCommands = (options: CanvasCommandOptions) => {
   const [labelPrompt, setLabelPrompt] = useState<EdgeLabelState | null>(null);
   const [articlePrompt, setArticlePrompt] = useState<ArticlePromptState | null>(null);
 
+  /** 当前画布可视区尺寸（新节点中心要夹紧在里面，避免高缩放下卡片大半出视口） */
+  const canvasSize = useCallback((): { width: number; height: number } => {
+    const element = surfaceRef.current;
+    return { width: element?.clientWidth ?? 0, height: element?.clientHeight ?? 0 };
+  }, [surfaceRef]);
+
   const commitText = useCallback(
     (id: string, text: string): void => {
       setEditingId(null);
@@ -168,13 +175,13 @@ export const useCanvasCommands = (options: CanvasCommandOptions) => {
       kind: 'note',
       docId: null,
       text: '',
-      rect: centeredNodeRect(state.point),
+      rect: centeredNodeRect(visibleNodeCenter(state.point, viewportRef.current, canvasSize())),
       z: scene.nodes.reduce((max, item) => Math.max(max, item.z), 0) + 1,
       groupId: null,
       meta: {},
     };
     createNodeFromAnchor(state, node, true);
-  }, [anchorMenu, createNodeFromAnchor, scene, setAnchorMenu]);
+  }, [anchorMenu, canvasSize, createNodeFromAnchor, scene, setAnchorMenu, viewportRef]);
 
   const pickAnchorDoc = useCallback(
     (doc: AnchorDoc): void => {
@@ -191,29 +198,29 @@ export const useCanvasCommands = (options: CanvasCommandOptions) => {
         kind: 'doc',
         docId: meta.id,
         text: null,
-        rect: centeredNodeRect(state.point),
+        rect: centeredNodeRect(visibleNodeCenter(state.point, viewportRef.current, canvasSize())),
         z: scene.nodes.reduce((max, item) => Math.max(max, item.z), 0) + 1,
         groupId: null,
         meta: {},
       };
       createNodeFromAnchor(state, node);
     },
-    [anchorMenu, createNodeFromAnchor, docIndex, scene, setAnchorMenu, showError],
+    [anchorMenu, canvasSize, createNodeFromAnchor, docIndex, scene, setAnchorMenu, showError, viewportRef],
   );
 
   const startAnchorArticle = useCallback((): void => {
     const state = anchorMenu;
     if (state === null || state.from === null || state.side === null) return;
     setAnchorMenu(null);
-    const rect = centeredNodeRect(state.point);
     setArticlePrompt({
       x: state.x,
       y: state.y,
-      point: { x: rect.x, y: rect.y },
+      // 存中心点：submitArticle 里再做可视区夹紧与居中
+      point: visibleNodeCenter(state.point, viewportRef.current, canvasSize()),
       value: '未命名文章',
       anchor: { from: state.from, side: state.side },
     });
-  }, [anchorMenu, setAnchorMenu]);
+  }, [anchorMenu, canvasSize, setAnchorMenu, viewportRef]);
 
   /** 命令计划落地：mutate 走内核，其余分支只改 UI 状态 */
   const applyPlan = useCallback(
@@ -237,7 +244,13 @@ export const useCanvasCommands = (options: CanvasCommandOptions) => {
       }
       if (plan.kind === 'create-article') {
         setMenu(null);
-        setArticlePrompt({ x: point.x, y: point.y, point: plan.point, value: '未命名文章', anchor: null });
+        setArticlePrompt({
+          x: point.x,
+          y: point.y,
+          point: visibleNodeCenter(plan.point, viewportRef.current, canvasSize()),
+          value: '未命名文章',
+          anchor: null,
+        });
         return;
       }
       if (plan.kind === 'pick-doc') {
@@ -284,6 +297,8 @@ export const useCanvasCommands = (options: CanvasCommandOptions) => {
       setMenu,
       setSelected,
       setSelectedEdgeId,
+      canvasSize,
+      viewportRef,
     ],
   );
 
@@ -355,11 +370,13 @@ export const useCanvasCommands = (options: CanvasCommandOptions) => {
       if (prompt === null || canvasId === null || scene === null) return;
       const nodeId = `n_${createUlid()}`;
       const z = scene.nodes.reduce((max, node) => Math.max(max, node.z), 0) + 1;
+      // prompt.point 是节点中心（可视区夹紧过）：以中心建卡片，高缩放下也不会大半出视口
+      const rect = centeredNodeRect(prompt.point);
       kernel.canvas
         .createArticle({
           canvasId,
           title: value,
-          point: prompt.point,
+          point: { x: rect.x, y: rect.y },
           nodeId,
           size: { w: DEFAULT_NODE_SIZE.w, h: DEFAULT_NODE_SIZE.h },
           z,

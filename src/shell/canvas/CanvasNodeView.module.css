@@ -99,7 +99,9 @@
   pointer-events: none;
 }
 
-/* 四角缩放手柄：外层 16px 热区，内层 10px 方块；均按 --viewport-scale 换算，屏幕尺寸恒定 */
+/* 四角缩放手柄：外层 16px 热区，内层 10px 方块；均按 --viewport-scale 换算，屏幕尺寸恒定。
+ * 手柄随选中常驻可见（半透明 L 形角标 + 底色圆点），悬停增亮并加辉光——
+ * 完全透明的热区曾让「四角缩放」在界面上无从发现。 */
 .resize {
   position: absolute;
   width: calc(var(--resize-hit) * var(--viewport-scale));
@@ -109,21 +111,23 @@
   transform: translate(-50%, -50%);
 }
 
-/* 可视部分默认完全透明：四角常驻的边框环在深色节点上像装饰，读起来像"选中态"。
- * 热区（--resize-hit）不受影响，指针进入某个角时才露出一个 L 形角标，
- * 配合光标形状（nwse/nesw-resize）说明"这里可以拖"。 */
 .resize::after {
   content: '';
   width: calc(var(--resize-handle) * var(--viewport-scale));
   height: calc(var(--resize-handle) * var(--viewport-scale));
   border: 0 solid var(--ember-node-border-active);
-  background: transparent;
-  opacity: 0;
+  border-radius: var(--radius-sm);
+  background: var(--ember-node-bg);
+  box-shadow: 0 0 0 1px var(--ember-node-border-active);
+  opacity: 0.75;
   transition: opacity var(--duration-fast) var(--ease-out);
 }
 
 .resize:hover::after {
   opacity: 1;
+  box-shadow:
+    0 0 0 1px var(--ember-node-border-active),
+    var(--glow-soft);
 }
 
 .resize[data-corner='nw']::after {

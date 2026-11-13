@@ -1,4 +1,4 @@
-import { findAiAction, type AiActionId } from './actions.ts';
+import { AI_CONTINUE_ACTION, findAiAction, type AiActionId } from './actions.ts';
 
 export const SYSTEM_PROMPT =
   '你是 Ember 的本地知识库助手。只处理用户给出的片段，不要假设自己读过别的内容；' +
@@ -17,3 +17,7 @@ export const buildSelectionPrompt = (
   if (action === undefined) throw new Error(`未知的 AI 操作：${actionId}`);
   return `${action.instruction}\n\n文章标题：${title}\n\n选中片段：\n${selectedText}`;
 };
+
+/** 续写提示词：带光标前的正文上下文，要求无缝接写 */
+export const buildContinuePrompt = (title: string, contextText: string): string =>
+  `${AI_CONTINUE_ACTION.instruction}\n\n文章标题：${title}\n\n已有正文（末尾处接写）：\n${contextText}`;

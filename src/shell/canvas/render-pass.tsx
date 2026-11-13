@@ -221,13 +221,13 @@ export interface CanvasHudProps {
   readonly dragPerf: DragPerf | null;
 }
 
-/** 渲染 pass：底部 HUD（含 DEV 性能采样） */
+/** 渲染 pass：底部 HUD（含 DEV 性能采样）。分组是容器不是内容节点，不计入「N 节点」 */
 export const CanvasHud = ({ viewport, scene, refreshMs, dragPerf }: CanvasHudProps): ReactElement => (
   <div className={styles.hud}>
     <span>缩放 {Math.round(viewport.zoom * 100)}%</span>
     {scene === null ? null : (
       <span>
-        {scene.nodes.length} 节点 · {scene.edges.length} 连线
+        {scene.nodes.filter((node) => node.kind !== 'group').length} 节点 · {scene.edges.length} 连线
       </span>
     )}
     {!import.meta.env.DEV || refreshMs === null ? null : <span>刷新 {refreshMs.toFixed(1)}ms</span>}

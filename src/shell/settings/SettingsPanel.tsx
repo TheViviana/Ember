@@ -21,7 +21,9 @@ import {
 import type { CanvasGrid, SettingsPatch, VaultSettings } from '../../kernel/types.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
 import { moveFloatFrame, type FloatFrame } from '../editor/float-layout.ts';
+import { DEFAULT_FLOAT_LIMIT } from '../editor/float-store.ts';
 import { useKernel } from '../kernel-provider.tsx';
+import { ActivityHeatmap } from './ActivityHeatmap.tsx';
 import { BackupSection } from './BackupSection.tsx';
 import styles from './SettingsPanel.module.css';
 
@@ -39,6 +41,7 @@ const GRID_SIZES: readonly CanvasGrid['size'][] = [8, 16, 32];
 const SETTINGS_SECTIONS = [
   { id: 'canvas', label: '画布' },
   { id: 'floats', label: '浮窗' },
+  { id: 'editor', label: '编辑器' },
   { id: 'tools', label: '工具' },
   { id: 'index', label: '索引' },
   { id: 'ai', label: 'AI 助手' },
@@ -46,7 +49,7 @@ const SETTINGS_SECTIONS = [
   { id: 'about', label: '关于' },
 ] as const;
 
-const FLOAT_LIMIT_CHOICES = [4, 6, 8, 10, 12] as const;
+const FLOAT_LIMIT_CHOICES = [5, 6, 8, 10, 12] as const;
 
 type SectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
 
@@ -79,8 +82,15 @@ const describeProbeFailure = (
       text: `已连上 ${baseUrl}，但模型「${model}」不能用于对话（未下载、名称不对或不支持 chat）。`,
     };
   }
+  if (code === 'ai_connect_timeout') {
+    // 连接都没建立：不能像读超时那样宣称「已连上」
+    return {
+      tone: 'error',
+      text: `连接 ${baseUrl} 超时：服务没有响应，请确认地址正确且服务已启动。`,
+    };
+  }
   if (code === 'ai_timeout') {
-    // 与"连不上"分开：请求已发出，只是模型在加载或迟迟不产出
+    // 与"连不上"分开：连接已建立，只是模型在加载或迟迟不产出
     return {
       tone: 'warn',
       text: `已连上 ${baseUrl}，但「${model}」在 ${waitedSeconds} 秒内没有返回内容：模型可能仍在加载，请稍后重试。`,
@@ -94,6 +104,9 @@ const describeProbeFailure = (
 
 const describeModelListFailure = (cause: unknown, baseUrl: string): string => {
   const code = aiErrorCode(cause);
+  if (code === 'ai_connect_timeout') {
+    return `连接 ${baseUrl} 超时：服务没有响应，请确认地址正确且服务已启动。`;
+  }
   if (code === 'ai_timeout') {
     return `已连上 ${baseUrl}，但读取模型列表超时：Ollama 响应较慢，请稍后刷新。`;
   }
@@ -136,7 +149,10 @@ export const SettingsPanel = ({
   const [aiBaseUrl, setAiBaseUrl] = useState(ai.baseUrl);
   const [aiModel, setAiModel] = useState(ai.model);
   const [aiKeyInput, setAiKeyInput] = useState('');
-  const [aiKeyPresent, setAiKeyPresent] = useState<boolean | null>(null);
+  /** 密钥存在性：loading = 查询进行中；error = 查询本身失败（如钥匙串不可用），不能永远停在「读取中…」 */
+  const [aiKeyPresent, setAiKeyPresent] = useState<'loading' | 'saved' | 'unsaved' | 'error'>(
+    'loading',
+  );
   const [aiStatus, setAiStatus] = useState<string | null>(null);
   // 模型列表与可用性验证都是会话内状态：不写 ui.json，也不用 localStorage
   const [models, setModels] = useState<readonly string[] | null>(null);
@@ -254,22 +270,23 @@ export const SettingsPanel = ({
     if (aiProvider !== 'ollama') {
       setModels(null);
       setModelsNote(null);
-      setModelProbe(null);
+      // modelProbe 对所有提供方都有意义（连接测试是通用入口），这里不清空
       return;
     }
     void refreshModels();
   }, [activeSection, aiProvider, refreshModels]);
 
-  // 只问密钥是否存在；换 provider / 地址后重新计算
+  // 只问密钥是否存在；换 provider / 地址后重新计算。查询失败时明确给出错误态，
+  // 否则（如钥匙串不可用）界面会永远停在「读取中…」。
   useEffect(() => {
     let active = true;
-    setAiKeyPresent(null);
+    setAiKeyPresent('loading');
     void aiKeySaved(ai)
       .then((saved) => {
-        if (active) setAiKeyPresent(saved);
+        if (active) setAiKeyPresent(saved ? 'saved' : 'unsaved');
       })
       .catch(() => {
-        if (active) setAiKeyPresent(null);
+        if (active) setAiKeyPresent('error');
       });
     return () => {
       active = false;
@@ -371,7 +388,7 @@ export const SettingsPanel = ({
     }
     const origin = await saveAiKey({ provider: aiProvider, baseUrl: aiBaseUrl, model: aiModel }, secret);
     setAiKeyInput('');
-    setAiKeyPresent(true);
+    setAiKeyPresent('saved');
     setAiStatus(
       origin === 'keychain'
         ? '已保存：密钥在系统钥匙串'
@@ -395,7 +412,7 @@ export const SettingsPanel = ({
   /** 清除已保存密钥：换账号 / 排查密钥问题用；清除后状态回到「未保存」 */
   const clearAiKey = async (): Promise<void> => {
     await deleteAiKey(ai);
-    setAiKeyPresent(false);
+    setAiKeyPresent('unsaved');
     setAiStatus('已清除密钥');
   };
 
@@ -405,14 +422,21 @@ export const SettingsPanel = ({
     queryFn: () => kernel.index.stats(),
     enabled: activeSection === 'index',
   });
+  // 热力图数据源：与 App 共用同一份 docs/list 缓存，只在关于类目启用
+  const documents = useQuery({
+    queryKey: ['docs', 'list'],
+    queryFn: () => kernel.docs.list(),
+    enabled: activeSection === 'about',
+  });
   const rebuildIndex = async (): Promise<void> => {
     await kernel.index.rebuild();
     void queryClient.invalidateQueries({ queryKey: ['index'] });
   };
 
-  const floatLimit = settings?.ui.floatLimit ?? 8;
+  const floatLimit = settings?.ui.floatLimit ?? DEFAULT_FLOAT_LIMIT;
+  const editorLineNumbers = settings?.ui.editorLineNumbers !== false;
   const toolPomodoro = settings?.ui.toolPomodoro === true;
-  const toolGallery = settings?.ui.toolGallery === true;
+  const toolGallery = settings?.ui.toolGallery !== false;
 
   return (
     <div className={styles.scrim} role="presentation" onClick={onClose}>
@@ -515,7 +539,7 @@ export const SettingsPanel = ({
             <section className={styles.section}>
               <h3 className={styles.sectionTitle}>文档浮窗</h3>
               <p className={styles.note}>
-                同时打开的文章浮窗上限。达到上限后再打开新文档，会自动收起最久未看的一篇。
+                同时打开的文章浮窗上限。达到上限后再打开新文档会拒绝并给出提示，由你决定是否关闭最久未看的一篇；已打开的浮窗不会被自动挤掉。
               </p>
               <div className={styles.options}>
                 {FLOAT_LIMIT_CHOICES.map((limit) => (
@@ -535,10 +559,34 @@ export const SettingsPanel = ({
             </section>
           ) : null}
 
+          {activeSection === 'editor' ? (
+            <section className={styles.section}>
+              <h3 className={styles.sectionTitle}>编辑器</h3>
+              <p className={styles.note}>
+                行号开关立即作用于已打开的文章浮窗，不需要重开。正文宽度随浮窗宽度伸缩：
+                窄窗收窄两侧留白，宽窗铺满，不留固定栏宽造成的大片空白。
+              </p>
+              <label className={styles.switchRow}>
+                <input
+                  type="checkbox"
+                  checked={editorLineNumbers}
+                  disabled={busy !== null}
+                  onChange={(event) => {
+                    const enabled = event.currentTarget.checked;
+                    void run('editorLineNumbers', () =>
+                      onPatch({ ui: { editorLineNumbers: enabled } }),
+                    );
+                  }}
+                />
+                <span>显示行号</span>
+              </label>
+            </section>
+          ) : null}
+
           {activeSection === 'tools' ? (
             <section className={styles.section}>
               <h3 className={styles.sectionTitle}>工具</h3>
-              <p className={styles.note}>左下角的常驻工具入口：默认关闭，开启后出现在画布左下角。</p>
+              <p className={styles.note}>左下角的常驻工具入口：图库默认显示，番茄钟默认关闭；取消勾选即从左下角移除。</p>
               <label className={styles.switchRow}>
                 <input
                   type="checkbox"
@@ -561,7 +609,7 @@ export const SettingsPanel = ({
                     void run('toolGallery', () => onPatch({ ui: { toolGallery: enabled } }));
                   }}
                 />
-                <span>附件</span>
+                <span>图库（附件面板）</span>
               </label>
             </section>
           ) : null}
@@ -706,11 +754,6 @@ export const SettingsPanel = ({
                     </button>
                   </div>
                   {modelsNote === null ? null : <p className={styles.note}>{modelsNote}</p>}
-                  {modelProbe === null ? null : (
-                    <p className={modelProbe.tone === 'error' ? styles.error : styles.note}>
-                      {modelProbe.text}
-                    </p>
-                  )}
                 </div>
               ) : (
                 <label className={styles.field}>
@@ -726,6 +769,11 @@ export const SettingsPanel = ({
                   />
                 </label>
               )}
+              {modelProbe === null ? null : (
+                <p className={modelProbe.tone === 'error' ? styles.error : styles.note}>
+                  {modelProbe.text}
+                </p>
+              )}
               <label className={styles.field}>
                 <span className={styles.fieldLabel}>API Key</span>
                 <input
@@ -734,19 +782,21 @@ export const SettingsPanel = ({
                   value={aiKeyInput}
                   autoComplete="new-password"
                   spellCheck={false}
-                  placeholder={aiKeyPresent === true ? '已保存，输入新值可覆盖' : '未保存'}
+                  placeholder={aiKeyPresent === 'saved' ? '已保存，输入新值可覆盖' : '未保存'}
                   onChange={(event) => {
                     setAiKeyInput(event.currentTarget.value);
                   }}
                 />
               </label>
               <p className={styles.note}>
-                {aiKeyPresent === null
+                {aiKeyPresent === 'loading'
                   ? '密钥状态：读取中…'
-                  : aiKeyPresent
+                  : aiKeyPresent === 'saved'
                     ? '密钥：已保存（不显示明文）'
-                    : '密钥：未保存'}
-                {aiKeyPresent === true ? (
+                    : aiKeyPresent === 'unsaved'
+                      ? '密钥：未保存'
+                      : '密钥状态：读取失败（钥匙串不可用或地址无效），保存密钥时会改用会话内存'}
+                {aiKeyPresent === 'saved' ? (
                   <>
                     {' '}
                     <button
@@ -807,6 +857,7 @@ export const SettingsPanel = ({
                   <dd>ember-black</dd>
                 </div>
               </dl>
+              <ActivityHeatmap docs={(documents.data ?? []).map((doc) => ({ id: String(doc.id), updatedAt: doc.updated }))} />
             </section>
           ) : null}
           </div>

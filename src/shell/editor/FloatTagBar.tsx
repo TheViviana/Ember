@@ -10,6 +10,11 @@ export interface FloatTagBarProps {
   readonly hasSummary: boolean;
   readonly onTagsChange: (tags: readonly string[]) => void;
   readonly onSummaryCommit: (value: string) => void;
+  /** AI 一键简介：null = 当前不可用（只读 / 未配置模型） */
+  readonly onAiSummary: (() => void) | null;
+  readonly aiSummaryBusy: boolean;
+  /** AI 简介的失败提示；null = 无 */
+  readonly aiSummaryError: string | null;
 }
 
 const normalizeTag = (value: string): string => value.trim().replace(/^#/, '');
@@ -36,6 +41,9 @@ export const FloatTagBar = ({
   hasSummary,
   onTagsChange,
   onSummaryCommit,
+  onAiSummary,
+  aiSummaryBusy,
+  aiSummaryError,
 }: FloatTagBarProps): ReactElement => {
   const zoneRef = useRef<HTMLElement | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -196,16 +204,32 @@ export const FloatTagBar = ({
           )}
         </div>
 
-        <button
-          type="button"
-          className={styles.summaryToggle}
-          aria-expanded={summaryOpen}
-          onClick={() => {
-            setSummaryOpen((open) => !open);
-          }}
-        >
-          {summaryOpen ? '收起简介' : '简介'}
-        </button>
+        <div className={styles.summaryActions}>
+          {onAiSummary === null ? null : (
+            <button
+              type="button"
+              className={styles.summaryToggle}
+              disabled={aiSummaryBusy}
+              title="AI 依据正文生成 80 字以内简介并写入 frontmatter"
+              onClick={() => {
+                setSummaryOpen(true);
+                onAiSummary();
+              }}
+            >
+              {aiSummaryBusy ? '生成中…' : '✦ AI 简介'}
+            </button>
+          )}
+          <button
+            type="button"
+            className={styles.summaryToggle}
+            aria-expanded={summaryOpen}
+            onClick={() => {
+              setSummaryOpen((open) => !open);
+            }}
+          >
+            {summaryOpen ? '收起简介' : '简介'}
+          </button>
+        </div>
       </div>
 
       {adding && suggestions.length > 0 ? (
@@ -242,7 +266,11 @@ export const FloatTagBar = ({
             onBlur={commitSummary}
           />
           <p className={styles.hint}>
-            {hasSummary ? '简介写入 frontmatter.summary' : '简介来自正文首段派生，未写入磁盘；编辑后才会落盘'}
+            {aiSummaryError !== null
+              ? aiSummaryError
+              : hasSummary
+                ? '简介写入 frontmatter.summary'
+                : '简介来自正文首段派生，未写入磁盘；编辑后才会落盘'}
           </p>
         </div>
       ) : null}

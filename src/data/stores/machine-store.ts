@@ -178,6 +178,8 @@ export interface MachineState {
   readonly canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>>;
   rememberFloatSize(docId: string, size: FloatSize): void;
   rememberFloatPosition(docId: string, position: FloatPosition): void;
+  /** 清除某键的位置与尺寸记忆（双击宽度手柄复位等场景） */
+  forgetFloat(docId: string): void;
   setPomodoro(next: PomodoroState): void;
   setAi(patch: Partial<AiSettings>): void;
   setAiPanel(patch: Partial<AiPanelState>): void;
@@ -509,6 +511,19 @@ export const useMachineStore = create<MachineState>((set) => ({
   rememberFloatPosition: (docId, position) => {
     const next: FloatPosition = { left: Math.round(position.left), top: Math.round(position.top) };
     set((state) => ({ floatPositions: { ...state.floatPositions, [docId]: next } }));
+    queueWrite();
+  },
+  forgetFloat: (docId) => {
+    set((state) => {
+      if (state.floatSizes[docId] === undefined && state.floatPositions[docId] === undefined) {
+        return state;
+      }
+      const floatSizes = { ...state.floatSizes };
+      const floatPositions = { ...state.floatPositions };
+      delete floatSizes[docId];
+      delete floatPositions[docId];
+      return { floatSizes, floatPositions };
+    });
     queueWrite();
   },
   setPomodoro: (next) => {

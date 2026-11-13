@@ -142,7 +142,7 @@ void test('尺寸状态不进入编辑器重建依赖，缩放后仍可继续输
   );
 
   // CodeMirror 会话的 effect 依赖里没有 frame / savedSize / focus，缩放与切窗只重排样式，不重建 EditorView
-  assert.ok(source.includes('}, [docId, host, kernel, inlineCloseRef, openWikiLink, queryClient]);'));
+  assert.ok(source.includes('}, [docId, host, kernel, inlineCloseRef, openWikiLink, queryClient, reloadNonce]);'));
 
   const resizeStart = frameSource.indexOf('const beginResize');
   // 取 beginResize 之后的下一个 effect 作为边界：文件前部可能另有同步 ref 的小 effect

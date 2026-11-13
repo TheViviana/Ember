@@ -1,17 +1,26 @@
-/* 库健康检查：右侧可召出浮层，与冲突处理中心同一套玻璃质感 */
+/* 库健康检查：独立可拖动浮窗，与设置窗/文章浮窗同一套圆角、阴影与玻璃质感 */
 .root {
-  position: absolute;
-  top: calc(var(--topbar-height) + var(--space-sm));
-  right: var(--space-md);
-  bottom: calc(var(--statusbar-height) + var(--space-sm));
-  width: min(600px, calc(100vw - var(--space-md) * 2));
+  position: fixed;
+  left: 0;
+  top: 0;
+  max-width: calc(100vw - var(--space-xl));
+  max-height: calc(100vh - var(--space-xl));
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-lg);
   background: var(--ember-bg-menu);
   box-shadow: var(--shadow-lg);
-  z-index: calc(var(--layer-sidebar) + 2);
+  /* 高于设置面板（--layer-menu），打开时可与设置同时存在且不被遮挡 */
+  z-index: calc(var(--layer-menu) + 1);
   overflow: hidden;
+}
+
+.root[data-ready='false'] {
+  opacity: 0;
+}
+
+.moving {
+  user-select: none;
 }
 
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -27,6 +36,12 @@
   gap: var(--space-xs);
   padding: var(--space-sm) var(--space-md);
   border-bottom: 1px solid var(--ember-border-subtle);
+  cursor: grab;
+  touch-action: none;
+}
+
+.moving .header {
+  cursor: grabbing;
 }
 
 .headerIcon {
