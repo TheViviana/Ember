@@ -20,10 +20,10 @@ import {
   type RefObject,
 } from 'react';
 import type { DocId } from '#doc-model';
-import type { EditorSession } from '../../kernel/editor-host.ts';
 import { toErrorText } from '../../kernel/errors.ts';
 import type { Disposable, DocChange, DocSnapshot } from '../../kernel/types.ts';
 import { useKernel } from '../kernel-provider.tsx';
+import { subscribeFloatJump } from './float-jump.ts';
 import { emberEditorThemeExtensions } from './cm-theme.ts';
 import type { CursorPosition } from './cursor.ts';
 import { registerFloatFlusher, settleFloatWrite, trackFloatWrite } from './float-flush.ts';
@@ -37,7 +37,7 @@ import {
   type SavePhase,
   type WikiPrompt,
 } from './float-editor-model.ts';
-import { createFloatPersister, hasPendingWrite } from './float-persist.ts';
+import { createFloatPersister, hasPendingWrite, type FloatPersister } from './float-persist.ts';
 import { createOutlineTracker, type OutlineTracker } from './float-outline.ts';
 import type { FormatState } from './format-commands.ts';
 import { EMPTY_FORMAT_STATE, formatStateAt, sameFormatState } from './format-commands.ts';
@@ -117,6 +117,8 @@ export const useFloatDocument = ({
 
   const panelRef = useRef<HTMLElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
+  /** 当前会话的持久化器：历史恢复前需要排空在途/排队写入 */
+  const persisterRef = useRef<FloatPersister | null>(null);
 
   const links = useFloatLinks(kernel, tags, setWikiPrompt);
   const { openWikiLink, openWikiTarget, knownTags, documents } = links;
@@ -133,7 +135,7 @@ export const useFloatDocument = ({
 
     let disposed = false;
     let view: EditorView | null = null;
-    let session: EditorSession | null = null;
+    let jumpUnsubscribe: { dispose: () => void } | null = null;
     let subscription: Disposable | null = null;
     let timer: number | null = null;
     let suppress = false;
@@ -165,6 +167,7 @@ export const useFloatDocument = ({
       setBanner,
       setHasSummary,
     });
+    persisterRef.current = persister;
 
     const applySnapshot = (snapshot: DocSnapshot): void => {
       persister.reset(snapshot);
@@ -243,13 +246,10 @@ export const useFloatDocument = ({
       try {
         // 同一篇刚被关闭时，先等关闭前的写入落盘，避免读到旧快照
         await settleFloatWrite(String(docId));
-        const opened = await kernel.editor.open(docId);
-        if (disposed) {
-          opened.close();
-          return;
-        }
-        session = opened;
-        applySnapshot(opened.snapshot);
+        // 打开会话只读一次磁盘快照（首存以它为 base）
+        const snapshot = await kernel.docs.read(docId);
+        if (disposed) return;
+        applySnapshot(snapshot);
         setPhase('idle');
 
         const savedBody = persister.getSavedBody();
@@ -358,6 +358,19 @@ export const useFloatDocument = ({
         }
         if (focusRef.current !== 'title') view.focus();
 
+        // ⌘K 命中行跳转：选中该行（highlightActiveLine 随之点亮）并滚动到位
+        jumpUnsubscribe = subscribeFloatJump(docId, (line) => {
+          const current = viewRef.current;
+          if (disposed || current === null) return;
+          const target = Math.min(Math.max(line, 1), current.state.doc.lines);
+          const lineBlock = current.state.doc.line(target);
+          current.dispatch({
+            selection: { anchor: lineBlock.from, head: lineBlock.to },
+            scrollIntoView: true,
+          });
+          current.focus();
+        });
+
         tracker = createOutlineTracker({
           editor: view,
           isDisposed: () => disposed,
@@ -426,6 +439,7 @@ export const useFloatDocument = ({
 
     return () => {
       disposed = true;
+      persisterRef.current = null;
       unregisterFlusher();
       scheduleRef.current = () => undefined;
       actionsRef.current = null;
@@ -435,6 +449,8 @@ export const useFloatDocument = ({
       }
       tracker?.dispose();
       tracker = null;
+      jumpUnsubscribe?.dispose();
+      jumpUnsubscribe = null;
       if (view !== null) {
         const body = view.state.doc.toString();
         if (hasPendingWrite(body, persister.getSavedBody(), dirty.current)) {
@@ -447,8 +463,6 @@ export const useFloatDocument = ({
       }
       subscription?.dispose();
       subscription = null;
-      session?.close();
-      session = null;
       // 浮窗关闭 / 切换文档：状态栏不能停在上一份文档的行列号
       if (activeRef.current) onCursorRef.current(null);
     };
@@ -482,6 +496,14 @@ export const useFloatDocument = ({
     setSelectionAnchor(null);
   }, []);
 
+  /** 历史恢复前：等正在进行的写入结束，再用当前正文补写一次（与关窗同一条落盘路径） */
+  const flushNow = useCallback(async (): Promise<void> => {
+    const view = viewRef.current;
+    const persister = persisterRef.current;
+    if (view === null || persister === null) return;
+    await persister.flushOnClose(view.state.doc.toString());
+  }, []);
+
   return {
     host,
     setHost,
@@ -513,5 +535,6 @@ export const useFloatDocument = ({
     actionsRef,
     panelRef,
     viewRef,
+    flushNow,
   };
 };

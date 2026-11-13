@@ -347,7 +347,7 @@ export const useCanvasCommands = (options: CanvasCommandOptions) => {
     setLabelPrompt(null);
   }, []);
 
-  /** 一步新建文章：标题确认后落盘 + 建节点；失败由 article-service 负责回滚 */
+  /** 一步新建文章：标题确认后落盘 + 建节点；失败由内核 createArticle 负责回滚 */
   const submitArticle = useCallback(
     (value: string): void => {
       const prompt = articlePrompt;
@@ -355,8 +355,8 @@ export const useCanvasCommands = (options: CanvasCommandOptions) => {
       if (prompt === null || canvasId === null || scene === null) return;
       const nodeId = `n_${createUlid()}`;
       const z = scene.nodes.reduce((max, node) => Math.max(max, node.z), 0) + 1;
-      kernel.articles
-        .createOnCanvas({
+      kernel.canvas
+        .createArticle({
           canvasId,
           title: value,
           point: prompt.point,

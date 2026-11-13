@@ -180,3 +180,47 @@
 .grabbing {
   cursor: grabbing;
 }
+
+/* ── 图片大图浮层 ──────────────────────────────────────────── */
+
+.lightbox {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--ember-overlay-scrim);
+  z-index: calc(var(--layer-float) + 3);
+  cursor: zoom-out;
+}
+
+.lightboxImage {
+  max-width: 86%;
+  max-height: 86%;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  object-fit: contain;
+}
+
+.lightboxHint {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ember-text-secondary);
+}
+
+/* 最近编辑 / 历史版本浮层：由顶栏菜单开启，居中挂在画布顶部 */
+.overlayRow {
+  position: absolute;
+  top: calc(var(--topbar-height) + var(--space-sm));
+  left: 50%;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  transform: translateX(-50%);
+  z-index: calc(var(--layer-float) + 2);
+}
+
+.overlaySlot {
+  position: relative;
+  width: 300px;
+  height: 0;
+}

@@ -63,9 +63,9 @@ const createService = (
   });
 };
 
-const storedSidebar = (raw: string | undefined): string | undefined => {
+const storedToolPomodoro = (raw: string | undefined): boolean | undefined => {
   if (raw === undefined) return undefined;
-  return (JSON.parse(raw) as { ui?: { sidebar?: string } }).ui?.sidebar;
+  return (JSON.parse(raw) as { ui?: { toolPomodoro?: boolean } }).ui?.toolPomodoro;
 };
 
 void test('App.tsx 的关窗阶段一包含 settings.flush（改前接线缺这一条）', () => {
@@ -83,7 +83,7 @@ void test('App.tsx 的关窗阶段一包含 settings.flush（改前接线缺这�
 void test('场景一：设置写入失败时阶段一拦住关闭（改前旧实现返回 close）', async () => {
   const mem = createMemoryVault();
   const service = createService(mem, () => Promise.reject(new Error('disk full')));
-  const pending = service.patch({ ui: { sidebar: 'off' } });
+  const pending = service.patch({ ui: { toolPomodoro: true } });
   void pending.catch(() => undefined);
 
   const outcome = await runCloseFlow({
@@ -111,7 +111,7 @@ void test('场景二（改前接线）：shutdown 抛错瞬间磁盘仍是旧值
         }, 40);
       }),
   );
-  const pending = service.patch({ ui: { sidebar: 'off' } });
+  const pending = service.patch({ ui: { toolPomodoro: true } });
   void pending.catch(() => undefined);
 
   let diskAtClose: string | undefined = '未取到';
@@ -127,7 +127,7 @@ void test('场景二（改前接线）：shutdown 抛错瞬间磁盘仍是旧值
   assert.deepEqual(outcome, { kind: 'close' });
   assert.equal(diskAtClose, undefined, '旧接线没有等待设置写入，关窗瞬间磁盘没有新值');
   await pending;
-  assert.equal(storedSidebar(mem.dump()[SETTINGS]), 'off', '进程还活着时写入稍后才落盘，这正是丢更新的窗口');
+  assert.equal(storedToolPomodoro(mem.dump()[SETTINGS]), true, '进程还活着时写入稍后才落盘，这正是丢更新的窗口');
 });
 
 void test('场景二（改后接线）：shutdown 抛错前设置已落盘', async () => {
@@ -141,7 +141,7 @@ void test('场景二（改后接线）：shutdown 抛错前设置已落盘', asy
         }, 40);
       }),
   );
-  const pending = service.patch({ ui: { sidebar: 'off' } });
+  const pending = service.patch({ ui: { toolPomodoro: true } });
   void pending.catch(() => undefined);
 
   let diskAtClose: string | undefined;
@@ -156,5 +156,5 @@ void test('场景二（改后接线）：shutdown 抛错前设置已落盘', asy
   });
 
   assert.deepEqual(outcome, { kind: 'close' }, 'shutdown 失败仍放行关闭');
-  assert.equal(storedSidebar(diskAtClose), 'off', '关窗瞬间设置必须已经落盘');
+  assert.equal(storedToolPomodoro(diskAtClose), true, '关窗瞬间设置必须已经落盘');
 });

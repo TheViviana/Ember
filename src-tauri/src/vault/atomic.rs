@@ -9,18 +9,9 @@ use crate::error::{VaultError, VaultResult};
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 已 fsync 的临时文件句柄；rename 之前崩溃时，磁盘上只剩它和完整旧目标。
-pub struct TempFile {
-    pub path: PathBuf,
-    pub target: PathBuf,
-}
-
-impl TempFile {
-    pub fn relative_to(&self, root: &Path) -> Option<String> {
-        self.path
-            .strip_prefix(root)
-            .ok()
-            .map(|value| value.to_string_lossy().replace('\\', "/"))
-    }
+struct TempFile {
+    path: PathBuf,
+    target: PathBuf,
 }
 
 fn temp_path(target: &Path) -> PathBuf {
@@ -78,7 +69,7 @@ fn inherit_mode(_target: &Path, _temp: &Path) -> VaultResult<()> {
 }
 
 /// 第一步：同目录写临时文件并 fsync，目标文件保持不变。
-pub fn prepare(target: &Path, bytes: &[u8]) -> VaultResult<TempFile> {
+fn prepare(target: &Path, bytes: &[u8]) -> VaultResult<TempFile> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -106,8 +97,8 @@ pub fn prepare(target: &Path, bytes: &[u8]) -> VaultResult<TempFile> {
     })
 }
 
-/// 第二步：rename + 目录 fsync。调用方必须先持久化 journal 的 prepared 阶段。
-pub fn commit(temp: &TempFile) -> VaultResult<()> {
+/// 第二步：rename + 目录 fsync。
+fn commit(temp: &TempFile) -> VaultResult<()> {
     fs::rename(&temp.path, &temp.target)?;
     if let Some(parent) = temp.target.parent() {
         sync_dir(parent)?;
@@ -115,7 +106,8 @@ pub fn commit(temp: &TempFile) -> VaultResult<()> {
     Ok(())
 }
 
-/// 一步到位的原子写（settings、锁心跳等不需要 journal 的内部文件）。
+/// 一步到位的原子写：prepare（临时文件 fsync）+ commit（rename + 目录 fsync）。
+/// 正文、settings、锁文件、机器标识、图片等一切落盘共用这一条路径。
 pub fn write_atomic(target: &Path, bytes: &[u8]) -> VaultResult<()> {
     let temp = prepare(target, bytes)?;
     commit(&temp)

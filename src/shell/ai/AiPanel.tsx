@@ -10,7 +10,9 @@ import {
 import { startChat, type ChatSession, type ChatTurnInput } from '../../data/tauri/ai.ts';
 import { toErrorText } from '../../kernel/errors.ts';
 import { useFloatStore } from '../editor/float-store.ts';
+import { createUlid, unsafeContentHash, type CanvasId, type DocId } from '#doc-model';
 import { useKernel } from '../kernel-provider.tsx';
+import { readCapturePoint } from '../canvas/canvas-capture.ts';
 import {
   applyProposalDoc,
   undoLabel,
@@ -18,6 +20,12 @@ import {
   type Proposal,
   type UndoAction,
 } from './proposal.ts';
+import {
+  getDefaultSessionPort,
+  hydrateSession,
+  persistSession,
+  type AiSessionProposalFile,
+} from './session-store.ts';
 import styles from './AiPanel.module.css';
 
 interface AiPanelProps {
@@ -62,6 +70,146 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
     startY: number;
     rect: AiPanelRect;
   } | null>(null);
+
+  // -------- AI 会话持久化（阶段 7） --------
+  const sessionPortRef = useRef(getDefaultSessionPort());
+  const sessionHydratedRef = useRef(false);
+  const persistTimerRef = useRef<number | null>(null);
+
+  /** Proposal → 持久化格式：只存 base.hash，不存 rev */
+  const proposalToFile = (p: Proposal): AiSessionProposalFile => {
+    if (p.kind === 'create') return { kind: 'create', title: p.title, body: p.body };
+    if (p.kind === 'replace') {
+      return {
+        kind: 'replace',
+        docId: p.docId,
+        base: { hash: p.base.hash },
+        title: p.title,
+        body: p.body,
+        previousBody: p.previousBody,
+      };
+    }
+    return {
+      kind: 'delete',
+      docId: p.docId,
+      base: { hash: p.base.hash },
+      title: p.title,
+    };
+  };
+
+  /** 水合：启动只读一次；损坏 / 过期静默降级 */
+  useEffect(() => {
+    if (sessionHydratedRef.current) return;
+    const vaultId = kernel.env.vaultId;
+    if (!vaultId) {
+      sessionHydratedRef.current = true;
+      return;
+    }
+    sessionHydratedRef.current = true;
+    void hydrateSession({
+      vaultId,
+      port: sessionPortRef.current,
+      readDoc: async (id: DocId) => {
+        try {
+          const snap = await kernel.docs.read(id);
+          return { meta: { rev: snap.meta.rev } };
+        } catch {
+          return null;
+        }
+      },
+    }).then((result) => {
+      if (result.fileError !== null) {
+        setNotice(result.fileError);
+        return;
+      }
+      if (result.turns.length > 0) {
+        const maxId = result.turns.length * 2; // 保守推断，避免 id 冲突
+        nextIdRef.current = maxId + 1;
+        setTurns(result.turns.map((t, i) => ({ id: i + 1, role: t.role, content: t.content })));
+      }
+      if (result.proposal !== null) {
+        const p = result.proposal;
+        if (p.kind === 'create') {
+          setProposal({ kind: 'create', title: p.title, body: p.body });
+        } else {
+          // replace / delete 需要 rev 占位：过期校验已在 hydrate 层做完，恢复的 proposal 到应用时
+          // 会再走一次 applyProposalDoc 内的 base.hash 校验
+          const baseRev = { rev: 0, hash: unsafeContentHash(p.base.hash) };
+          if (p.kind === 'replace') {
+            setProposal({
+              kind: 'replace',
+              docId: p.docId,
+              base: baseRev,
+              title: p.title,
+              body: p.body,
+              previousBody: p.previousBody,
+            });
+          } else {
+            setProposal({ kind: 'delete', docId: p.docId, base: baseRev, title: p.title });
+          }
+        }
+      }
+      if (result.applyingDowngraded) {
+        setNotice('上次程序在应用 AI 提案时意外退出，该提案已恢复为待确认（将在应用时再次校验）。');
+      }
+      if (result.staleProposalMessage !== null) {
+        setNotice(result.staleProposalMessage);
+      }
+    });
+  }, [kernel]);
+
+  /** debounce 持久化：turns / proposal / streaming / busy 变化 → 500ms 后写盘 */
+  useEffect(() => {
+    if (!sessionHydratedRef.current) return; // 水合前不写盘
+    const vaultId = kernel.env.vaultId;
+    if (!vaultId) return;
+    if (persistTimerRef.current !== null) {
+      window.clearTimeout(persistTimerRef.current);
+    }
+    persistTimerRef.current = window.setTimeout(() => {
+      const state: 'idle' | 'streaming' | 'applying' = streaming
+        ? 'streaming'
+        : busy && proposal !== null
+          ? 'applying'
+          : 'idle';
+      void persistSession({
+        vaultId,
+        turns: turns.map((t) => ({ role: t.role, content: t.content })),
+        proposal: proposal !== null ? proposalToFile(proposal) : null,
+        state,
+        port: sessionPortRef.current,
+      });
+      persistTimerRef.current = null;
+    }, 500);
+    return () => {
+      if (persistTimerRef.current !== null) {
+        window.clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+    };
+  }, [kernel.env.vaultId, turns, proposal, streaming, busy]);
+
+  /** 卸载前 flush 一次持久化，保证最后状态不丢；从 ref 读最新值避免 deps 数组膨胀 */
+  const latestStateRef = useRef({ turns, proposal, streaming, busy, vaultId: kernel.env.vaultId });
+  latestStateRef.current = { turns, proposal, streaming, busy, vaultId: kernel.env.vaultId };
+  useEffect(() => {
+    const port = sessionPortRef.current;
+    return () => {
+      if (persistTimerRef.current !== null) {
+        window.clearTimeout(persistTimerRef.current);
+      }
+      const { turns: t, proposal: p, streaming: s, busy: b, vaultId: v } = latestStateRef.current;
+      if (!v) return;
+      const state: 'idle' | 'streaming' | 'applying' = s ? 'streaming' : b && p !== null ? 'applying' : 'idle';
+      void persistSession({
+        vaultId: v,
+        turns: t.map((turn) => ({ role: turn.role, content: turn.content })),
+        proposal: p !== null ? proposalToFile(p) : null,
+        state,
+        port,
+      });
+    };
+  }, []);
 
   useEffect(() => {
     const list = listRef.current;
@@ -140,6 +288,33 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
     if (session === null) return;
     void session.cancel();
     setStreaming(false);
+  };
+
+  /** AI 结果节点：生成内容存为自由文本节点，落在当前镜头中心（必须用户点按钮才写画布） */
+  const requestCanvasNode = (turn: Turn): void => {
+    const capture = readCapturePoint();
+    if (capture === null) {
+      setError('画布未就绪，先打开一张画布再落节点');
+      return;
+    }
+    const node = {
+      id: `n_${createUlid()}`,
+      kind: 'note' as const,
+      docId: null,
+      text: turn.content,
+      rect: { x: capture.point.x, y: capture.point.y, w: 320, h: 220 },
+      z: capture.z,
+      groupId: null,
+      meta: { color: 'secondary' },
+    };
+    void kernel.canvas
+      .apply(capture.canvasId as CanvasId, [{ type: 'addNode', node }])
+      .then(() => {
+        setNotice('已落为画布文本节点');
+      })
+      .catch((cause: unknown) => {
+        setError(`落节点失败：${String(cause)}`);
+      });
   };
 
   const requestCreate = (turn: Turn): void => {
@@ -344,7 +519,7 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
           <div className={styles.empty}>
             <p className={styles.emptyTitle}>基于本地知识库的对话</p>
             <p className={styles.emptyText}>
-              对话只保留在本次运行的内存里，不写入库文件。回答由你在设置中配置的服务生成。
+              回答由你在设置中配置的服务生成。对话会保存于此 Mac（<em>不进知识库，不导出</em>）。
             </p>
             <button
               type="button"
@@ -365,6 +540,16 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
               </div>
               {turn.role === 'assistant' && !streaming && turn.content.trim() !== '' ? (
                 <div className={styles.turnActions}>
+                  <button
+                    type="button"
+                    className={styles.turnAction}
+                    title="生成内容落成当前画布的自由文本节点（结果留在空间里）"
+                    onClick={() => {
+                      requestCanvasNode(turn);
+                    }}
+                  >
+                    落为画布节点
+                  </button>
                   <button
                     type="button"
                     className={styles.turnAction}

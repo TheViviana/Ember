@@ -21,6 +21,7 @@ const scene = (overrides: Partial<CanvasScene> = {}): CanvasScene => {
     grid: { size: 16, snap: false },
     nodes: [],
     edges: [],
+    bookmarks: [],
     ...overrides,
   };
 };
@@ -56,6 +57,7 @@ void test('解析磁盘格式：扁平 x/y/w/h 收成 rect，缺 grid 用默认�
     viewport: { x: 1, y: 2, zoom: 1 },
     nodes: [{ id: 'n1', kind: 'note', text: 'hi', x: 5, y: 6, w: 200, h: 120, z: 3 }],
     edges: [],
+  bookmarks: [],
   });
 
   assert.equal(parsed.ok, true);
@@ -75,6 +77,7 @@ void test('序列化再解析保持节点/边/网格/能力数据不变', () => 
       node('n2', { z: 2 }),
     ],
     edges: [{ ...edge('e1', 'n1', 'n2'), label: '引用', arrow: 'both', meta: { weight: 2 } }],
+  bookmarks: [],
   });
   const document = {
     schemaVersion: 1 as const,
@@ -106,6 +109,7 @@ void test('校验：组不能嵌套、不能悬空 groupId、不能重复同向�
   const duplicate = scene({
     nodes: [node('n1'), node('n2'), node('g1', { kind: 'group' })],
     edges: [edge('e1', 'n1', 'n2'), edge('e2', 'n1', 'n2'), edge('e3', 'n1', 'g1')],
+  bookmarks: [],
   });
   const duplicateCodes = validateScene(duplicate).map((issue) => issue.code);
   assert.ok(duplicateCodes.includes('duplicate_edge'));

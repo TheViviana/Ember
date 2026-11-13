@@ -6,11 +6,13 @@ import {
   IMPORT_ACCEPT,
   IMPORT_ROOT,
   MAX_IMPORT_FILES,
+  MAX_IMPORT_MB,
   type ImportCandidate,
   type ImportPlan,
   type ImportRejection,
 } from './markdown-import.ts';
 import { useImportStore } from './import-store.ts';
+import { readonlyText } from '../components/readonly-text.ts';
 import styles from './ImportDialog.module.css';
 
 type Stage = 'pick' | 'reading' | 'preview' | 'writing' | 'done';
@@ -135,7 +137,6 @@ export const ImportDialog = (): ReactElement | null => {
     if (stale()) return;
     await queryClient.invalidateQueries({ queryKey: ['docs', 'list'] });
     if (stale()) return;
-    await queryClient.invalidateQueries({ queryKey: ['docs', 'texts'] });
     if (stale()) return;
     setResult({ saved, failures });
     setStage('done');
@@ -158,11 +159,13 @@ export const ImportDialog = (): ReactElement | null => {
         </header>
 
         <p className={styles.note}>
-          只导入 .md / .markdown；落点 {IMPORT_ROOT}/，保留所选目录内的相对层级；单篇 ≤ 5 MB，单次 ≤{' '}
+          只导入 .md / .markdown；落点 {IMPORT_ROOT}/，保留所选目录内的相对层级；单篇 ≤ {MAX_IMPORT_MB} MB，单次 ≤{' '}
           {MAX_IMPORT_FILES} 篇；跳过 media/ 与 .workbench/；同名不覆盖，自动加后缀。
         </p>
 
-        {readonlyMode ? <p className={styles.warn}>当前库为只读模式，不能导入。</p> : null}
+        {readonlyMode ? (
+          <p className={styles.warn}>{readonlyText(kernel.env.readonlyReason)}，不能导入。</p>
+        ) : null}
 
         {stage === 'pick' ? (
           <div className={styles.pick}>

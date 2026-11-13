@@ -1,13 +1,5 @@
-import type { DocId, VaultPath } from '#doc-model';
-import type {
-  Disposable,
-  IndexEvent,
-  IndexedDocument,
-  IndexStats,
-  LinkRecord,
-  SearchResult,
-  WriteIntent,
-} from './types.ts';
+import type { VaultPath } from '#doc-model';
+import type { Disposable, WriteIntent } from './types.ts';
 
 export interface VaultFileEvent {
   readonly kind: 'created' | 'changed' | 'removed' | 'renamed';
@@ -16,9 +8,17 @@ export interface VaultFileEvent {
   readonly from?: VaultPath;
 }
 
+/** 库健康检查清单条目；只读遍历结果，不跟随符号链接 */
+export interface VaultScanEntry {
+  readonly path: VaultPath;
+  readonly kind: 'file' | 'symlink';
+  /** 普通文件为字节数；符号链接为链接自身长度 */
+  readonly size: number;
+}
+
 /**
- * 文件系统端口（kernel-contract §11 第 5 步由 data 层注入）。
- * 内核只经此端口读写文件；journal、库锁、watcher 的实现在 Rust 侧。
+ * 文件系统端口（启动时由 data 层注入）。
+ * 内核只经此端口读写文件；库锁、watcher 的实现在 Rust 侧。
  */
 export interface VaultPort {
   readonly readonlyMode: boolean;
@@ -32,30 +32,18 @@ export interface VaultPort {
   /** 永久删除：仅供内核回滚内部使用，不是用户删除入口 */
   purge(path: VaultPath): Promise<void>;
   rename(from: VaultPath, to: VaultPath): Promise<void>;
-  /** 全库文件清单（相对路径），用于目录对账 */
+  /** 全库 Markdown 清单（相对路径），用于文档目录对账 */
   list(): Promise<readonly VaultPath[]>;
+  /**
+   * 库健康检查清单：包含 `.md` / `.markdown` / `.workbench` 画布与历史 JSON / 符号链接。
+   * 只读，不跟随符号链接。
+   */
+  scan(): Promise<readonly VaultScanEntry[]>;
+  /** 画布清单（`.workbench/canvas/<id>.json`），画布库扫描用 */
+  listCanvases(): Promise<readonly VaultPath[]>;
   /** 文件元信息；不存在返回 null */
   stat(path: VaultPath): Promise<{ readonly mtime: string; readonly size: number } | null>;
   watch(listener: (event: VaultFileEvent) => void): Disposable;
-  /** 运行期只读状态变化（库锁被接管/心跳失败）；不支持该能力的端口可省略 */
-  watchMode?(listener: (state: { readonly readonly: boolean; readonly reason: string | null }) => void): Disposable;
-}
-
-/** 索引端口：SQLite + FTS5 计划由 Rust 侧实现；v1 仍是占位端口（见 data/tauri/index-port.ts） */
-export interface IndexPort {
-  readonly available: boolean;
-  document(id: DocId): Promise<IndexedDocument | null>;
-  search(input: {
-    readonly text: string;
-    readonly limit: number;
-    readonly tags: readonly string[] | null;
-    readonly pathPrefix: VaultPath | null;
-  }): Promise<SearchResult>;
-  outbound(id: DocId): Promise<readonly LinkRecord[]>;
-  backlinks(id: DocId): Promise<readonly LinkRecord[]>;
-  stats(): Promise<IndexStats>;
-  rebuild(): Promise<IndexStats>;
-  watch(listener: (event: IndexEvent) => void): Disposable;
 }
 
 /**
@@ -66,15 +54,6 @@ export interface MachineUiPort {
   /** 文件不存在返回 null */
   read(): Promise<string | null>;
   write(json: string): Promise<void>;
-}
-
-/** AI 传输端口：提示词与模型选择在能力侧，内核只转发 */
-export interface AiPort {
-  complete(input: {
-    readonly prompt: string;
-    readonly system: string | null;
-    readonly signal: AbortSignal | null;
-  }): Promise<string>;
 }
 
 /** 窗口逻辑坐标与尺寸（无边框窗口自绘缩放用） */

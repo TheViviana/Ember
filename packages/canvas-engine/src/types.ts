@@ -1,6 +1,6 @@
 import type { CanvasId, DocId } from '../../doc-model/src/ids.ts';
 
-/** 画布几何与场景类型（kernel-contract §6），内核只做装配与持久化桥接 */
+/** 画布几何与场景类型（kernel-contract §5），内核只做装配与持久化桥接 */
 export interface CanvasPoint {
   readonly x: number;
   readonly y: number;
@@ -46,6 +46,22 @@ export interface CanvasEdge {
   readonly meta: Readonly<Record<string, unknown>>;
 }
 
+/** 画布过滤条件：按标签 / 节点类型 / 关键词临时高亮或隐藏（视图书签可一并保存） */
+export interface CanvasFilters {
+  readonly tags: readonly string[];
+  readonly kinds: readonly string[];
+  readonly text: string;
+  readonly mode: 'dim' | 'hide';
+}
+
+/** 视图书签：命名的观察角度（镜头位置 + 缩放 + 过滤条件） */
+export interface CanvasBookmark {
+  readonly id: string;
+  readonly name: string;
+  readonly viewport: Viewport;
+  readonly filters: CanvasFilters | null;
+}
+
 export interface CanvasScene {
   readonly id: CanvasId;
   readonly title: string;
@@ -53,6 +69,8 @@ export interface CanvasScene {
   readonly grid: CanvasGrid;
   readonly nodes: readonly CanvasNode[];
   readonly edges: readonly CanvasEdge[];
+  /** 视图书签；画布只存摆放，书签也只存镜头与过滤，不承载正文 */
+  readonly bookmarks: readonly CanvasBookmark[];
 }
 
 /** 磁盘上的画布文档：scene 之外还有时间戳、schema 与能力私有数据（写入时原样保留） */

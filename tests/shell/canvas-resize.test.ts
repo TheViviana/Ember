@@ -150,6 +150,7 @@ const makeScene = (nodes: readonly CanvasNode[]): CanvasScene => ({
   grid: { size: 8, snap: true },
   nodes,
   edges: [],
+bookmarks: [],
 });
 
 void test('松手提交的 updateNode 确实把缩放结果落进场景', () => {

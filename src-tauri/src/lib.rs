@@ -30,11 +30,8 @@ pub fn run() {
             let root = resolve_root();
             match vault::Vault::open(root.clone()) {
                 Ok(vault) => {
-                    let watcher = vault::watcher::spawn(
-                        app.handle().clone(),
-                        vault.root().to_path_buf(),
-                        vault.health_flag(),
-                    );
+                    let watcher =
+                        vault::watcher::spawn(app.handle().clone(), vault.root().to_path_buf());
                     app.manage(vault);
                     app.manage::<Watcher>(watcher);
                 }
@@ -56,12 +53,19 @@ pub fn run() {
             commands::vault_purge,
             commands::vault_rename,
             commands::vault_list,
+            commands::vault_list_canvases,
             commands::vault_stat,
+            commands::vault_scan,
             commands::asset_list,
             commands::asset_read,
             commands::asset_save,
             commands::machine_ui_read,
             commands::machine_ui_write,
+            commands::machine_ai_read,
+            commands::machine_ai_write,
+            commands::vault_backup_default_destination,
+            commands::vault_backup_export,
+            commands::vault_backup_inspect,
             commands::window_resize_frame,
             commands::ai::ai_key_save,
             commands::ai::ai_key_status,

@@ -528,7 +528,20 @@ export const useCanvasGestures = (options: CanvasGestureOptions) => {
     setSelectedEdgeId(id);
   }, []);
 
+  /** 切换画布时的一次性重置：清空选择与瞬时手势状态（引用稳定，供 reset effect 安全依赖） */
+  const resetTransient = useCallback((): void => {
+    setSelected(new Set());
+    setSelectedEdgeId(null);
+    setEditingId(null);
+    setMarquee(null);
+    setDraft(new Map());
+    setConnect(null);
+    setPanning(false);
+    setSpace(false);
+  }, []);
+
   return {
+    resetTransient,
     selected,
     setSelected,
     selectedEdgeId,

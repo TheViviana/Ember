@@ -354,7 +354,6 @@ function scanFile(root, file) {
 }
 
 const FONT_FILES = [
-  'orbitron-latin.woff2',
   'roboto-latin.woff2',
   'anonymous-pro-latin-400.woff2',
   'anonymous-pro-latin-700.woff2',

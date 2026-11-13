@@ -17,7 +17,7 @@ const SKIP_DIRS = new Set(['node_modules']);
  * 条目必须写明理由；文件拆分到限额内后必须删除对应条目，否则报 size-stale。
  * expires 是复核节点，不是失效开关：到期必须重新裁决，修复后删除条目或论证后改期。
  * 待办（本项只登记，后续单独拆分）：
- * - settings/SettingsPanel.tsx、tools/GalleryEntry.tsx
+ * - settings/SettingsPanel.tsx
  */
 export const SIZE_WHITELIST = [
   {
@@ -26,8 +26,8 @@ export const SIZE_WHITELIST = [
     expires: '2027-01-31',
   },
   {
-    file: 'src/shell/tools/GalleryEntry.tsx',
-    reason: '工具画廊单文件承载卡片、筛选与详情；待拆分展示层',
+    file: 'src/shell/ai/AiPanel.tsx',
+    reason: 'AI 面板单文件承载对话流、提案应用/撤销、持久化（阶段 7 新增水合 + debounce + 崩溃恢复）；待按 UI/Proposal/Persist 拆三个子模块',
     expires: '2027-01-31',
   },
 ];

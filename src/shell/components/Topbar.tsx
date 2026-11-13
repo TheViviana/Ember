@@ -1,15 +1,24 @@
 import { useEffect, useState, type ReactElement } from 'react';
 import { useWindowPort } from '../kernel-provider.tsx';
 import { WindowControls } from './WindowControls.tsx';
+import { ShellMenu } from './ShellMenu.tsx';
 import { readonlyText } from './readonly-text.ts';
+import { CanvasSwitcher } from '../canvas/CanvasSwitcher.tsx';
+import type { CanvasLibrary } from '../canvas/use-canvas-library.ts';
 import styles from './Topbar.module.css';
 
 export interface TopbarProps {
   readonly kernelVersion: string;
   readonly readonlyMode: boolean;
   readonly readonlyReason: string | null;
+  /** 画布库导航：胶囊 + 面包屑 + 画布列表 */
+  readonly library: CanvasLibrary;
+  readonly onOpenDocuments: () => void;
+  readonly onOpenSearch: () => void;
   readonly aiOpen: boolean;
   readonly onToggleAi: () => void;
+  readonly conflictCount: number;
+  readonly onOpenConflicts: () => void;
   readonly onOpenSettings: () => void;
 }
 
@@ -19,8 +28,13 @@ export const Topbar = ({
   kernelVersion,
   readonlyMode,
   readonlyReason,
+  library,
+  onOpenDocuments,
+  onOpenSearch,
   aiOpen,
   onToggleAi,
+  conflictCount,
+  onOpenConflicts,
   onOpenSettings,
 }: TopbarProps): ReactElement => {
   const windowPort = useWindowPort();
@@ -45,7 +59,7 @@ export const Topbar = ({
         void windowPort.toggleZoom();
       }}
     >
-      {/* 两簇浮层：左侧交通灯 + 品牌，右侧状态 + 时钟 + 设置。
+      {/* 左簇：交通灯 + 品牌 + 当前画布（面包屑 + 胶囊 + 列表）。
           中间留空仍是 header 的拖拽区，所以空白处也能按住拖动整个窗口。 */}
       <div className={styles.group}>
         <WindowControls />
@@ -55,6 +69,16 @@ export const Topbar = ({
           <span className={styles.logoText}>EMBER</span>
           <span className={styles.logoVersion}>{kernelVersion}</span>
         </div>
+
+        <ShellMenu
+          onOpenDocuments={onOpenDocuments}
+          onOpenSearch={onOpenSearch}
+          aiOpen={aiOpen}
+          onToggleAi={onToggleAi}
+          onOpenSettings={onOpenSettings}
+        />
+
+        <CanvasSwitcher library={library} />
       </div>
 
       <div className={`${styles.group} ${styles.right}`}>
@@ -66,17 +90,17 @@ export const Topbar = ({
           {readonlyMode ? readonlyText(readonlyReason) : '内核就绪'}
         </span>
         <span className={styles.clock}>{clock}</span>
-        <button
-          type="button"
-          className={`${styles.settings} ${aiOpen ? styles.settingsActive : ''}`}
-          aria-pressed={aiOpen}
-          onClick={onToggleAi}
-        >
-          AI
-        </button>
-        <button type="button" className={styles.settings} onClick={onOpenSettings}>
-          设置
-        </button>
+        {conflictCount > 0 ? (
+          <button
+            type="button"
+            className={`${styles.settings} ${styles.conflict}`}
+            aria-label="打开冲突处理中心"
+            title="存在待处理的冲突副本"
+            onClick={onOpenConflicts}
+          >
+            冲突 {conflictCount}
+          </button>
+        ) : null}
       </div>
     </header>
   );

@@ -68,7 +68,6 @@
   --ember-bg-surface: #171717;
   --ember-bg-elevated: #1f1f1f;
   --ember-bg-glass: rgba(23, 23, 23, 0.86);
-  --ember-bg-sidebar: #1f1f1f;
   --ember-bg-menu: #1f1f1f;
   --ember-bg-hover: rgba(255, 255, 255, 0.08);
   --ember-bg-selected: rgba(255, 255, 255, 0.1);
@@ -161,7 +160,6 @@
   /* ---------- 布局尺寸 ---------- */
   --sidebar-width: 250px;
   --topbar-height: 52px;
-  --tabs-height: 38px;
   --statusbar-height: 28px;
 
   /* ---------- 窗口底色（无边框窗口的纯黑画布底） ---------- */
@@ -209,15 +207,6 @@
   --float-min-height: 320px;
   --float-resize-hit: 16px;
 
-  /* ---------- 侧栏自动隐藏 ---------- */
-  --sidebar-rail-width: 4px;
-  --sidebar-peek-zone: 8px;
-  /* 热区起始偏移：最外侧 --window-resize-grip 全高归窗口缩放（与右边缘对称），
-   * 侧栏热区从该偏移之后开始（6–14px），两者不重叠。 */
-  --sidebar-peek-start: var(--window-resize-grip);
-  /* 热区上下留白：让出窗口左缘上下两段给缩放热区，中段整段用于滑出侧栏 */
-  --sidebar-peek-inset: 96px;
-  --sidebar-peek-delay: 120ms;
 
   /* ---------- 无边框窗口 ---------- */
   --window-control-size: 12px;
@@ -234,7 +223,6 @@
    * 侧栏：画布在 DOM 中位于侧栏下方，窗口 vibrancy 穿不过来，改用 backdrop-filter 模糊画布。
    */
   --ember-glass-topbar: rgba(10, 10, 10, 0.62);
-  --ember-glass-sidebar: rgba(31, 31, 31, 0.72);
   --ember-glass-blur: 24px;
   --ember-glass-saturate: 140%;
 
@@ -250,7 +238,6 @@
 @media (prefers-reduced-transparency: reduce) {
   :root {
     --ember-glass-topbar: #0a0a0a;
-    --ember-glass-sidebar: #1f1f1f;
     --ember-glass-blur: 0px;
     --ember-glass-saturate: 100%;
   }

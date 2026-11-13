@@ -53,6 +53,7 @@ const makeScene = (
   grid: { size: 8, snap: true },
   nodes,
   edges,
+  bookmarks: [],
   ...overrides,
 });
 

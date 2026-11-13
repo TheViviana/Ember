@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   attachMachineUiPort,
+  DEFAULT_AI,
+  DEFAULT_AI_PANEL,
   DEFAULT_POMODORO,
   flushMachineUiWrites,
   hydrateMachineUi,
   parseMachineUi,
   parsePomodoro,
-  parseRecall,
   serializeMachineUi,
   useMachineStore,
 } from '../../src/data/stores/machine-store.ts';
@@ -24,7 +25,7 @@ attachMachineUiPort({
   },
 });
 
-void test('老 v1 文件缺 recall / pomodoro 时按默认值补齐，浮窗数据不丢', () => {
+void test('老 v1 文件缺 pomodoro 时按默认值补齐，浮窗数据不丢', () => {
   const legacy = JSON.stringify({
     schemaVersion: 1,
     floatSizes: { doc: { width: 700, height: 480 } },
@@ -33,12 +34,10 @@ void test('老 v1 文件缺 recall / pomodoro 时按默认值补齐，浮窗数�
   const parsed = parseMachineUi(legacy);
   assert.ok(parsed !== null);
   assert.deepEqual(parsed.floatSizes.doc, { width: 700, height: 480 });
-  assert.equal(parsed.recall, null);
   assert.deepEqual(parsed.pomodoro, DEFAULT_POMODORO);
 });
 
-void test('recall 与 pomodoro 序列化后可完整读回', async () => {
-  const recall = { day: '2026-11-11', ids: ['a', 'b', 'c'] };
+void test('pomodoro 与 canvasFlags 序列化后可完整读回', async () => {
   const pomodoro = {
     focusMinutes: 45,
     breakMinutes: 10,
@@ -48,34 +47,28 @@ void test('recall 与 pomodoro 序列化后可完整读回', async () => {
     noise: 'pink' as const,
     noiseVolume: 0.45,
   };
-  const json = serializeMachineUi({}, {}, recall, pomodoro);
+  const canvasFlags = { '01JCANVAS0000000000000000': { recentEdits: true } };
+  const json = serializeMachineUi({}, {}, pomodoro, DEFAULT_AI, DEFAULT_AI_PANEL, canvasFlags);
   const parsed = parseMachineUi(json);
   assert.ok(parsed !== null);
-  assert.deepEqual(parsed.recall, recall);
   assert.deepEqual(parsed.pomodoro, pomodoro);
+  assert.deepEqual(parsed.canvasFlags, canvasFlags);
 
-  useMachineStore.getState().rememberRecall(recall);
   useMachineStore.getState().setPomodoro(pomodoro);
+  useMachineStore.getState().setCanvasFlag('01JCANVAS0000000000000000', { recentEdits: true });
   await flushMachineUiWrites();
   // 水合门禁之下，写入只在 hydrate 之后发生（水合前会整份覆盖 ui.json）
   await hydrateMachineUi();
-  useMachineStore.getState().rememberRecall(recall);
+  useMachineStore.getState().setCanvasFlag('01JCANVAS0000000000000000', { recentEdits: true });
   await flushMachineUiWrites();
   assert.ok(writes.length > 0);
   const saved = parseMachineUi(stored ?? '');
   assert.ok(saved !== null);
-  assert.deepEqual(saved.recall, recall);
   assert.deepEqual(saved.pomodoro, pomodoro);
+  assert.deepEqual(saved.canvasFlags, canvasFlags);
 });
 
-void test('非法 recall / pomodoro 字段被丢弃或夹到合法区间', () => {
-  assert.equal(parseRecall({ day: '11/11', ids: ['a'] }), null);
-  assert.equal(parseRecall({ day: '2026-11-11', ids: 'a' }), null);
-  assert.deepEqual(parseRecall({ day: '2026-11-11', ids: ['a', 'a', 3, 'b'] }), {
-    day: '2026-11-11',
-    ids: ['a', 'b'],
-  });
-
+void test('非法 pomodoro 字段被丢弃或夹到合法区间', () => {
   const parsed = parsePomodoro({
     focusMinutes: 999,
     breakMinutes: 0,
@@ -118,7 +111,7 @@ void test('水合前的写入不落盘（防默认态覆盖 ui.json），水合�
   let freshStored: string | null = JSON.stringify({
     schemaVersion: 1,
     floatSizes: { doc: { width: 640, height: 420 } },
-    recall: { day: '2026-11-10', ids: ['old'] },
+    canvasFlags: { '01JCANVASOLD000000000000': { recentEdits: true } },
   });
   fresh.attachMachineUiPort({
     read: () => Promise.resolve(freshStored),
@@ -130,18 +123,21 @@ void test('水合前的写入不落盘（防默认态覆盖 ui.json），水合�
   });
 
   // 水合前：写入被丢弃，磁盘保持旧内容
-  fresh.useMachineStore.getState().rememberRecall({ day: '2026-11-12', ids: ['new'] });
+  fresh.useMachineStore.getState().setCanvasFlag('01JCANVASNEW0000000000000', { recentEdits: true });
   await fresh.flushMachineUiWrites();
   assert.equal(freshWrites.length, 0);
-  assert.ok(freshStored?.includes('"2026-11-10"'), '磁盘仍是旧内容');
+  assert.ok(freshStored?.includes('01JCANVASOLD000000000000'), '磁盘仍是旧内容');
 
   // 水合后：磁盘状态进内存，写入照常
   await fresh.hydrateMachineUi();
-  assert.deepEqual(fresh.useMachineStore.getState().recall, { day: '2026-11-10', ids: ['old'] });
-  fresh.useMachineStore.getState().rememberRecall({ day: '2026-11-12', ids: ['new'] });
+  assert.deepEqual(
+    fresh.useMachineStore.getState().canvasFlags['01JCANVASOLD000000000000'],
+    { recentEdits: true },
+  );
+  fresh.useMachineStore.getState().setCanvasFlag('01JCANVASNEW0000000000000', { recentEdits: true });
   await fresh.flushMachineUiWrites();
   assert.equal(freshWrites.length, 1);
-  assert.ok(freshStored?.includes('"2026-11-12"'), '新内容落盘');
+  assert.ok(freshStored?.includes('01JCANVASNEW0000000000000'), '新内容落盘');
 });
 
 void test('未来版本的 ui.json：本会话只读不回写', async () => {
@@ -167,7 +163,7 @@ void test('未来版本的 ui.json：本会话只读不回写', async () => {
     },
   });
   await fresh.hydrateMachineUi();
-  fresh.useMachineStore.getState().rememberRecall({ day: '2026-11-12', ids: ['a'] });
+  fresh.useMachineStore.getState().setCanvasFlag('01JCANVASNEW0000000000000', { recentEdits: true });
   await fresh.flushMachineUiWrites();
   assert.equal(writes.length, 0, '未来版本文档禁止回写，新字段不得被旧版应用抹掉');
 });

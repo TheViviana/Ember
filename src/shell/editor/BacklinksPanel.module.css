@@ -189,3 +189,119 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* -------- 未链接提及 tab（阶段 8） -------- */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-muted);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--ember-text-primary);
+}
+
+.tab[aria-selected='true'] {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-accent);
+}
+
+.badge {
+  min-width: 16px;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--ember-border-strong);
+  color: var(--ember-bg-elevated);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.notice {
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px dashed var(--ember-border);
+  border-radius: var(--radius-sm);
+  color: var(--ember-text-muted);
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+}
+
+.unlinkedItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px var(--space-xs);
+  border-radius: var(--radius-sm);
+}
+
+.unlinkedItem:hover {
+  background: var(--ember-bg-hover);
+}
+
+.snippet {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--ember-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+}
+
+.unlinkedItem:hover .actions {
+  opacity: 1;
+}
+
+.acceptBtn,
+.ignoreBtn {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.acceptBtn {
+  background: var(--ember-text-accent);
+  color: var(--ember-bg-elevated);
+}
+
+.acceptBtn:hover {
+  filter: brightness(1.1);
+}
+
+.ignoreBtn {
+  background: transparent;
+  color: var(--ember-text-muted);
+}
+
+.ignoreBtn:hover {
+  color: var(--ember-text-primary);
+}

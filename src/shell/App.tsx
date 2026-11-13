@@ -1,22 +1,33 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { DocId } from '#doc-model';
 import { toErrorText } from '../kernel/errors.ts';
-import type { CapabilityState, CommandDescriptor, SettingsPatch } from '../kernel/types.ts';
+import type { CommandDescriptor, SettingsPatch } from '../kernel/types.ts';
 import { runCloseFlow } from './close-flow.ts';
 import { useKernel, useKernelShutdown, useWindowPort } from './kernel-provider.tsx';
 import { AiPanel } from './ai/AiPanel.tsx';
 import { CanvasSurface } from './canvas/CanvasSurface.tsx';
+import { useCanvasLibrary } from './canvas/use-canvas-library.ts';
 import { CommandPalette } from './commands/CommandPalette.tsx';
-import { useShellCommands } from './commands/shell-commands.ts';
+import {
+  CAPTURE_COMMAND,
+  usePanelCommands,
+  useShellCommands,
+} from './commands/shell-commands.ts';
 import { ImportDialog } from './import/ImportDialog.tsx';
 import { useImportCommands } from './import/import-commands.ts';
 import { setCursor } from './editor/cursor-store.ts';
+import { requestFloatJump } from './editor/float-jump.ts';
 import { flushFloatEditors } from './editor/float-flush.ts';
 import { useFloatStore } from './editor/float-store.ts';
 import { useFocusStore } from './editor/focus-store.ts';
 import { flushMachineUiWrites, useMachineStore } from '../data/stores/machine-store.ts';
-import { SidebarDock } from './components/SidebarDock.tsx';
+import { DocumentListPanel } from './documents/DocumentListPanel.tsx';
+import { ConflictPanel } from './documents/ConflictPanel.tsx';
+import { HealthPanel } from './documents/HealthPanel.tsx';
+import { InboxPanel } from './collect/InboxPanel.tsx';
+import { layout } from './theme/tokens.ts';
+import { AttachmentPanel } from './attachments/AttachmentPanel.tsx';
 import { StatusBar } from './components/StatusBar.tsx';
 import { Topbar } from './components/Topbar.tsx';
 import { ToolRail } from './tools/ToolRail.tsx';
@@ -25,35 +36,38 @@ import { WindowChrome } from './window/WindowChrome.tsx';
 import styles from './App.module.css';
 
 /**
- * 主页外壳：顶栏 / 资源管理器 / 无限画布 / 状态栏。
- * 所有展示值都来自内核真实状态，不使用占位数据。
+ * 主页外壳：顶栏 / 无限画布 / 状态栏。
+ * 画布导航来自画布库（总览 + 多画布 + Portal 面包屑），
+ * 文档列表、AI 对话都是可召出的浮层，无常驻侧栏。
  */
 export const App = (): ReactElement => {
   const kernel = useKernel();
   const windowPort = useWindowPort();
   const shutdown = useKernelShutdown();
   const queryClient = useQueryClient();
-  // 侧栏高亮 / 浮窗层级共用同一份激活状态；关闭最前窗时 store 会回退到下一扇
+  // 浮窗层级共用同一份激活状态；关闭最前窗时 store 会回退到下一扇
   const activeDocId = useFloatStore((state) => state.activeId);
   const focusActive = useFocusStore((state) => state.active);
-  const aiOpen = useMachineStore((state) => state.panels.ai.open);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [docListOpen, setDocListOpen] = useState(false);
+  const [conflictOpen, setConflictOpen] = useState(false);
+  const [healthOpen, setHealthOpen] = useState(false);
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [commands, setCommands] = useState<readonly CommandDescriptor[]>(() =>
     kernel.commands.list(),
   );
-  const [capabilities, setCapabilities] = useState<readonly CapabilityState[]>(() =>
-    kernel.capabilities.list(),
-  );
-  // 运行期库锁被接管后由内核广播 vault:mode，状态栏需要跟着切换
-  const [readonlyMode, setReadonlyMode] = useState(kernel.env.readonlyMode);
-  const [readonlyReason, setReadonlyReason] = useState<string | null>(
-    kernel.env.readonlyReason,
-  );
+  // 独占创建 + pid 存活模型下只读只在启动时确定（被另一实例占用），运行期不变
+  const readonlyMode = kernel.env.readonlyMode;
+  const readonlyReason = kernel.env.readonlyReason;
   // 关窗落盘失败：阻止本次关闭并在状态栏提示；同一会话内第二次关闭直接放行
   const [closeFailures, setCloseFailures] = useState<readonly string[] | null>(null);
   const closeBlockedRef = useRef(false);
   const closeFailuresRef = useRef<readonly string[] | null>(null);
+
+  const library = useCanvasLibrary();
 
   useShellCommands();
   useImportCommands();
@@ -61,14 +75,18 @@ export const App = (): ReactElement => {
   const documents = useQuery({ queryKey: ['docs', 'list'], queryFn: () => kernel.docs.list() });
   const settings = useQuery({ queryKey: ['settings'], queryFn: () => kernel.settings.read() });
 
-  // 外部新增/删除/改动文档时刷新列表（冲突副本也经此进入侧栏）
+  // 外部新增/删除/改动文档时刷新列表（冲突副本也经此进入文档列表）
   useEffect(() => {
-    const subscription = kernel.events.on('doc:changed', () => {
+    const changed = kernel.events.on('doc:changed', () => {
       void queryClient.invalidateQueries({ queryKey: ['docs', 'list'] });
-      void queryClient.invalidateQueries({ queryKey: ['docs', 'texts'] });
+    });
+    // 运行时新落盘的冲突副本不经过 doc:changed；单独监听以更新徽标与分组
+    const conflicted = kernel.events.on('doc:conflict', () => {
+      void queryClient.invalidateQueries({ queryKey: ['docs', 'list'] });
     });
     return () => {
-      subscription.dispose();
+      changed.dispose();
+      conflicted.dispose();
     };
   }, [kernel, queryClient]);
 
@@ -82,29 +100,11 @@ export const App = (): ReactElement => {
     };
   }, [kernel, queryClient]);
 
-  // 能力开关不经过 React 状态，订阅状态事件后重新取一次
+  // 浮窗上限跟随设置（默认 8 可配置）
   useEffect(() => {
-    setCapabilities(kernel.capabilities.list());
-    const subscription = kernel.events.on('capability:state', () => {
-      setCapabilities(kernel.capabilities.list());
-    });
-    return () => {
-      subscription.dispose();
-    };
-  }, [kernel]);
-
-  // 库锁运行期失守：内核广播 vault:mode，界面切到只读
-  useEffect(() => {
-    setReadonlyMode(kernel.env.readonlyMode);
-    setReadonlyReason(kernel.env.readonlyReason);
-    const subscription = kernel.events.on('vault:mode', ({ readonly, reason }) => {
-      setReadonlyMode(readonly);
-      setReadonlyReason(reason);
-    });
-    return () => {
-      subscription.dispose();
-    };
-  }, [kernel]);
+    const limit = settings.data?.ui.floatLimit;
+    if (typeof limit === 'number') useFloatStore.getState().setLimit(limit);
+  }, [settings.data]);
 
   // 关闭/隐藏前把排队中的 ui.json 与编辑器待写内容冲掉：退出瞬间的最后一次变更不落盘就丢了
   useEffect(() => {
@@ -161,7 +161,7 @@ export const App = (): ReactElement => {
     };
   }, [kernel, shutdown, windowPort]);
 
-  // 命令注册/注销不经过 React 状态，订阅总线后同步侧栏与命令面板
+  // 命令注册/注销不经过 React 状态，订阅总线后同步命令面板
   useEffect(() => {
     setCommands(kernel.commands.list());
     const subscription = kernel.commands.watch((next) => {
@@ -172,7 +172,40 @@ export const App = (): ReactElement => {
     };
   }, [kernel]);
 
-  // ⌘K / Ctrl+K 开关命令面板；⌘⇧F 在「当前浮窗」上进/出专注模式
+  const panelHandlers = useMemo(
+    () => ({
+      openDocuments: () => {
+        setDocListOpen((value) => !value);
+      },
+      openConflicts: () => {
+        setConflictOpen((value) => !value);
+      },
+      openHealth: () => {
+        setSettingsOpen(false);
+        setHealthOpen(true);
+      },
+      openInbox: () => {
+        setSettingsOpen(false);
+        setInboxOpen(true);
+      },
+      openAttachments: () => {
+        setAttachmentsOpen((value) => !value);
+      },
+      openAi: () => {
+        setAiOpen(true);
+      },
+      showOverview: () => {
+        library.showOverview();
+      },
+      createCanvas: () => {
+        void library.createCanvas('新画布');
+      },
+    }),
+    [library],
+  );
+  usePanelCommands(panelHandlers);
+
+  // ⌘K 开关统一搜索；⌘⇧F 专注模式；⌘⇧I 快速收集箱；⌘⇧N 快捷捕获（落在当前镜头中心）
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
@@ -180,6 +213,19 @@ export const App = (): ReactElement => {
       if (key === 'k' && !event.shiftKey) {
         event.preventDefault();
         setPaletteOpen((current) => !current);
+        return;
+      }
+      if (key === 'i' && event.shiftKey) {
+        event.preventDefault();
+        setSettingsOpen(false);
+        setInboxOpen(true);
+        return;
+      }
+      if (key === 'n' && event.shiftKey) {
+        event.preventDefault();
+        void kernel.commands.execute(CAPTURE_COMMAND).then((result) => {
+          if (!result.ok) kernel.log.warn('快捷捕获失败', { error: result.error });
+        });
         return;
       }
       if (key !== 'f' || !event.shiftKey) return;
@@ -197,27 +243,56 @@ export const App = (): ReactElement => {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, []);
+  }, [kernel]);
 
   /**
    * 打开文档浮窗：统一交给浮窗 store —— 未开则新开，已开则聚焦置顶，
-   * 满 5 篇则拒绝并出提示条（不自动挤掉任何窗口）。
+   * 满上限则静默挤掉最久未激活的一扇（无提示条）。
    */
   const openFloat = useCallback((docId: DocId, focus: 'title' | null): void => {
     useFloatStore.getState().open(docId, focus);
   }, []);
 
-  const patchSettings = async (patch: SettingsPatch): Promise<void> => {
-    await kernel.settings.patch(patch);
-  };
+  // 并排查看：先写入两扇浮窗的左右半区几何，再打开；新挂载的窗口会读取这些值
+  const openConflictSideBySide = useCallback(
+    (originalId: DocId, copyId: DocId): void => {
+      const margin = 16;
+      const top = layout.topbarHeight + 12;
+      const availableWidth = window.innerWidth - margin * 3;
+      const width = Math.min(layout.floatWidth, Math.max(layout.floatMinWidth, Math.floor(availableWidth / 2)));
+      const height = Math.min(
+        layout.floatHeight,
+        Math.max(layout.floatMinHeight, window.innerHeight - top - layout.statusbarHeight - margin),
+      );
+      const machine = useMachineStore.getState();
+      machine.rememberFloatSize(String(originalId), { width, height });
+      machine.rememberFloatSize(String(copyId), { width, height });
+      machine.rememberFloatPosition(String(originalId), { left: margin, top });
+      machine.rememberFloatPosition(String(copyId), { left: margin * 2 + width, top });
+      openFloat(originalId, null);
+      openFloat(copyId, null);
+      setConflictOpen(false);
+    },
+    [openFloat],
+  );
 
-  const toggleCapability = async (id: CapabilityState['id'], enabled: boolean): Promise<void> => {
-    await kernel.capabilities.setEnabled(id, enabled);
-    await kernel.settings.patch({ capabilities: { [String(id)]: { enabled } } });
-  };
+  const conflictCount = useMemo(
+    () => (documents.data ?? []).filter((meta) => meta.conflictOf !== null).length,
+    [documents.data],
+  );
 
-  const activeCapabilities = capabilities.filter((state) => state.active).length;
+  const patchSettings = useCallback(
+    async (patch: SettingsPatch): Promise<void> => {
+      await kernel.settings.patch(patch);
+    },
+    [kernel],
+  );
+
   const documentsError = documents.isError ? toErrorText(documents.error) : null;
+  const toolEntries = {
+    pomodoro: settings.data?.ui.toolPomodoro === true,
+    gallery: settings.data?.ui.toolGallery === true,
+  };
 
   return (
     <div className={`${styles.root} ${focusActive ? styles.focusMode : ''}`}>
@@ -225,41 +300,101 @@ export const App = (): ReactElement => {
         kernelVersion={kernel.env.kernelVersion}
         readonlyMode={readonlyMode}
         readonlyReason={readonlyReason}
+        library={library}
+        onOpenDocuments={() => {
+          setDocListOpen((value) => !value);
+        }}
+        onOpenSearch={() => {
+          setPaletteOpen((value) => !value);
+        }}
         aiOpen={aiOpen}
         onToggleAi={() => {
-          useMachineStore.getState().setAiPanel({ open: !aiOpen });
+          setAiOpen((value) => !value);
         }}
         onOpenSettings={() => setSettingsOpen(true)}
+        conflictCount={conflictCount}
+        onOpenConflicts={() => {
+          setConflictOpen((value) => !value);
+        }}
       />
 
       <div className={styles.body}>
         <main className={styles.main}>
-          <CanvasSurface onOpenFloat={openFloat} onCursor={setCursor} />
+          {library.error === null ? null : (
+            <p role="alert" className={styles.libraryError}>{library.error}</p>
+          )}
+          {library.currentId === null ? null : (
+            <CanvasSurface
+              canvasId={library.currentId}
+              onOpenFloat={openFloat}
+              onCursor={setCursor}
+              onEnterPortal={(target) => library.enterPortal(target)}
+              canvasIndex={library.canvasIndex}
+            />
+          )}
         </main>
 
         {aiOpen ? (
           <AiPanel
             onClose={() => {
-              useMachineStore.getState().setAiPanel({ open: false });
+              setAiOpen(false);
             }}
             onOpenSettings={() => setSettingsOpen(true)}
           />
         ) : null}
 
-        <ToolRail />
+        {docListOpen ? (
+          <DocumentListPanel
+            documents={documents.data ?? []}
+            loading={documents.isPending}
+            error={documentsError}
+            activeDocId={activeDocId === null ? null : String(activeDocId)}
+            onSelectDoc={(id) => {
+              openFloat(id as DocId, null);
+            }}
+            onClose={() => {
+              setDocListOpen(false);
+            }}
+          />
+        ) : null}
 
-        <SidebarDock
-          mode={(settings.data ?? { ui: { sidebar: 'auto' } }).ui.sidebar}
-          capabilities={capabilities}
-          commands={commands}
-          documents={documents.data ?? []}
-          documentsLoading={documents.isPending}
-          documentsError={documentsError}
-          activeDocId={activeDocId}
-          onSelectDoc={(id) => {
-            openFloat(id, null);
+        {conflictOpen ? (
+          <ConflictPanel
+            documents={documents.data ?? []}
+            onOpenSideBySide={openConflictSideBySide}
+            onClose={() => {
+              setConflictOpen(false);
+            }}
+          />
+        ) : null}
+
+        {healthOpen ? (
+          <HealthPanel
+            onClose={() => {
+              setHealthOpen(false);
+            }}
+          />
+        ) : null}
+
+        {inboxOpen ? (
+          <InboxPanel
+            onClose={() => {
+              setInboxOpen(false);
+            }}
+          />
+        ) : null}
+
+        <ToolRail
+          entries={toolEntries}
+          attachmentsOpen={attachmentsOpen}
+          onOpenAttachments={() => {
+            setAttachmentsOpen((value) => !value);
           }}
         />
+
+        {attachmentsOpen ? (
+          <AttachmentPanel library={library} onClose={() => setAttachmentsOpen(false)} />
+        ) : null}
       </div>
 
       <StatusBar
@@ -267,8 +402,6 @@ export const App = (): ReactElement => {
         readonlyReason={readonlyReason}
         kernelVersion={kernel.env.kernelVersion}
         documentCount={documents.data?.length ?? 0}
-        activeCapabilities={activeCapabilities}
-        capabilityCount={capabilities.length}
         commandCount={commands.length}
         notice={closeFailures === null ? null : '保存失败，已阻止关闭；再次关闭将丢弃改动'}
       />
@@ -276,18 +409,25 @@ export const App = (): ReactElement => {
       {settingsOpen ? (
         <SettingsPanel
           settings={settings.data ?? null}
-          capabilities={capabilities}
           kernelVersion={kernel.env.kernelVersion}
           onClose={() => setSettingsOpen(false)}
           onPatch={patchSettings}
-          onToggleCapability={toggleCapability}
+          onOpenHealth={() => {
+            setSettingsOpen(false);
+            setHealthOpen(true);
+          }}
         />
       ) : null}
 
       {paletteOpen ? (
         <CommandPalette
           commands={commands}
-          activeDocId={activeDocId}
+          activeDocId={activeDocId === null ? null : String(activeDocId)}
+          library={library}
+          onOpenDoc={(docId, line) => {
+            if (line !== null) requestFloatJump(docId, line);
+            openFloat(docId, null);
+          }}
           onClose={() => {
             setPaletteOpen(false);
           }}

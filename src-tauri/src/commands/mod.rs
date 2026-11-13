@@ -7,7 +7,7 @@ use serde::Serialize;
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, State, Window};
 
 use crate::error::{VaultError, VaultResult};
-use crate::vault::{atomic, media, paths, ulid, Vault};
+use crate::vault::{atomic, backup, lock, media, paths, ScanEntry, Vault};
 
 pub mod ai;
 
@@ -56,7 +56,7 @@ const MAX_MACHINE_UI_BYTES: usize = 1024 * 1024;
 fn identity_of(vault: &Vault) -> VaultIdentity {
     VaultIdentity {
         vault_id: vault.id().to_string(),
-        // 用 writable() 而非 readonly()：运行期锁被接管后也要如实告知前端
+        // 用 writable()：启动未抢到锁（被另一实例占用）的实例如实告知前端
         readonly: !vault.writable(),
         readonly_reason: vault.readonly_reason(),
     }
@@ -136,6 +136,17 @@ pub async fn vault_list(vault: State<'_, Vault>) -> VaultResult<Vec<String>> {
 }
 
 #[tauri::command]
+pub async fn vault_list_canvases(vault: State<'_, Vault>) -> VaultResult<Vec<String>> {
+    vault.list_canvases()
+}
+
+/// 库健康检查清单：只读，不跟随符号链接。
+#[tauri::command]
+pub async fn vault_scan(vault: State<'_, Vault>) -> VaultResult<Vec<ScanEntry>> {
+    vault.scan()
+}
+
+#[tauri::command]
 pub async fn vault_stat(vault: State<'_, Vault>, path: String) -> VaultResult<Option<FileStat>> {
     Ok(vault
         .stat(&path)?
@@ -174,25 +185,10 @@ pub async fn asset_save(
     media::save(&vault, &bytes, &mime)
 }
 
-/// 机器标识与库锁共用 `machine-id` 文件，保证 ui.json 落在同一台机器的目录下。
-fn machine_id() -> VaultResult<String> {
-    let dir = paths::app_support_dir();
-    let file = dir.join("machine-id");
-    if let Ok(text) = fs::read_to_string(&file) {
-        let trimmed = text.trim();
-        if ulid::is_ulid(trimmed) {
-            return Ok(trimmed.to_string());
-        }
-    }
-    fs::create_dir_all(&dir)?;
-    let id = ulid::generate();
-    atomic::write_atomic(&file, id.as_bytes())?;
-    Ok(id)
-}
-
+/// 机器标识与库锁共用 `machine-id` 文件，保证 ui.json 落在同一台机器的目录下：
 /// `~/Library/Application Support/Ember/machines/<machineId>/ui.json`，绝不写进库目录。
 fn machine_ui_file() -> VaultResult<PathBuf> {
-    let dir = paths::app_support_dir().join("machines").join(machine_id()?);
+    let dir = paths::app_support_dir().join("machines").join(lock::machine_id()?);
     Ok(dir.join("ui.json"))
 }
 
@@ -219,4 +215,70 @@ pub async fn machine_ui_write(data: String) -> VaultResult<()> {
     let _: serde_json::Value = serde_json::from_str(&data)?;
     let file = machine_ui_file()?;
     atomic::write_atomic(&file, data.as_bytes())
+}
+
+// -------- AI session（阶段 7） --------
+
+/// AI 会话文件单库一份，体量与 ui.json 同量级：≤ 1 MiB。
+const MAX_MACHINE_AI_BYTES: usize = 1024 * 1024;
+
+/// ai session 文件路径：`machines/<machineId>/ai/<vaultId>.json`
+fn machine_ai_file(vault_id: &str) -> VaultResult<PathBuf> {
+    if vault_id.is_empty()
+        || vault_id.contains("..")
+        || vault_id.contains('/')
+        || vault_id.contains('\\')
+    {
+        return Err(VaultError::Encoding(format!("非法 vaultId：{vault_id}")));
+    }
+    let dir = paths::app_support_dir().join("machines").join(lock::machine_id()?).join("ai");
+    Ok(dir.join(format!("{vault_id}.json")))
+}
+
+/// 读取机器本地 AI 会话；文件不存在返回 null。
+#[tauri::command]
+pub async fn machine_ai_read(vault_id: String) -> VaultResult<Option<String>> {
+    let file = machine_ai_file(&vault_id)?;
+    match fs::read_to_string(&file) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 原子写入机器本地 AI 会话；先校验载荷大小与 JSON 合法性。
+#[tauri::command]
+pub async fn machine_ai_write(vault_id: String, data: String) -> VaultResult<()> {
+    if data.len() > MAX_MACHINE_AI_BYTES {
+        return Err(VaultError::Encoding(format!(
+            "ai 会话载荷超过 {} KB 上限",
+            MAX_MACHINE_AI_BYTES / 1024
+        )));
+    }
+    let _: serde_json::Value = serde_json::from_str(&data)?;
+    let file = machine_ai_file(&vault_id)?;
+    atomic::write_atomic(&file, data.as_bytes())
+}
+
+/// 默认导出目录（库外）：`~/Documents/Ember Export <库名> <YYYY-MM-DD>`。
+#[tauri::command]
+pub fn vault_backup_default_destination(vault: State<'_, Vault>) -> VaultResult<String> {
+    Ok(backup::default_destination(&vault))
+}
+
+/// 整库导出到指定目录：staging → 逐文件校验 → 原子改名。
+/// 只读库同样允许导出（导出不写库）。
+#[tauri::command]
+pub async fn vault_backup_export(
+    vault: State<'_, Vault>,
+    options: backup::ExportOptions,
+) -> VaultResult<backup::ExportReport> {
+    backup::export(&vault, &options)
+}
+
+/// 导出包只读预检：格式/版本、内容 hash、路径穿越、重复路径与 id、大小写碰撞、目标占用。
+/// 不写盘、不读库。
+#[tauri::command]
+pub async fn vault_backup_inspect(directory: String) -> VaultResult<backup::InspectReport> {
+    backup::inspect(&directory)
 }

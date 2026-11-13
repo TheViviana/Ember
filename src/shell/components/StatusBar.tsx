@@ -8,8 +8,6 @@ export interface StatusBarProps {
   readonly readonlyReason: string | null;
   readonly kernelVersion: string;
   readonly documentCount: number;
-  readonly activeCapabilities: number;
-  readonly capabilityCount: number;
   readonly commandCount: number;
   /** 关窗落盘失败等需要常驻提示的信息；null/undefined 时不占位 */
   readonly notice?: string | null;
@@ -32,8 +30,6 @@ export const StatusBar = ({
   readonlyReason,
   kernelVersion,
   documentCount,
-  activeCapabilities,
-  capabilityCount,
   commandCount,
   notice,
 }: StatusBarProps): ReactElement => {
@@ -93,13 +89,6 @@ export const StatusBar = ({
           <div className={styles.right}>
             <span className={styles.metric}>
               文档 <strong>{documentCount}</strong>
-            </span>
-            <span className={styles.sep}>│</span>
-            <span className={styles.metric}>
-              能力{' '}
-              <strong>
-                {activeCapabilities}/{capabilityCount}
-              </strong>
             </span>
             <span className={styles.sep}>│</span>
             <span className={styles.metric}>

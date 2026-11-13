@@ -47,6 +47,7 @@ const makeSnapshot = (hashText: string, rev = 1): DocSnapshot => {
       updated: '2026-11-11T10:00:00Z',
       rev: { rev, hash: unsafeContentHash(hashText) },
       flags: { needsAdoption: false, idInvalid: false, duplicateId: false },
+      conflictOf: null,
     },
     frontmatter,
     text: '旧正文',

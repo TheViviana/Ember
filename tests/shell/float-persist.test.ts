@@ -23,6 +23,7 @@ const snapshotOf = (body: string, rev: number): DocSnapshot => ({
     updated: '2026-01-01T00:00:00Z',
     rev: { rev, hash: unsafeContentHash('hash') },
     flags: { needsAdoption: false, idInvalid: false, duplicateId: false },
+    conflictOf: null,
   },
   frontmatter: {
     id: String(DOC_ID),

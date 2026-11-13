@@ -66,15 +66,6 @@ pub fn workbench(root: &Path) -> PathBuf {
     root.join(WORKBENCH_DIR)
 }
 
-/// 规范 §2：`.workbench/.journal/` 是 journal 镜像；v1 以它为准，App Support 副本留待索引层。
-pub fn journal_dir(root: &Path) -> PathBuf {
-    workbench(root).join(".journal")
-}
-
-pub fn journal_file(root: &Path) -> PathBuf {
-    journal_dir(root).join("journal.ndjson")
-}
-
 /// 规范 §7：锁文件为 `.workbench/.lock`。
 pub fn lock_file(root: &Path) -> PathBuf {
     workbench(root).join(".lock")
@@ -88,20 +79,17 @@ pub fn settings_file(root: &Path) -> PathBuf {
 pub const MEDIA_DIR: &str = "media";
 
 /// 内核自管路径黑名单：前端 IPC（vault_write/remove/rename）不得触碰。
-/// 黑名单依据：`.lock` 被删可让另一实例按 stale 抢锁形成双写者；journal 被覆写可注入
-/// 伪造事务；`.ember-tmp-` 是原子写临时文件的命名约定；`media/` 内容按哈希去重，
-/// 外部写入会毒化图库。settings.json、trash、canvas 等仍是前端合法写入目标，不在名单内。
+/// 黑名单依据：`.lock` 被删可让另一实例按失效锁接管形成双写者；`.ember-tmp-` 是
+/// 原子写临时文件的命名约定；`media/` 内容按哈希去重，外部写入会毒化附件库。
+/// settings.json、canvas 等仍是前端合法写入目标，不在名单内。
 /// 入参必须是 `resolve` 归一化后的相对 POSIX 路径。
-/// 比较不区分大小写：macOS APFS 默认大小写不敏感，`.Workbench/.Journal/` 与
-/// `.workbench/.journal/` 在磁盘上是同一个文件，字面比较会被变体击穿。
+/// 比较不区分大小写：macOS APFS 默认大小写不敏感，`.Workbench/` 与
+/// `.workbench/` 在磁盘上是同一个文件，字面比较会被变体击穿。
 /// 副作用是大小写敏感文件系统上 `Media/`、`WORKBENCH/` 这类用户目录也被禁写——
 /// 宁可保守，避免与内核自管路径在同一卷上产生二义。
 pub fn is_reserved(normalized: &str) -> bool {
     let folded = normalized.to_ascii_lowercase();
     if folded == WORKBENCH_DIR || folded == ".workbench/.lock" {
-        return true;
-    }
-    if folded == ".workbench/.journal" || folded.starts_with(".workbench/.journal/") {
         return true;
     }
     if folded == MEDIA_DIR || folded.starts_with("media/") {
@@ -140,8 +128,6 @@ mod tests {
         for path in [
             ".workbench",
             ".workbench/.lock",
-            ".workbench/.journal",
-            ".workbench/.journal/journal.ndjson",
             "media",
             "media/ab/01J.json.png",
             ".doc.md.ember-tmp-1731234567-1",
@@ -158,8 +144,6 @@ mod tests {
         for path in [
             ".WORKBENCH",
             ".Workbench/.LOCK",
-            ".WORKBENCH/.Journal",
-            ".Workbench/.Journal/journal.ndjson",
             "Media",
             "MEDIA/ab/01J.json.png",
             "notes/.Hidden.md.ember-tmp-1",

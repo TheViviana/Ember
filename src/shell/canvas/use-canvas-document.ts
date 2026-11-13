@@ -13,8 +13,9 @@ const INITIAL_VIEWPORT: Viewport = { x: 0, y: 0, zoom: 1 };
 /**
  * 画布文档会话：内核场景订阅、视口防抖落盘、错误 HUD。
  * 只持有文档级状态；选择、手势与命令菜单在各自 Hook 中。
+ * canvasId 由 use-canvas-library（画布库导航）决定：总览或任一画布。
  */
-export const useCanvasDocument = () => {
+export const useCanvasDocument = (canvasId: CanvasId | null) => {
   const kernel = useKernel();
   const queryClient = useQueryClient();
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -35,13 +36,7 @@ export const useCanvasDocument = () => {
   const [viewport, setViewport] = useState<Viewport>(INITIAL_VIEWPORT);
   const [error, setError] = useState<string | null>(null);
 
-  const canvasQuery = useQuery({
-    queryKey: ['canvas', 'default'],
-    queryFn: () => kernel.canvas.ensureDefault(),
-  });
   const documents = useQuery({ queryKey: ['docs', 'list'], queryFn: () => kernel.docs.list() });
-
-  const canvasId = canvasQuery.data?.id ?? null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -86,14 +81,16 @@ export const useCanvasDocument = () => {
       setViewport(next);
       pendingViewportRef.current = next;
       if (rafRef.current !== null) return;
+      // 调度时捕获画布 id：rAF 触发前可能已切画布，旧视口不得写到新画布上
+      const scheduledId = canvasIdRef.current;
       rafRef.current = window.requestAnimationFrame(() => {
         rafRef.current = null;
         const value = pendingViewportRef.current;
         pendingViewportRef.current = null;
-        const id = canvasIdRef.current;
-        if (value === null || id === null) return;
+        if (value === null || scheduledId === null) return;
+        if (canvasIdRef.current !== scheduledId) return;
         void kernel.canvas
-          .apply(id, [{ type: 'setViewport', viewport: value }])
+          .apply(scheduledId, [{ type: 'setViewport', viewport: value }])
           .catch(reportError);
       });
     },
@@ -131,6 +128,12 @@ export const useCanvasDocument = () => {
       subscription?.dispose();
       subscription = null;
       opened?.close();
+      // 切画布时取消挂起的视口 rAF：跨画布的旧视口不得落到新画布
+      if (rafRef.current !== null) {
+        window.cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+        pendingViewportRef.current = null;
+      }
       void kernel.canvas.flush();
     };
   }, [kernel, canvasId, reportError]);
@@ -179,7 +182,7 @@ export const useCanvasDocument = () => {
     [documents.data],
   );
 
-  const failure = canvasQuery.isError ? toErrorText(canvasQuery.error) : error;
+  const failure = error;
 
   return {
     surfaceRef,
@@ -193,7 +196,7 @@ export const useCanvasDocument = () => {
     docIndex,
     mountedRef,
     failure,
-    isPending: canvasQuery.isPending,
+    isPending: canvasId === null,
     showError,
     reportError,
   };

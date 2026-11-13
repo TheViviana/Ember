@@ -48,7 +48,7 @@ const makeTempRoot = (prefix = 'ember-gate-tree-') => {
   return dir;
 };
 
-/** 合规树：6 个必需目录、101 个模块（≥100）、263 条相对 import（≥200）、41 个 .rs（共 142 文件） */
+/** 合规树：5 个必需目录、102 个模块（≥100）、相对 import ≥200、41 个 .rs */
 const buildCompliantTree = (dir) => {
   const modules = [];
   const write = (rel, text) => {
@@ -57,11 +57,9 @@ const buildCompliantTree = (dir) => {
     if (rel.endsWith('.ts') || rel.endsWith('.tsx')) modules.push(rel);
   };
   const groups = [
-    ['src/shell', 79],
+    ['src/shell', 84],
     ['src/kernel', 6],
     ['src/data', 4],
-    ['src/capabilities/core', 2],
-    ['src/capabilities/example-hello', 1],
     ['packages/doc-model/src', 6],
     ['packages/canvas-engine/src', 2],
   ];
@@ -74,7 +72,6 @@ const buildCompliantTree = (dir) => {
       write(`${dirPath}/m${i}.ts`, `${source}export const v${i} = ${i};\n`);
     }
   }
-  write('src/capabilities/index.ts', 'export const assembly = true;\n');
   for (let i = 0; i < 41; i += 1) write(`src-tauri/stub${i}.rs`, '\n');
   writeFileSync(
     join(dir, 'package.json'),
@@ -749,7 +746,7 @@ if (realSize.length === 0) {
   buildTree(legalAlias);
   writeAliasConfig(legalAlias, { '#dm': './packages/doc-model/src/index.ts' });
   writeFileSync(join(legalAlias, 'packages', 'doc-model', 'src', 'index.ts'), 'export const v0 = 0;\n');
-  for (const rel of ['src/shell/m1.ts', 'src/kernel/m1.ts', 'src/data/m1.ts', 'src/capabilities/core/m1.ts']) {
+  for (const rel of ['src/shell/m1.ts', 'src/shell/m2.ts', 'src/kernel/m1.ts', 'src/data/m1.ts']) {
     writeFileSync(join(legalAlias, rel), "import { v0 } from '#dm';\nexport const x = v0;\n");
   }
   expectPass('合法别名方向通过', legalAlias);

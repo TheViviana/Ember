@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { DocId } from '#doc-model';
 import { useKernel } from '../kernel-provider.tsx';
-import { FLOAT_LIMIT, deriveStackOrder, useFloatStore } from './float-store.ts';
+import { deriveStackOrder, useFloatStore } from './float-store.ts';
 import { subscribeFloatSwitcher } from './float-switcher-signal.ts';
 import styles from './FloatLayer.module.css';
 
@@ -14,6 +14,7 @@ import styles from './FloatLayer.module.css';
 export const FloatSwitcher = (): ReactElement | null => {
   const kernel = useKernel();
   const windows = useFloatStore((state) => state.windows);
+  const limit = useFloatStore((state) => state.limit);
   const activeId = useFloatStore((state) => state.activeId);
   const [listOpen, setListOpen] = useState(false);
 
@@ -43,12 +44,12 @@ export const FloatSwitcher = (): ReactElement | null => {
         type="button"
         className={styles.chip}
         aria-expanded={listOpen}
-        aria-label={`浮窗 ${windows.length}/${FLOAT_LIMIT}，查看已打开`}
+        aria-label={`浮窗 ${windows.length}/${limit}，查看已打开`}
         onClick={() => {
           setListOpen((open) => !open);
         }}
       >
-        浮窗 {windows.length}/{FLOAT_LIMIT}
+        浮窗 {windows.length}/{limit}
       </button>
       {listOpen ? (
         <div className={styles.list} role="menu" aria-label="已打开的浮窗">

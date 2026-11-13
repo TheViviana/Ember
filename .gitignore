@@ -21,3 +21,6 @@ src-tauri/gen/
 
 .DS_Store
 Thumbs.db
+
+# 本地归档：截图、审计与开发过程记录，不随仓库分发
+旧文件/

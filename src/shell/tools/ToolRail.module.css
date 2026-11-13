@@ -1,8 +1,8 @@
-/* 左下角唯一横排：紧跟侧栏启动图标之后，所有入口与浮窗胶囊都在这一行。
- * 位置与侧栏开合无关：左侧固定 12 + 横排尺寸 + 8，纵向中心线与启动图标一致。 */
+/* 左下角唯一横排：靠窗口左边贴齐，所有入口与浮窗胶囊都在这一行。
+ * 纵向中心线与启动图标一致；不再为已移除的侧栏启动图标预留横向空隙。 */
 .rail {
   position: absolute;
-  left: calc(var(--space-md) + var(--tool-rail-size) + var(--space-sm));
+  left: var(--space-md);
   /* 状态栏改为贴底浮层后不再占布局高，横排上移一个状态栏高度，保持与改动前同一视觉位置 */
   bottom: calc(var(--space-md) + var(--statusbar-height));
   height: var(--tool-rail-size);

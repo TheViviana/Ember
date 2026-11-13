@@ -5,6 +5,7 @@ import {
   useId,
   useLayoutEffect,
   useRef,
+  useState,
   type ReactElement,
 } from 'react';
 import type { DocId } from '#doc-model';
@@ -30,6 +31,7 @@ import {
 import { FormatToolbar } from './FormatToolbar.tsx';
 import { ReadingView } from './ReadingView.tsx';
 import { BacklinksPanel } from './BacklinksPanel.tsx';
+import { HistoryPanel } from './HistoryPanel.tsx';
 import { OutlinePanel } from './OutlinePanel.tsx';
 import { FloatTagBar } from './FloatTagBar.tsx';
 import { FloatTitle } from './FloatTitle.tsx';
@@ -54,7 +56,7 @@ export interface FloatEditorProps {
 
 /**
  * 文档浮窗：标题栏 / 标签栏 / 内容区三段式。
- * 复用 EditorHost 的会话，浮窗是唯一编辑器实例 —— 同一文档只创建一个 EditorView；
+ * 由 useFloatDocument 管理文档会话，浮窗是唯一编辑器实例 —— 同一文档只创建一个 EditorView；
  * 尺寸按 docId 记在机器本地 ui.json，缩放全程不触发文档写入。
  */
 export const FloatEditor = ({
@@ -83,6 +85,12 @@ export const FloatEditor = ({
     inlineCloseRef,
   });
   const frame = useFloatFrame({ docId, defaultSlot, panelRef: doc.panelRef });
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  // 切换文档时收起历史：避免把上一篇的版本列表带到新文档上
+  useEffect(() => {
+    setHistoryOpen(false);
+  }, [docId]);
 
   const { mode, setMode, modeRef } = doc;
   const clearSelectionAnchor = doc.clearSelectionAnchor;
@@ -316,6 +324,9 @@ export const FloatEditor = ({
         onHeading={applyHeading}
         onLink={applyLink}
         onToggleMode={toggleMode}
+        onHistory={() => {
+          setHistoryOpen(true);
+        }}
       />
 
       <div className={styles.content}>
@@ -383,6 +394,16 @@ export const FloatEditor = ({
             )}
           </div>
         )}
+
+        {historyOpen ? (
+          <HistoryPanel
+            docId={docId}
+            onClose={() => {
+              setHistoryOpen(false);
+            }}
+            onBeforeRestore={doc.flushNow}
+          />
+        ) : null}
       </div>
 
       {inlineAi.run === null ? null : (
@@ -400,6 +421,7 @@ export const FloatEditor = ({
         <SelectionAiMenu
           anchor={doc.selectionAnchor}
           disabled={kernel.env.readonlyMode}
+          readonlyReason={kernel.env.readonlyReason}
           onPick={pickSelectionAction}
           onClose={doc.clearSelectionAnchor}
         />

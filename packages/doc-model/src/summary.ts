@@ -1,5 +1,5 @@
 /**
- * 文章简介的派生规则（vault-format §4.2 / kernel-contract D8）。
+ * 文章简介的派生规则（vault-format §4.2 / kernel-contract §3 D8）。
  *
  * 只在 frontmatter 没有 `summary` 时用于展示，**不回写磁盘**。
  * 取正文第一个非空段落，跳过标题行、列表符号、代码块与图片，剥掉常见 Markdown 标记。

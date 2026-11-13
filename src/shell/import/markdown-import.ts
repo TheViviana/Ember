@@ -9,14 +9,16 @@ import { parse as parseYaml } from 'yaml';
  * - 只吃 .md / .markdown，目标目录固定为 notes/，保留所选目录内的相对层级；
  *   `.markdown` 统一落为 `.md`，库里不出现两种后缀的同一篇文档；
  * - 跳过 media/ 与 .workbench/ 下的文件；
- * - 单篇 ≤ 5 MB，单次 ≤ 200 篇，超出逐条给出拒绝原因；
+ * - 单篇上限见 `MAX_IMPORT_MB`，单次上限见 `MAX_IMPORT_FILES`，超出逐条给出拒绝原因；
  * - 未知 frontmatter 键丢弃，但逐条记录名字，结果里必须能看见；
  * - 不做内容去重，只按目标路径防覆盖（同名加 -2 / -3 后缀）。
  */
 
 export const IMPORT_ACCEPT = '.md,.markdown,text/markdown';
 export const IMPORT_ROOT = 'notes';
-export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+/** 单篇导入上限：MB 数值是唯一来源，字节上限与 UI 文案都由它派生 */
+export const MAX_IMPORT_MB = 5;
+export const MAX_IMPORT_BYTES = MAX_IMPORT_MB * 1024 * 1024;
 export const MAX_IMPORT_FILES = 200;
 
 const MARKDOWN_EXTENSIONS: ReadonlySet<string> = new Set(['md', 'markdown']);
@@ -231,7 +233,7 @@ export const buildImportPlan = (
       continue;
     }
     if (candidate.bytes > MAX_IMPORT_BYTES) {
-      rejected.push({ sourcePath, reason: '超过单篇 5 MB 上限' });
+      rejected.push({ sourcePath, reason: `超过单篇 ${String(MAX_IMPORT_MB)} MB 上限` });
       continue;
     }
     if (entries.length >= MAX_IMPORT_FILES) {

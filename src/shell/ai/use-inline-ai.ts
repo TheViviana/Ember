@@ -5,6 +5,7 @@ import { describeAiError, startChat, type ChatSession } from '../../data/tauri/a
 import type { KernelContext } from '../../kernel/context.ts';
 import type { DocRevision } from '../../kernel/types.ts';
 import { findAiAction, type AiActionId, type AiApplyMode } from './actions.ts';
+import { readonlyText } from '../components/readonly-text.ts';
 import { buildSelectionPrompt, SYSTEM_PROMPT } from './context.ts';
 import { undoLabel, undoProposalDoc, type UndoAction } from './proposal.ts';
 
@@ -47,7 +48,9 @@ export const INLINE_STALE_MESSAGE = '文章在生成之后已被修改，已作�
 export const INLINE_RANGE_MESSAGE = '这次写入会改动选中段之外的正文，已作废；请重新选中生成。';
 export const INLINE_EMPTY_MESSAGE = 'AI 没有返回内容，请重试。';
 export const INLINE_NO_MODEL_MESSAGE = '先在设置里填写模型名称，再使用文章操作。';
-export const INLINE_READONLY_MESSAGE = '当前库为只读模式，无法替换正文。';
+/** 只读文案与状态栏同源：带上具体原因，而不是笼统「只读模式」 */
+export const inlineReadonlyMessage = (reason: string | null): string =>
+  `${readonlyText(reason)}，无法替换正文。`;
 
 interface RunMeta {
   readonly base: DocRevision;
@@ -103,7 +106,7 @@ export const useInlineAi = (kernel: KernelContext, docId: DocId) => {
           anchor: input.anchor,
           phase: 'error',
           text: '',
-          error: INLINE_READONLY_MESSAGE,
+          error: inlineReadonlyMessage(kernel.env.readonlyReason),
           notice: null,
           undoText: null,
           busy: false,
@@ -219,7 +222,7 @@ export const useInlineAi = (kernel: KernelContext, docId: DocId) => {
       setRun((latest) => (latest === null || runIdRef.current !== id ? latest : next(latest)));
     };
     if (kernel.env.readonlyMode) {
-      setRun({ ...current, phase: 'error', error: INLINE_READONLY_MESSAGE });
+      setRun({ ...current, phase: 'error', error: inlineReadonlyMessage(kernel.env.readonlyReason) });
       return;
     }
     const inserting = current.apply === 'insert';

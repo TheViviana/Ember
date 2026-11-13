@@ -13,7 +13,7 @@
 2. `.workbench/` 目录的内容 schema；
 3. 导出包的 `manifest.json` 契约；
 4. 冲突副本命名规则；
-5. 原子写与 journal 落盘流程；
+5. 原子写流程（v2 已移除 journal，见 §6.2）；
 6. 库锁；
 7. 派生索引的存储位置与中文分词取舍。
 
@@ -22,7 +22,7 @@
 - **P1 文件是唯一真相源。** 任何界面状态都可以从文件重建；数据库、内存模型、窗口布局都不是真相。
 - **P2 未知内容不丢弃。** 不认识的 frontmatter 键、不认识的 `.workbench/` 文件，读写时必须原样保留（语义级往返，见 §4.6）。
 - **P3 写入必须可恢复。** 进程在任意时刻崩溃，磁盘上只能是「旧内容」或「新内容」，不能是半截内容。
-- **P4 不静默覆盖。** 检测到外部修改且无法三方合并时，落盘冲突副本（§10），不覆盖任何一方的独有内容。
+- **P4 不静默覆盖。** 检测到外部修改（基线不一致）时，落盘冲突副本（§10），不覆盖任何一方的独有内容。
 - **P5 路径不是身份。** 文档身份是 frontmatter `id`（§3）。所有跨文件引用登记为 id，而不是路径。
 
 ---
@@ -34,33 +34,31 @@
 ├── .workbench/                  # 工作台状态（进库，参与同步，不参与索引）
 │   ├── settings.json
 │   ├── canvas/<canvasId>.json
-│   ├── mindmap/<mindmapId>.json
-│   ├── ai/memory.jsonl
-│   ├── ai/threads/<threadId>.json
-│   ├── .lock                    # 库锁，见 §7
-│   └── .journal/                # 本库 journal（v1 权威位置，见 §6.2；App Support 副本为后续索引层预留）
+│   ├── history/<canvasId>.<n>.json # 画布历史，n=1 为上一版，最多 5 版
+│   ├── history/documents/<docId>/  # 文档历史：index.json + <versionId>.md（§8.2.1）
+│   └── .lock                    # 库锁，见 §7（独占创建 + pid 存活；无心跳无 journal）
 ├── notes/                       # 任意用户目录结构，Ember 不干预
 │   └── 某文档.md
+├── inbox/                       # 快速收集箱默认目录；只是普通 Markdown 目录（§13 非事务）
 └── media/                       # 图库内容寻址存储（只能经 asset_save 写入）
 ```
 
-删除不在库内留副本：文件直接移入操作系统回收站（§8.6）。历史库可能仍残留旧版 `.workbench/trash/<ULID>/`，只读取不清扫不迁移，到期后由启动清扫回收。
+删除不在库内留副本：文件直接移入操作系统回收站（§8.3）。历史库可能仍残留旧版 `.workbench/trash/<ULID>/`，冻结保留，超过保留期后由启动清扫回收（§8.3）。
 
 不在库内、由 Ember 管理的位置：
 
 ```
 ~/Library/Application Support/Ember/
-├── index/<vaultHash>.sqlite     # 派生索引，可删可重建，见 §9
-├── journals/<vaultHash>.ndjson  # v1 未写入：后续索引层预留（见 §6.2）
 ├── machine-id                   # 机器标识（库锁与 machines 目录共用）
-├── machines/<machineId>/
-│   └── ui.json                  # 机器本地 UI 状态，见 §8.7
-└── logs/
+└── machines/<machineId>/
+    └── ui.json                  # 机器本地 UI 状态，见 §8.4
+
+索引在 v2 是内核内存实现（见 §9），不再落 sqlite 文件；崩溃或损坏由 rebuild 一次恢复。
 ```
 
 `[事实]` macOS 上 `Application Support` 随用户迁移，但不随库同步；这正是「机器状态」与「库状态」分家的原因。
 
-`[设计选择]` 忽略规则：`.workbench/`、`.` 开头的目录、`node_modules/`、`.git/` 不进入 Markdown 索引；watcher 只监听库内 `.md` 文件，同样跳过 `.workbench/` 与所有点开头路径（含 `.lock`、`.journal/`），避免自我触发。
+`[设计选择]` 忽略规则：`.workbench/`、`.` 开头的目录、`node_modules/`、`.git/` 不进入 Markdown 索引；watcher 只监听库内 `.md` 文件，同样跳过 `.workbench/` 与所有点开头路径（含 `.lock`），避免自我触发。
 
 ---
 
@@ -70,7 +68,7 @@
 
 `id` 取 **ULID**：26 字符，Crockford Base32，前 10 字符为 48 位毫秒时间戳，后 16 字符为 80 位随机数。
 
-`[事实]` ULID 字典序 = 时间序，适合作为 SQLite 主键与稳定排序键。
+`[事实]` ULID 字典序 = 时间序，适合作为稳定排序键。
 
 规则：
 
@@ -85,15 +83,15 @@
 
 ### 3.3 缺 id 的文档（adoption）
 
-> **实现状态（v1 未实现）**：`refresh()` 目前只跳过缺 id（或 frontmatter 损坏）的文档并输出告警，
-> 不标记 `needs_adoption`，也没有「纳入库管理（adopt）」命令；`DocMeta.flags` 恒为全 `false`。
-> 以下为设计目标，待后续版本实现。
+> **实现状态（v1 已实现，仅显式入口）**：`refresh()` 仍只跳过缺 id（或 frontmatter 损坏）的文档并输出告警，
+> 不标记 `needs_adoption`，`DocMeta.flags` 恒为全 `false`。adoption 只能从「库健康检查」面板显式触发
+> （`DocService.adopt`，携带扫描时的字节 hash）；仍**没有后台自动改写**。非法 id 与坏 YAML 不在 adoption 范围。
 
 `[设计选择]` 从 Obsidian 或纯文本目录导入的文档没有 `id`。Ember **不在后台静默改写文件**，而是：
 
-1. 索引扫描时标记 `needs_adoption = 1`，该文档在列表里以「未纳入索引身份」标出；
-2. 用户首次编辑或执行「纳入库管理（adopt）」命令时，`doc-service` 以带 `baseHash` 的普通写入流程补写 `id`；
-3. 写入前必须重新校验磁盘 hash，若期间被外部修改，按普通冲突流程处理。
+1. 库健康扫描把缺 id 的文档标为 `missing_id`，列出路径与可执行的 adoption；
+2. 用户确认「纳入库管理」时，`doc-service` 以带 `expectedHash` 的写入流程补写 `id`、缺失的 `created` 与 `updated`；
+3. 写入前重新校验磁盘 hash，若期间被外部修改则取消（`stale_revision`），零写入。
 
 理由：后台改写会让用户的 Git 工作区出现无法解释的 diff，也会与同步工具打架。
 
@@ -224,79 +222,39 @@ anchor     := heading-text | "^" block-id
 
 解析在索引构建时发生，落库为边：
 
-```sql
--- links: 一条链接一行；embed 单独标记
-CREATE TABLE links (
-  src_id     TEXT NOT NULL,
-  target_id  TEXT,            -- 可空：未解析
-  raw        TEXT NOT NULL,   -- 原始 target 文本（不含 label）
-  kind       TEXT NOT NULL,   -- 'link' | 'embed'
-  resolver   TEXT NOT NULL,   -- 'path' | 'basename' | 'title' | 'alias' | 'ambiguous' | 'unresolved'
-  anchor     TEXT,            -- 标题文本或 '^blockId'
-  path_hint  TEXT,            -- 链接写的是显式路径时保留
-  line       INTEGER NOT NULL
-);
+```ts
+// 索引内存形态（kernel LinkRecord，见 §9）
+{ srcId, targetId, raw, kind: 'link' | 'embed', resolver, anchor, line }
 ```
 
 不变量：**链接边指向 id，不指向路径**。文档重命名后，只要目标 `id` 不变，反链无需重算（仅显示路径需要刷新）。
 
 ---
 
-## 6. 原子写与 journal
+## 6. 原子写
 
 ### 6.1 原子写步骤（单文件）
 
 目标：崩溃只可能留下「旧内容」或「新内容」。
 
 1. 校验：目标路径在当前 vault 内、目标不是目录、未越过符号链接根。
-2. 在**目标同目录**创建隐藏临时文件 `.{原文件名}.ember-tmp-<纳秒时间戳>-<进程内自增计数>`（同目录保证 rename 在同一文件系统，`rename(2)` 才是原子的；文件名含 `.ember-tmp-` 供 §8.6 清扫识别）。
+2. 在**目标同目录**创建隐藏临时文件 `.{原文件名}.ember-tmp-<纳秒时间戳>-<进程内自增计数>`（同目录保证 rename 在同一文件系统，`rename(2)` 才是原子的；文件名含 `.ember-tmp-` 供 §8.3 清扫识别）。
 3. 写入完整字节 → `write_all` → `fsync(temp_fd)` → `close`。
 4. `rename(temp, target)`（覆盖语义，POSIX 原子）。
 5. `fsync(target_dir)`（`[事实]` 不 fsync 目录，rename 的目录项可能在掉电后丢失）。
-6. 写入返回后由索引层异步刷新对应文档行（内容 hash、mtime、size；kernel-contract D7）。
+6. 写入返回后由索引层异步刷新对应文档行（内容 hash、mtime、size；kernel-contract 契约）。
 
 权限与元数据：`[设计选择]` 新文件继承父目录 umask；替换已有文件时在 rename 前把原文件的权限位（含 setuid/setgid/sticky）复制到临时文件，避免权限被重置。复制失败（读取原文件元数据出错或设置临时文件权限失败）视为本次写入失败：临时文件被删除、目标保持旧内容，不降级为按 umask 新建。
 
-### 6.2 journal 两阶段
+### 6.2 为什么没有 journal
 
-journal 是**追加写的 NDJSON**，路径 `<vault>/.workbench/.journal/journal.ndjson`（v1 以此为准；App Support 副本是后续索引层预留，见 §2 的 `journals/` 行）。一行一个事件。
+`[设计选择]` v1 曾用两阶段 journal 维持「文档 + 目录 + 索引」跨文件一致；v2 架构下三个前提消失了，journal 连同它的恢复/压缩/损坏降级一起删除：
 
-事件 schema（`tx`、`phase`、`target`、`at` 必填；`temp` 在涉及临时文件的事务中出现，`kind` 仅在 `prepared` 出现）：
+- 索引是派生数据，可随时重建（§9）——不再需要跨文件一致；
+- 画布只是布局（§8.2），损坏可接受，重建画布或卡片即恢复；
+- 正文唯一真相在文件本身——「禁止静默覆盖」由 §10 的冲突副本保证，不由 journal 保证。
 
-```json
-{"tx":"01JB8ZQ3K4M5N6P7Q8R9S0T1V2","phase":"prepared","target":"notes/a.md","temp":"notes/.a.md.ember-tmp-1762839612456789000-7","kind":"user","at":"2026-11-11T03:40:12Z"}
-{"tx":"01JB8ZQ3K4M5N6P7Q8R9S0T1V2","phase":"committed","target":"notes/a.md","temp":"notes/.a.md.ember-tmp-1762839612456789000-7","at":"2026-11-11T03:40:12Z"}
-{"tx":"01JB8ZQ3K4M5N6P7Q8R9S0T1V2","phase":"cleaned","target":"notes/a.md","temp":"notes/.a.md.ember-tmp-1762839612456789000-7","at":"2026-11-11T03:40:12Z"}
-```
-
-`kind` 记录写入意图（`user` / `capability` / `migration` / `system`）。v1 不记录 `docId` 与内容 hash：journal 只用于判定事务是否完成，不作为内容恢复依据（§6.3）。
-
-阶段：
-
-| 阶段 | 磁盘动作 | 崩溃后的语义 |
-|---|---|---|
-| `prepared` | 临时文件已 fsync，journal 行已 fsync，目标**未**改变 | 可安全回滚：临时文件交给 §8.6 的 24h 孤儿清扫 |
-| `committed` | rename + 目录 fsync 已完成，journal 行已 fsync | 新内容生效 |
-| `cleaned` | 事务结束，临时文件已随 rename 消失（失败路径为显式删除） | 事务结束，可从 journal 裁剪 |
-
-写入顺序严格为：`temp fsync` → `prepared fsync` → `rename` → `dir fsync` → `committed fsync` → `cleaned fsync`；索引刷新在写入返回后由索引层异步完成（kernel-contract D7），不阻塞 `cleaned`。
-
-启动恢复算法（只诊断，不删除）：
-
-1. 读全部事件，按 `tx` 分组、按行序取最后阶段（幂等，见 I14）。
-2. 对「有 `prepared` 无 `committed`」的事务：rename 未发生或失败；临时文件不在恢复中删除，交给 §8.6 清扫。
-3. 对「有 `committed` 无 `cleaned`」的事务：只补记诊断，索引由后续对账刷新；不回滚、不校验内容 hash。
-4. 判定完毕后清空 journal（事务已全部判定）；写入路径上 journal 超过 **256 行**时即时压缩，只保留未结束事务。
-5. 完整落盘行解析失败 → 启动降级只读并保留现场（不 panic、不删除）；末尾无换行的半截行按断电撕裂丢弃。
-
-> 数值提示：journal 压缩阈值（256 行）以 `journal.rs` 常量为准，锁心跳与失效阈值（5s/30s）以 `lock.rs` 常量为准，改代码必须同步本文件。
-
-### 6.3 journal 不做的事
-
-`[设计选择]` journal 不是撤销栈，也不是内容备份：
-
-- 不保存旧内容、也不记录内容 hash，因此不能从 journal 恢复被覆盖的内容——「禁止静默覆盖」由 §10 的冲突副本保证，而不是由 journal 保证。
-- 不承担跨文档事务（v1 无多文档原子事务；批量操作逐文件提交，失败项单独报告）。
+崩溃残留的清理交给两个既有机制：§6.1 的原子写保证「旧内容或新内容」二选一；§8.3 的启动清扫回收超龄孤儿临时文件。`vault_write` 直接走 `atomic::write_atomic`，与设置、锁、图片共用同一套临时文件 + fsync + rename + 目录 fsync 流程。
 
 ---
 
@@ -305,45 +263,28 @@ journal 是**追加写的 NDJSON**，路径 `<vault>/.workbench/.journal/journal
 锁文件：`<vault>/.workbench/.lock`
 
 ```json
-{"vaultId":"01JB...","pid":48213,"machineId":"01JB...","startedAt":"2026-11-11T03:00:00Z","heartbeatAt":"2026-11-11T03:00:10Z","leaseToken":1,"app":"0.1.0"}
+{"vaultId":"01JB...","pid":48213,"machineId":"01JB...","startedAt":"2026-11-11T03:00:00Z","app":"0.1.0"}
 ```
 
-规则：
+`[设计选择]` v2 把锁从「心跳 + 租约 + fencing + 接管认领」收敛为**独占创建 + pid 存活 + 失效清理**——
+这是分布式系统的机制，单机个人库只需要进程级互斥；只读原因从 5 种收敛为 2 种（被占用 / 丢失）：
 
-- 获取：`open(O_CREAT|O_EXCL)`。已存在则读内容判断有效性。
-- 租约代次：`leaseToken` 为 `u64`。同一把锁存续期间只增不减：首次获取写 `1`，每次失效接管在当前值上 `+1`；锁文件缺失或损坏（包括认领后崩溃留下的空路径）按 `0` 处理。
-- 心跳：持有者每 5 秒刷新 `heartbeatAt`（重写整个文件 + rename）。
-- 失效判定：同一 `machineId` 且 pid 不存在 → 失效；任意机器上 `heartbeatAt` 超过 30 秒未更新 → 失效（跨机器共享库时以时间兜底）。
-  但超龄**不立即判失效**：同机（`machineId` 一致）且 pid 仍存活时，说明只是心跳停了（进程挂起、调度饥饿或时钟前跳），
-  判为「持有者心跳已停」——新实例保持只读并提示关闭另一实例，不抢锁，避免接管后与原进程双写。
-  pid 已死、或无法判断是否本机 / pid 状态不可探测 → 仍按失效处理（沿用下面的接管路径）。
-  时钟回拨（`now < mtime`）时年龄视为 0，按未超龄处理，行为与之前一致。
-- 写前校验：每次落盘前重读锁文件，要求 `pid`、`leaseToken`、`heartbeatAt` 三者与持有方内存值**完全一致**；任一不一致说明锁已被接管或心跳停摆，**立即转只读**并拒绝本次写入（正文写入与图片落盘都走同一道写闸）。
-- 失效后：新实例可以抢占；接管成功并持有锁之后、任何写入之前，必须先完成 §6.2 的 journal 恢复。
-  - 接管流程：先把 `.lock` 原子 `rename` 到 `.workbench/lock.takeover.<pid>.<leaseToken>.<序号>` 完成认领（序号区分同进程的并发认领），
-    并发接管只有一个 `rename` 成功，其余按只读返回；认领后回读临时文件，与判定失效时读到的原始字节
-    逐字节比较，内容已变说明期间有人写入了新锁，用硬链接原位放回（目标存在时原子失败，不覆盖新锁），
-    确认是同一份后才创建新 `.lock`，`leaseToken` 在认领值上 `+1`。接管者在 `rename` 后、创建前崩溃时
-    锁路径为空，后续实例可直接创建，不会留下永久不可用的库；临时副本留在 `.workbench/` 中不参与锁判定，
-    超过 24 小时（与孤儿临时文件同一门槛）由启动清扫回收，正在进行的认领因认领时刷新过 mtime 而不会被误删。
-  - **实现状态**：`Vault::open` 的顺序是 `ensure_identity` → `lock::acquire`（含接管）→ `journal::recover` → 惰性清扫；
-    只读观察者不执行恢复。写前校验（`pid` + `leaseToken` + `heartbeatAt`）已在 `lock.rs` 的 `verify_lease` 与
-    `Vault::begin_write` 落地，心跳线程发现锁文件 PID/代次不符时同样立即降级只读；`kind: "lock.takeover"` 审计记录
-    尚未实现（属已记录缺口，待后续版本补齐）。
-- 抢不到锁：以**只读观察者**模式打开库（可搜索、可渲染、不可写），UI 明确提示「库已被其它实例打开」。绝不降级为「写但不加锁」。
-  - 只读原因随 `vault_identity.readonlyReason`（可选字段）与 `vault://mode` 事件给出，取值为
-    `lockedByOther` / `lockedByStalled` / `claimFailed` / `lockLost` / `journalCorrupt`，状态栏按原因显示不同文案
-    （kernel-contract §10.2）；`journalCorrupt` 明确提示「已保留现场，需人工处理」。
-  - 只读判定分两层：启动态的 `readonly` 只在抢锁时确定，运行期接管后的 UI 提示**最多滞后一个心跳周期（5 秒）**；
-    真正的拦截点是写闸里的写前校验，因此不会出现「提示仍可写、实际已双写」的窗口。
+- 获取：`open(O_CREAT|O_EXCL)` 独占创建。已存在则读载荷判 pid：pid 存活 → 被占用（`lockedByOther`），
+  新实例以只读观察者打开（可搜索、可渲染、不可写），绝不「写但不加锁」。
+- 失效清理：pid 已死或载荷损坏（半截 JSON）→ 崩溃遗留，直接删除锁文件后重试独占创建（最多 3 次；
+  连续失败说明并发窗口内出现了活跃锁，按被占用返回）。删除即清理，无接管副本、无租约代次。
+- Drop：只删除 `pid` + `machineId` + `vaultId` 都与自己一致的锁文件，不误删后来者。
+- 运行期不失守：锁一旦持有即贯穿整个会话（pid 存活期间无人能接管），不再有心跳线程、写前租约校验
+  与 `vault://mode` 事件；只读状态在启动时确定后不变。
+- pid 探测：`/bin/kill -0 <pid>`，无 libc 依赖；探测命令不可用时保守视为存活，避免误抢锁。
 
-watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock` 与 `.journal/`），避免自我触发。
+watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免自我触发。
 
 ---
 
 ## 8. `.workbench/` schema
 
-通用约定：所有 JSON 文件都带 `schemaVersion`（整数，当前为 `1`），未知版本 ≥ 当前应用支持版本时**拒绝写入**并提示升级应用；低于当前版本时按迁移链升级，升级前先写 `.workbench/backup/<name>.<ts>.json`。
+通用约定：所有 JSON 文件都带 `schemaVersion`（整数，当前为 `1`），未知版本 ≥ 当前应用支持版本时**拒绝写入**并提示升级应用；低于当前版本时按迁移链升级，升级前先写 `.workbench/backup/<name>.<ts>.json`（迁移链尚未实现，未知版本按拒绝处理）。
 
 > **实现状态（v1 部分未实现）**：`vault.json` 读到未知/缺失 `schemaVersion` 时 `Vault::open` 返回可读错误，
 > 启动页显示「启动失败 + 原因」（不再 panic），但**没有迁移链、也没有升级前备份**；`settings.json` 由
@@ -357,15 +298,14 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock` 与 `.journal
 {
   "schemaVersion": 1,
   "vault": { "id": "01JB8ZQ3K4M5N6P7Q8R9S0T1V2", "name": "我的库", "createdAt": "2026-11-11T02:00:00Z" },
-  "capabilities": {
-    "ember.core.slash": { "enabled": true, "config": {} },
-    "ember.core.focus": { "enabled": true, "config": { "dimOpacity": 0.4 } }
-  },
   "ui": {
-    "defaultView": "canvas",
     "defaultCanvasId": "01JB8ZQ3K4M5N6P7Q8R9S0T1V5",
-    "sidebar": "auto",
+    "overviewCanvasId": "01JB8ZQ3K4M5N6P7Q8R9S0T1V7",
+    "recentCanvasIds": ["01JB8ZQ3K4M5N6P7Q8R9S0T1V5"],
     "canvasGrid": { "size": 8, "snap": true },
+    "floatLimit": 8,
+    "toolPomodoro": false,
+    "toolGallery": false,
     "theme": "ember-black"
   },
   "linkOverrides": { "01JB...源文档id::方案": "01JB...目标id" }
@@ -374,16 +314,19 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock` 与 `.journal
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `vault.id` | ULID | 库身份。索引文件名仍用路径 hash（§9），但库身份用于导出与冲突检测。 |
-| `capabilities` | map<capabilityId, {enabled, config}> | 能力开关。缺失项按能力清单默认值处理。 |
+| `vault.id` | ULID | 库身份，用于导出与冲突检测。 |
 | `ui` | object | 允许自由扩展，未识别键保留。 |
-| `ui.defaultCanvasId` | ULID 或缺失 | 主页画布。缺失或指向不存在的画布时，启动流程重新解析并写回。 |
-| `ui.sidebar` | `"auto"` \| `"off"` | 左侧栏行为：`auto` 左缘滑出、移开收起；`off` 彻底不渲染。默认 `auto`。 |
+| `ui.defaultCanvasId` | ULID 或缺失 | 主页画布（「主页固定」）。缺失或指向不存在的画布时，启动流程重新解析并写回；画布被删时由内核写 `null` 清除。 |
+| `ui.overviewCanvasId` | ULID 或缺失 | 总览画布（卡片即 Portal，内核自动对账）。缺失时 `ensureOverview` 重建。 |
+| `ui.recentCanvasIds` | string[] 或缺失 | 最近访问的画布 id，新在前，最多 10 条。 |
 | `ui.canvasGrid` | `{ size: 8\|16\|32, snap: boolean }` | 画布网格尺寸与吸附。缺失时默认 `{ size: 8, snap: true }`。 |
-| `ui.theme` | `"ember-black"` | 主题标识；v1 仅纯黑主题。 |
+| `ui.floatLimit` | number | 文档浮窗上限，1–12，默认 8；满额静默挤掉最久未激活的一扇。 |
+| `ui.toolPomodoro` | boolean | 左下角番茄钟入口（能力化，默认关）。 |
+| `ui.toolGallery` | boolean | 左下角附件面板入口（能力化，默认关；键名沿用旧图库命名）。 |
+| `ui.theme` | `"ember-black"` | 主题标识；仅纯黑主题。 |
 | `linkOverrides` | map<string, DocId> | 歧义链接的用户裁决，键为 `sourceId::rawTarget`。 |
 
-`[设计选择]` 这些键属于**库状态**而不是机器状态：换一台机器打开同一个库，侧栏与主题行为一致。窗口位置、缩放、最近打开等机器相关状态不走 `settings.json`，见 §2 的 `machines/<machineId>/`。
+`[设计选择]` 这些键属于**库状态**而不是机器状态：换一台机器打开同一个库，画布导航与主题行为一致。窗口位置、缩放、AI 面板几何、每画布开关等机器相关状态不走 `settings.json`，见 §8.4。
 
 ### 8.2 canvas/<canvasId>.json
 
@@ -399,27 +342,49 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock` 与 `.journal
   "nodes": [
     { "id": "n_01JB8ZQ3K4M5N6P7Q8R9S0T1W1", "kind": "doc", "docId": "01JB8ZQ3K4M5N6P7Q8R9S0T1V3", "text": null, "x": 120, "y": 80, "w": 320, "h": 200, "z": 1, "groupId": null, "meta": { "color": null } },
     { "id": "n_01JB8ZQ3K4M5N6P7Q8R9S0T1W2", "kind": "note", "docId": null, "text": "待定", "x": 520, "y": 80, "w": 240, "h": 120, "z": 2, "groupId": "n_01JB8ZQ3K4M5N6P7Q8R9S0T1W3", "meta": {} },
-    { "id": "n_01JB8ZQ3K4M5N6P7Q8R9S0T1W3", "kind": "group", "docId": null, "text": "内核", "x": 80, "y": 40, "w": 900, "h": 400, "z": 0, "groupId": null, "meta": { "color": "primary" } }
+    { "id": "n_01JB8ZQ3K4M5N6P7Q8R9S0T1W3", "kind": "group", "docId": null, "text": "内核", "x": 80, "y": 40, "w": 900, "h": 400, "z": 0, "groupId": null, "meta": { "color": "primary" } },
+    { "id": "n_01JB8ZQ3K4M5N6P7Q8R9S0T1W5", "kind": "portal", "docId": null, "text": null, "x": 960, "y": 80, "w": 320, "h": 220, "z": 1, "groupId": null, "meta": { "portalTarget": "01JB8ZQ3K4M5N6P7Q8R9S0T1V6", "portalTitle": "子画布", "portalNodeCount": 12 } },
+    { "id": "n_01JB8ZQ3K4M5N6P7Q8R9S0T1W6", "kind": "image", "docId": null, "text": null, "x": 120, "y": 360, "w": 320, "h": 200, "z": 1, "groupId": null, "meta": { "assetPath": "media/ab/01JB....png" } }
   ],
   "edges": [
     { "id": "e_01JB8ZQ3K4M5N6P7Q8R9S0T1W4", "from": "n_01JB8ZQ3K4M5N6P7Q8R9S0T1W1", "to": "n_01JB8ZQ3K4M5N6P7Q8R9S0T1W2", "label": "依赖", "arrow": "end", "kind": "relation", "meta": {} }
   ],
-  "capabilityData": { "ember.canvas.minimap": { "enabled": true } }
+  "bookmarks": [
+    { "id": "bm_01JB8ZQ3K4M5N6P7Q8R9S0T1W7", "name": "写作视角", "viewport": { "x": -120, "y": -40, "zoom": 1.25 }, "filters": { "tags": ["研发"], "kinds": ["doc"], "text": "", "mode": "dim" } }
+  ],
+  "capabilityData": {}
 }
 ```
+
+多画布与空间（v2）：
+
+- 画布库：`list/create/rename/duplicate/remove`；删除进系统回收站；总览画布不可删。
+- 总览画布：`settings.ui.overviewCanvasId` 指向的一张特殊画布；内核 `ensureOverview` 自动为每张画布维护一张 `portal` 卡片（摆位、标题、节点数对账，失效目标清理）——**卡片即 Portal**，双击进入，面包屑返回。
+- 主页固定：`settings.ui.defaultCanvasId`；画布删除时由内核写 `null` 清除。
+- 节点引用文档身份（`docId`），不引用路径：外部改名/移动不断链；文件被外部删除后节点保留灰色失效占位（右键可清理），从回收站放回自动恢复。
+- 失效 `portal`（目标画布被删）保留灰色占位，总览对账时自动清理。
 
 节点字段：
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `id` | string | 是 | 画布内局部 id，形如 `n_<ULID>`，同一画布内唯一；不参与跨文件引用。 |
-| `kind` | `"doc"` \| `"note"` \| `"group"` | 是 | 节点类型；能力注册的新 kind 必须提供 `CanvasNodeKindSpec`。 |
-| `docId` | ULID 或 null | doc 必填 | 关联文档。`note`/`group` 必须为 `null`。 |
-| `text` | string 或 null | 否 | `note` 的正文、`group` 的标题；`doc` 恒为 `null`（标题/标签/简介从索引读，不冗余落盘）。 |
+| `kind` | `"doc"` \| `"note"` \| `"group"` \| `"portal"` \| `"image"` | 是 | 节点类型。 |
+| `docId` | ULID 或 null | doc 必填 | 关联文档。其余 kind 必须为 `null`。 |
+| `text` | string 或 null | 否 | `note` 的正文、`group` 的标题；`doc`/`portal`/`image` 恒为 `null`。 |
 | `x`/`y`/`w`/`h` | number | 是 | 世界坐标与尺寸，1 = 1 CSS px @ zoom=1；最小 160×100。 |
 | `z` | integer | 是 | 同 `z` 按数组顺序；组永远绘制在所有非组节点之下，不依赖 `z` 比较。 |
 | `groupId` | string 或 null | 否 | 所属组的节点 id。一个节点最多属于一个组；组不能嵌套组；必须指向存在的 `group` 节点。 |
-| `meta` | object | 是 | 未知键保留。`meta.color` 取 token 名 `primary\|secondary\|success\|warning\|danger\|null`，**不落色值**。 |
+| `meta` | object | 是 | 未知键保留。`meta.color` 取 token 名 `primary\|secondary\|success\|warning\|danger\|null`，**不落色值**；`meta.portalTarget/portalTitle/portalNodeCount` 为 portal 指向与展示；`meta.assetPath` 为 image 的库内 `media/` 路径（`asset_save` 去重后返回）。 |
+
+视图书签：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | string | 是 | 形如 `bm_<ULID>`，同一画布内唯一。 |
+| `name` | string | 是 | 用户命名；一键跳回。 |
+| `viewport` | `{x,y,zoom}` | 是 | 保存的镜头位置与缩放。 |
+| `filters` | object 或 null | 否 | 保存的过滤条件：`tags`（标签数组）、`kinds`（节点类型数组）、`text`（关键词）、`mode`（`dim` 高亮 / `hide` 隐藏）。解析容错：坏一条跳过一条，不炸画布。 |
 
 连线字段：
 
@@ -443,71 +408,48 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock` 与 `.journal
 - 任何显式 mutation 立即触发一次原子写（§6.1），一次 mutation 批次 = 一次写。
 - `viewport` 变化 400ms 防抖落盘；会话关闭、窗口隐藏（`visibilitychange`）时强制 flush，保证「重启后视口保持」。
 - `updatedAt` 随每次成功写入刷新。
+- 内容变更落盘前把当前磁盘版本轮转到 `.workbench/history/<canvasId>.<n>.json`：`n=1` 是上一版，其余依次后移，最多保留 **5** 版；纯视口变更不生成历史。
+- 历史槽位可由 `listHistory` 只读列出（`slot`、`updatedAt`、`nodeCount`、sha256 指纹、`readable`）；`readHistory` 只读预览，预览不打开会话、不写盘。损坏快照仍列出但标记 `readable: false`，预览/恢复抛 `canvas_invalid`。
+- `restoreHistory(id, slot, hash)` 先把当前版本推进历史，再把目标槽位写回主画布，因此恢复可撤销；槽位越界抛 `invalid_payload`，槽位为空抛 `doc_not_found`，快照指纹与 `hash` 不符抛 `stale_revision` 且不写盘。`restorePrevious` 等价于恢复 `.1`（不做指纹预检）。恢复同步更新已打开会话的内存场景并广播。
+- 历史文件与主画布分别使用单文件原子写；历史轮转和主画布写入**不是跨文件事务**，崩溃可能只完成部分轮转，主画布仍保证为完整的旧版或新版。
 - 校验失败不写盘、不更新内存场景；命令返回 `ok: false` 与 `canvas_invalid` 文案。
 
-### 8.3 mindmap/<mindmapId>.json
+### 8.2.1 文档历史（`history/documents/<docId>/`）
 
-```json
-{
-  "schemaVersion": 1,
-  "id": "01JB8ZQ3K4M5N6P7Q8R9S0T1V6",
-  "title": "拆解",
-  "rootId": "m1",
-  "layout": "right",
-  "createdAt": "2026-11-11T02:20:00Z",
-  "updatedAt": "2026-11-11T02:30:00Z",
-  "nodes": [
-    { "id": "m1", "parentId": null, "text": "主题", "order": 0, "collapsed": false, "docId": null },
-    { "id": "m2", "parentId": "m1", "text": "分支", "order": 0, "collapsed": false, "docId": "01JB8ZQ3K4M5N6P7Q8R9S0T1V3" }
-  ]
-}
-```
+- 每次 `DocService.update` 提交主文前、以及 `restoreHistory` 写回目标版前，把当前磁盘文件的**原始字节**
+  （含 BOM 与 CRLF）存为 `history/documents/<docId>/<versionId>.md`；`versionId` 为 ULID。
+- 同目录 `index.json` 由内核整表原子写维护：
+  `{ schemaVersion: 1, docId, versions: [{ versionId, path, hash, at, size }] }`，`versions` 新→旧。
+  `hash` 是版本字节的 sha256，读取时与实际文件交叉校验。
+- 保留策略：每篇文档最多 **20 版**、总字节最多 **64 MiB**，超出从最旧开始淘汰（永远保留最新一版）；
+  淘汰的文件经内部 `vault_purge` 清理。历史写失败时本次主文不提交。
+- 只有 `update`、`restoreHistory`、`adoptCopy`、`detachCopy` 记录历史；`create`、`rename`、冲突副本创建、`remove`、`purge` 都不记录。
+- 预览只读、不写盘。恢复前重新校验 `base.hash`：一致则当前版先入历史再写回目标版原始字节（后续历史不删除）；
+  失配则不改主文、不新增历史，把目标版内容写成冲突副本（kernel-contract D11）。
+- 索引损坏（JSON 非法、schema 版本不符、任一条目非法）按「无历史」处理并告警，下次保存重建；
+  已存在的版本文件成为孤儿，不阻断编辑。
 
-约束：`rootId` 必须存在且 `parentId === null`；任何节点不得形成环（写入前校验，失败即拒绝，不写半成品）。
-
-### 8.4 ai/memory.jsonl
-
-追加写，一行一条：
-
-```json
-{"id":"01JB...","at":"2026-11-11T03:00:00Z","kind":"fact","scope":"vault","text":"用户偏好用中文写规范","source":{"docId":"01JB...","line":12}}
-```
-
-| 字段 | 取值 |
-|---|---|
-| `kind` | `fact`（稳定事实） / `episode`（交互片段摘要） / `preference`（用户偏好） |
-| `scope` | `vault` / `global`（`global` 仍落库内，导出时不带） |
-| `source` | 可选溯源，`docId` 必须存在于索引，否则导出时置空 |
-
-不变量：只追加、不改写；纠错通过新增 `kind: "fact"` 且 `supersedes: <id>` 表达，不删除历史行。
-
-### 8.5 ai/threads/<threadId>.json
-
-```json
-{ "schemaVersion": 1, "id": "01JB...", "title": "关于索引", "createdAt": "...", "updatedAt": "...", "messages": [ { "role": "user", "text": "...", "at": "..." } ] }
-```
-
-消息只存文本与引用（`refs: [{docId, anchor}]`），不存模型原始响应体，避免格式耦合。
-
-### 8.6 删除与系统回收站
+### 8.3 删除与系统回收站
 
 - `[事实]` 用户删除（`docs.remove`）把文件**直接移入操作系统回收站**（macOS：`NSFileManager.trashItemAtURL`）。库内不写副本：文件是唯一真相源。
 - `[设计选择]` 不做 id 重写：副本不再进入库内，重写没有收益；文件离开库后由系统接管，Ember 不再感知它的 id。风险是用户从回收站还原时可能与库内同 id 文档并存——`refresh()` 按路径字典序保留先收录者并告警，不会改写任何文件（§10.5）。
 - `[设计选择]` 应用内**没有**"从回收站恢复"的入口：恢复只能在系统回收站里完成。撤销只存在于本次运行内（重建文档，不从回收站取回），见 §10.5 与 AI 删除提案的文案。
 - 失败语义 fail-closed：非本地卷（网络盘/云盘）、无法确认卷类型、回收站 API 报错时删除失败，文件保持原样。非 macOS 平台明确报 `io_failed`（文案说明该平台不支持系统回收站），**绝不**回退为永久删除。
 - 调用后校验：源路径必须消失；系统返回的 `resultingItemURL` 必须存在且不在库根内（回收站内文件名可能被改写，不能按原路径推断）。
-- 回滚用的永久删除（文章创建后画布写入失败）是内核内部入口 `Vault::purge` / `vault_purge`，不对用户暴露，也不注册为 `core.doc.purge` 命令（kernel-contract D4）。
-- 历史遗留：旧版 `.workbench/trash/<ULID>/` 不迁移、不自动放回；持锁实例启动且 journal 恢复成功后执行惰性清扫，副本目录 mtime 超过 **30 天**整目录回收；全库孤儿 `.ember-tmp-` 临时文件（>24h）一并回收。清扫只记日志不影响启动，mtime 不可读按保守不删处理。
-- 孤儿 temp 清扫**覆盖** `.workbench/` 内部：锁心跳与 journal 的瞬时 temp 也在那里，24h 门槛远大于单次写入的存活时间，不会与 rename 竞态；`lock.takeover.*` 认领副本按同一门槛回收（§7）。
+- 文章创建后画布写入失败的回滚，以及画布历史轮转、文档历史淘汰的过期版本清理，共用内核内部入口 `Vault::purge` / `vault_purge`；不对用户暴露，也不注册为 `core.doc.purge` 命令（kernel-contract D4/I9）。
+- 历史遗留：旧版 `.workbench/trash/<ULID>/` 不迁移、不自动放回；持锁实例在 Vault::open 时执行惰性清扫，副本目录 mtime 超过 **30 天**整目录回收；全库孤儿 `.ember-tmp-` 临时文件（>24h）一并回收。清扫只记日志不影响启动，mtime 不可读按保守不删处理。
+- 孤儿 temp 清扫**覆盖** `.workbench/` 内部：锁文件与设置写入的瞬时 temp 也在那里，24h 门槛远大于单次写入的存活时间，不会与 rename 竞态（§7 已无心跳与认领副本）。
 - 数值提示：孤儿 temp（24h）与旧版回收目录（30 天）的保留期以 `vault/mod.rs` 常量为准，改代码必须同步本文件。
 
-### 8.7 machines/<machineId>/ui.json（机器本地，不在库内）
+### 8.4 machines/<machineId>/ui.json（机器本地，不在库内）
 
 ```json
-{ "schemaVersion": 1, "floatSizes": {}, "floatPositions": {}, "recall": null, "pomodoro": {}, "ai": { "provider": "ollama", "baseUrl": "http://127.0.0.1:11434", "model": "" }, "panels": { "ai": { "open": false, "x": 0, "y": 0, "width": 360, "height": 480 } }, "sidebarWidth": 260 }
+{ "schemaVersion": 1, "floatSizes": {}, "floatPositions": {}, "pomodoro": {}, "ai": { "provider": "ollama", "baseUrl": "http://127.0.0.1:11434", "model": "" }, "panels": { "ai": { "x": 0, "y": 0, "width": 360, "height": 480 } }, "canvasFlags": { "01J...": { "recentEdits": true } } }
 ```
 
-- 已知键：`floatSizes`、`floatPositions`、`recall`、`pomodoro`、`ai`、`panels.ai`、`sidebarWidth`。
+- 已知键：`floatSizes`、`floatPositions`、`pomodoro`、`ai`、`panels.ai`（仅 x/y/width/height，AI 面板已改为命令唤起）、`canvasFlags`（每画布 UI 开关，如最近编辑层）。
+- **AI 会话持久化（阶段 7）**：`machines/<machineId>/ai/<vaultId>.json` 存最近一次对话 turns、未应用 proposal、崩溃恢复中的 applying 状态；schemaVersion 当前 1，文件不存在或损坏时水合为空态；不持久化 UndoAction（跨重启撤销本期不做）、不持久化 API Key（钥匙串里）；备份不扫此目录、不进知识库索引。
+- 历史遗留键（旧版 `recall`、`sidebarWidth`、`panels.ai.open`）不再是已知键，作为未知键原样保留。
 - 序列化时未知顶层键与 `panels.*` 的他人子键**原样保留**，不做整体重写；对话与提案只存内存，不落盘。
 - 读到更高 `schemaVersion` 时整会话禁止回写（旧版应用不得用默认态覆盖新版数据）。
 
@@ -515,98 +457,17 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock` 与 `.journal
 
 ## 9. 索引存储与检索
 
-### 9.1 位置与生命周期
+`[设计选择]` v2 索引是**内核内存实现**（`src/kernel/index-service.ts`），不再落 sqlite 文件：
 
-- 路径：`~/Library/Application Support/Ember/index/<vaultHash>.sqlite`，`vaultHash = SHA-256(规范化绝对路径)` 的前 32 个 hex 字符。
-- `[设计选择]` 库被移动/重命名后 hash 变化 → 索引变成孤儿，触发全量重建。这是可接受的代价，换来「索引绝不写进库目录」。
+- 元数据（标题/标签/别名/简介）在首次访问时从 `docs.list()` 即时建；
+- 正文词组与链接关系后台逐篇增量（每批 8 篇让出一个宏任务）；`doc:changed` 增量维护；
+- 中文按相邻二元组（bigram）+ 单字切分，拉丁按词，不依赖外部词典；`tokenizerVersion: 1`；
+- 链接边存 `targetId`（文档身份），不是路径（§5.3）；
+- `referencesByRaw(raw)` 按链接目标反查引用（附件面板「被引用位置」）；
+- 索引可随时丢弃：设置页手动重建，或重启后自动重建（**任何功能不得依赖索引中存在未重建的数据**）；
+- 反向链接由索引提供，shell 不再全库扫描正文。
 
-  > 备选是使用 `settings.json` 里的 `vault.id` 命名索引文件，移动后索引仍可用。v1 不采用：路径 hash 让索引与「当前挂载位置」强绑定，避免同一库被复制到两处时两个实例共用一份索引互相污染。
-
-- 索引可随时删除；删除后启动即全量重建。**任何功能不得依赖索引中存在未重建的数据。**
-- SQLite 配置：`journal_mode=WAL`、`synchronous=NORMAL`、`foreign_keys=ON`、`busy_timeout=5000`。
-
-### 9.2 表结构（v1）
-
-> **实现状态（v1 未实现）**：Rust 侧 SQLite/FTS5 索引尚未接入；运行期注入的是
-> `createPendingIndexPort` 占位端口（`available: false`，查询返回空、`rebuild` 返回空统计）。
-> 下文表结构、`flags` 位与分词方案都是后续版本目标，当前没有落地的库文件。
-
-```sql
-CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- meta: schema_version, vault_id, built_at, tokenizer_version
-
-CREATE TABLE documents (
-  id             TEXT PRIMARY KEY,
-  path           TEXT NOT NULL UNIQUE,
-  path_folded    TEXT NOT NULL,
-  title          TEXT NOT NULL,
-  tags_json      TEXT NOT NULL,
-  aliases_json   TEXT NOT NULL,
-  created        TEXT,
-  updated        TEXT,
-  mtime_ms       INTEGER NOT NULL,
-  size           INTEGER NOT NULL,
-  content_hash   TEXT NOT NULL,
-  frontmatter_json TEXT NOT NULL,
-  flags          INTEGER NOT NULL DEFAULT 0,  -- bit0 needs_adoption, bit1 id_invalid, bit2 duplicate_id
-  indexed_at     TEXT NOT NULL
-);
-CREATE INDEX documents_path_folded ON documents(path_folded);
-CREATE INDEX documents_title ON documents(title);
-
-CREATE TABLE links ( /* §5.3 */ );
-CREATE INDEX links_src ON links(src_id);
-CREATE INDEX links_target ON links(target_id);
-
-CREATE TABLE tags (doc_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(doc_id, tag));
-CREATE INDEX tags_tag ON tags(tag);
-
--- 正文全文索引（外部内容表）
-CREATE VIRTUAL TABLE docs_fts USING fts5(
-  body_tokens,
-  content='doc_text',
-  content_rowid='rowid',
-  tokenize='unicode61 remove_diacritics 2'
-);
-CREATE TABLE doc_text (rowid INTEGER PRIMARY KEY, doc_id TEXT NOT NULL, body_tokens TEXT NOT NULL);
-```
-
-`doc_text.body_tokens` 存的是**归一化后的检索串**（§9.3），不是原文；原文永远从文件读，避免索引成为第二真相源。
-
-### 9.3 中文分词：取舍
-
-`[事实]` FTS5 内置 tokenizer 只有 `unicode61`、`ascii`、`porter`，以及 3.34+ 的 `trigram`。它们都不做中文分词：`unicode61` 把连续汉字段当成**一个 token**，因此「知识库」无法被「知识」命中。
-
-候选方案对比：
-
-| 方案 | 召回 | 成本 | 依赖 | 主要缺陷 |
-|---|---|---|---|---|
-| A. `unicode61` 原样 | 差：整段汉字一个 token | 最低 | 无 | 中文搜索基本不可用 |
-| B. `trigram` | 好：任意 ≥3 字子串 | 索引约 3× 正文 | 内置（SQLite ≥3.34） | 1–2 字查询退化为 LIKE 全扫；对英文短词也失效 |
-| C. 写入时自建**二元组**（bigram）影子列 | 好：中文 ≥2 字查询全覆盖 | 索引约 2× 正文 | 无 | 无短语语义；1 字查询需 LIKE 兜底；需要 `tokenizer_version` 以便重建 |
-| D. 自定义 jieba tokenizer | 最好：词级切分 | 索引最小 | 需编译扩展 + 词典随应用分发 | 词典与 SQLite 构建耦合，升级风险高 |
-
-**定案（实现推迟到索引接入时）：C（二元组影子列）为默认，B 不采用，D 推迟。**
-
-理由：C 的召回对中文长尾足够，且完全确定（同一文本永远切出同一串），不依赖词典版本；索引体积代价（约 2×）可接受，因为索引可删可重建。D 的准确率提升不足以抵消「原生扩展 + 词典 licensing + 跨架构构建」的工程量。
-
-切分规则（`tokenizer_version = 1`）：
-
-1. 文本归一化：NFKC、小写、去零宽字符、全角标点转半角。
-2. 按「汉字连续段 / 拉丁字母数字连续段 / 其它分隔」分段。
-3. 汉字段长度 L：
-   - L = 1：保留单字 token；
-   - L ≥ 2：生成全部重叠二元组（`知识库` → `知识`、`识库`），**不再**保留整段 token。
-4. 拉丁段：整词作为 token（不做词干化，避免误召回）。
-5. token 之间以单个空格连接写入 `body_tokens`。
-
-查询构造：
-
-- 查询串做同样的归一化与切分；汉字段生成二元组，多 token 之间用 `AND`；拉丁词加引号。
-- 单字查询（切分后无二元组）→ 走 `LIKE '%字%'` 兜底并限制结果数，UI 标注「单字检索，结果可能较慢」。
-- 查询 token 数量上限 32，超出截断并提示。
-
-`[设计选择]` 升级切分规则必须递增 `tokenizer_version`，启动时发现版本不符即重建 `docs_fts`（不要求用户操作）。
+将来数据量增大需要更强存储时，替换 index-service 内部实现即可——接口稳定，界面不改。
 
 ---
 
@@ -621,15 +482,14 @@ CREATE TABLE doc_text (rowid INTEGER PRIMARY KEY, doc_id TEXT NOT NULL, body_tok
 
 `[事实]` 这里没有「强制覆盖」分支。`force` 参数不存在，避免调用方误用。
 
-### 10.2 合并
+### 10.2 处理（v2：基线校验 + 冲突副本，无自动合并）
 
-- 以行/块为单位的 diff3：取 `base→local` 与 `base→disk` 的变更区间，重叠区间为冲突。
-- 复杂度上限：单侧 diff 为 O(n·m) DP（Uint32 表），`(n+1)×(m+1) > 8M` 格时返回 `too_large` 交人工处理——峰值内存约 64MB，可覆盖 ~2800 行 × ~2800 行的长文；更大文档不走自动合并。
-- 无冲突 → 自动合并结果原子写入，返回 `{ merged: true, conflictCopy: null }`。
-- 有冲突 → **两份都保留**：
-  1. 主文件写入合并结果，冲突区间用标记包裹（见 10.4）；
-  2. 同时生成冲突副本，保存**磁盘版本**的完整内容（用户/外部工具的那一份），并附注本地版本已并入主文件；
-  3. 返回 `{ merged: false, conflictCopy: { path, docId } }` 并 emit `doc:conflict`。
+- 保存前比对 `base.hash` 与磁盘 hash：一致 → 直接原子写入，返回 `{ merged: true, conflictCopy: null }`。
+- 不一致 → **两份都保留，磁盘版本一字节不动**：
+  1. 本地改动（编辑区内容 + 补丁后的 frontmatter）完整写入冲突副本；
+  2. 主文件保持磁盘版本；
+  3. 返回 `{ merged: false, conflictCopy: { path, docId } }` 并 emit `doc:conflict`；UI 在标题区与状态栏常驻提示。
+- 没有 diff3、没有冲突标记、没有 `too_large` 上限——任何大小的文件行为一致。
 
 ### 10.3 冲突副本命名
 
@@ -638,7 +498,7 @@ CREATE TABLE doc_text (rowid INTEGER PRIMARY KEY, doc_id TEXT NOT NULL, body_tok
 ```
 
 - 时间取 UTC，紧凑格式，无冒号（`[事实]` macOS 允许冒号但会在 Finder 中显示为 `/`，故禁用）。
-- `XXXX` 取冲突副本自身 ULID 的前 4 位，同一秒内多次冲突也几乎不会碰撞；碰撞时追加 `-2`、`-3`。
+- `XXXX` 取冲突副本自身 ULID 的后 4 位，同一秒内多次冲突也几乎不会碰撞。
 - 冲突副本的 `id` 必须**新生成**（否则与主文件重复），并写入 `ember.conflictOf: <原文档 id>`。
 - 冲突副本的 `created` = 冲突发生时间，`title` 保留原 title（不加后缀，后缀在文件名上）。
 
@@ -649,17 +509,20 @@ notes/方案.md
 notes/方案 (conflict 20261111T103205Z-7F3K).md
 ```
 
-### 10.4 冲突标记格式
+### 10.4 冲突解决（v2.2：显式采用 / 另存 / 删除）
 
-```
-<<<<<<< local (Ember 2026-11-11T10:32:05Z)
-本地内容
-=======
-磁盘内容
->>>>>>> disk (mtime 2026-11-11T10:31:40Z)
-```
+冲突副本与普通文档一样参与索引和列表，`ember.conflictOf` 只表达归属；解决必须由用户显式触发。
 
-标记行必须整行匹配；解析器把未闭合的标记视为普通文本，不报错（防止用户手写误伤）。
+- **并排查看**：外壳同时打开原文与副本两扇浮窗，供用户手动合并；内核不做自动合并。
+- **采用副本**（`DocService.adoptCopy`，仅在原文存在时可用）：
+  1. 分别复核副本与原文的磁盘 sha256，任一与用户所见修订不符即失败（`stale_revision`），零写入；
+  2. 副本正文与 `title` / `summary` / `tags` / `aliases` 写回**原文**，保留原文 `id`、`created`、`ember` 与其余未知键；
+  3. 写前把原文当前原始字节记入文档历史（§9）；
+  4. 提交成功后再删除副本（系统回收站）；删除失败不回滚原文，结果标记 `copyRemoved: false`，由外壳明确提示手动删除。
+- **另存为普通文档**（`DocService.detachCopy`）：清除副本的 `ember.conflictOf`，保留 `id`、路径与正文；用于原文已删除的孤儿冲突，或用户想保留副本但不再提示冲突。
+- **删除副本**：走普通 `remove`（系统回收站），不触碰原文。
+- **孤儿冲突**（原文已被删除）：只提供「另存为普通文档」与「删除副本」，不允许采用。
+- 不自动合并、不自动清理；只读模式下所有解决动作被拒绝（`vault_locked`）。
 
 ### 10.5 id 重复
 
@@ -701,7 +564,7 @@ Ember Export <vaultName> <YYYY-MM-DD>/
     { "id": "01JB...", "path": "docs/方案.md", "title": "方案", "contentHash": "sha256:9f2c...", "size": 4211, "tags": ["研发"], "aliases": ["plan"] }
   ],
   "assets": [ { "path": "assets/diagram.png", "contentHash": "sha256:...", "size": 91234 } ],
-  "workbench": { "canvas": ["01JB..."], "mindmap": ["01JB..."], "settings": true, "ai": false },
+  "workbench": { "canvas": ["01JB..."], "settings": true },
   "integrity": { "algorithm": "sha256", "files": { "docs/方案.md": "9f2c..." } }
 }
 ```
@@ -711,22 +574,76 @@ Ember Export <vaultName> <YYYY-MM-DD>/
 - 字段只增不改；`formatVersion` 只在破坏性变更时递增。
 - `documents[].contentHash` 与 `integrity.files[path]` 必须一致；导入时以 `integrity` 为准校验。
 - 导入规则：校验 hash → 按 `id` 判重 → 冲突时不覆盖，导出报告列出 `conflicts[]`（不静默丢弃）。
-- `ai/memory.jsonl` 默认不导出（`workbench.ai: false`），因为可能含敏感上下文。
+
+### 11.1 实现现状（v1：导出 + 只读预检）
+
+导出与预检由 Rust `vault/backup.rs` 独占实现，不经过索引，也不要求库可写（只读库可以导出）。
+
+目录映射（冻结）：
+
+| 库内来源 | 包内路径 |
+|---|---|
+| 任意目录下 `*.md`（排除 `media/`、点开头目录、`node_modules/`） | `docs/<库内相对路径>` |
+| `media/**` | `assets/<media 下的相对路径>` |
+| `.workbench/settings.json` | `.workbench/settings.json` |
+| `.workbench/canvas/*.json` | `.workbench/canvas/…` |
+| `.workbench/history/*` | `.workbench/history/**`（含 `documents/<docId>/` 嵌套目录与 `index.json`） |
+
+排除：`.workbench/.lock`、`.workbench/trash/`、`.workbench/backup/`、`*.ember-tmp-*`、点开头的文件/目录。
+机器本地状态（`machines/<machineId>/ui.json`、`ai/<vaultId>.json`、钥匙串）不在库内，结构上不会被导出。
+
+导出流程：遍历拒绝符号链接 → 逐文件流式 SHA-256 写入 staging 目录 → 复核 staging 字节 → 复核源文件 hash
+（导出期间被外部改动即整体失败）→ 最后写 `manifest.json` → `rename(staging, 目标)`。任何失败都会删除 staging，
+目标父目录不留残包；目标必须绝对路径、位于库外、且不得已存在（不覆盖）。首版不打包 zip。
+
+预检只读导出包、不写盘，结论分为三级：
+
+- `error`（阻断恢复）：`invalid_format`、`unsupported_version`、`path_traversal`、`invalid_path`、
+  `missing_file`、`hash_mismatch`、`not_a_file`、`symlink`、`invalid_manifest`。
+- `conflict`（需人工处理，但不阻断）：`duplicate_id`、`invalid_id`、`duplicate_path`、`case_collision`。
+- `warn`：`missing_id`（未 adoption 的文档）、`unlisted_file`（未登记在 integrity 的文件）。
+
+`restorable = 没有 error`。首版没有回写恢复：预检只回答「这个包是否完整、有没有冲突」。
 
 ---
 
 ## 12. 版本与迁移
 
 - 本规范的 schema 版本：`vaultSchemaVersion = 1`，写入 `settings.json.schemaVersion`。
-- 迁移必须单向、可重入：迁移前备份到 `.workbench/backup/`，迁移过程写 journal（`kind: "migrate"`）。
+- 迁移必须单向、可重入：迁移前备份到 `.workbench/backup/`，逐文件原子写，失败项单独报告。
 - 迁移失败 → 库进入只读并提示，不留下「迁移了一半」的库。
 - 索引不受库 schema 版本约束，但受 `tokenizer_version` 约束（§9.3）。
+
+---
+
+## 12.1 库健康检查
+
+`[设计选择]` 体检是显式触发的一次性只读扫描，不是后台常驻任务。入口为设置页「检查库健康」或命令
+`ember.panel.health`。
+
+扫描以文件系统清单为入口（`vault_scan`），**不依赖文档目录**，因此坏 frontmatter、缺 id、`.markdown`、
+符号链接都能被发现。覆盖：
+
+- `.md`：坏 frontmatter、缺失/非法/重复 id、非 UTF-8、超过 32 MiB（不读取内容）；
+- `.markdown`：不会被索引收录，可安全改名为 `.md`；
+- 正文中的 `media/` 图片引用是否存在（外链不检查）；
+- `.workbench/canvas/*.json`、`.workbench/history/<canvasId>.<n>.json`（n 仅 1..5）、
+  `.workbench/history/documents/<docId>/index.json` 及其版本文件；
+- 库内符号链接：只报告，不跟随、不读取目标。
+
+只读保证：扫描期间不写盘。安全修复只有两类：
+
+1. 缺失 id 的 adoption（`id` + 缺失的 `created` + 刷新 `updated`，正文不变）；
+2. `.markdown` → `.md` 改名（内容不变，目标已存在则不覆盖）。
+
+两类修复都要求扫描时的字节 hash 仍一致，否则取消并提示重新检查。坏 YAML、非 UTF-8、非法/重复 id、
+失效资产引用、坏画布/历史、符号链接只报告定位，不自动改写。
 
 ---
 
 ## 13. 明确的非目标（v1）
 
 - 不做多文档原子事务。
-- 不做内容历史版本（依赖用户的 Git/Time Machine）。
+- 不做内容历史的 diff / 自动合并 / Git 集成（版本记录与恢复见 §8.2.1）。
 - 不解析 Markdown 之外的格式（`.canvas` JSON Canvas 后续以能力形式接入，不进入内核）。
 - 不在库内保存二进制大对象；附件是普通文件。

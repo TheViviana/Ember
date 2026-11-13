@@ -1,6 +1,5 @@
 import type {
   CanvasId,
-  CapabilityId,
   CommandId,
   ContentHash,
   DocId,
@@ -40,6 +39,8 @@ export interface DocMeta {
   readonly updated: string;
   readonly rev: DocRevision;
   readonly flags: DocFlags;
+  /** 冲突副本指向的原文 id；普通文档为 null（vault-format §10.3） */
+  readonly conflictOf: DocId | null;
 }
 
 export interface DocSnapshot {
@@ -49,7 +50,7 @@ export interface DocSnapshot {
   readonly text: string;
 }
 
-export type WriteIntent = 'user' | 'capability' | 'migration' | 'system';
+export type WriteIntent = 'user' | 'migration' | 'system';
 
 export interface WriteOptions {
   /** 必填：读取时拿到的修订，用于乐观并发校验与三方合并基线 */
@@ -95,6 +96,75 @@ export interface WriteOutcome {
   readonly conflict: ConflictCopy | null;
 }
 
+export interface AdoptConflictOptions {
+  /** 用户在冲突中心看到的原文修订 */
+  readonly base: DocRevision;
+  /** 用户在冲突中心看到的副本修订 */
+  readonly copyBase: DocRevision;
+  readonly intent: WriteIntent;
+}
+
+export interface AdoptConflictResult {
+  readonly snapshot: DocSnapshot;
+  /** 第二步（删除副本）是否成功；false 表示原文已更新、副本仍在 */
+  readonly copyRemoved: boolean;
+}
+
+/** 库健康检查问题类别（kernel-contract H1/H5） */
+export type HealthIssueKind =
+  | 'broken_frontmatter'
+  | 'missing_id'
+  | 'invalid_id'
+  | 'duplicate_id'
+  | 'non_utf8'
+  | 'oversize'
+  | 'markdown_extension'
+  | 'broken_asset'
+  | 'broken_canvas'
+  | 'broken_history'
+  | 'symlink';
+
+export interface HealthIssue {
+  readonly kind: HealthIssueKind;
+  /** 问题文件；坏资产引用时为引用方文档 */
+  readonly path: VaultPath;
+  /** 补充定位：缺失的 `media/...`、历史版本文件等 */
+  readonly target: VaultPath | null;
+  readonly detail: string;
+  /** 扫描时字节 sha256；未读取或不可修复时为 null */
+  readonly hash: ContentHash | null;
+  /** 可安全执行的修复；其余问题只报告 */
+  readonly fix: 'adopt' | 'rename-markdown' | null;
+}
+
+export interface HealthReport {
+  /** UTC `YYYY-MM-DDTHH:MM:SSZ` */
+  readonly scannedAt: string;
+  /** 实际检查的 `.md` 文档数（不含 `.markdown` 与 `.workbench`） */
+  readonly documents: number;
+  readonly issues: readonly HealthIssue[];
+}
+
+/** 文档历史版本摘要（新→旧；只读列出，不读版本正文） */
+export interface DocHistoryEntry {
+  /** 版本文件 id（ULID）；readHistory / restoreHistory 的定位键 */
+  readonly versionId: string;
+  /** 版本字节的 sha256，读取时与索引值交叉校验 */
+  readonly hash: ContentHash;
+  /** 版本写入时文档所在路径，仅用于展示 */
+  readonly path: VaultPath;
+  /** 版本写入时间（UTC YYYY-MM-DDTHH:MM:SSZ） */
+  readonly at: string;
+  /** 版本字节数 */
+  readonly size: number;
+}
+
+export interface DocHistoryPreview {
+  readonly entry: DocHistoryEntry;
+  /** 只读展示文本：去 BOM、CRLF 归一为 LF（不落盘） */
+  readonly text: string;
+}
+
 export interface DocChange {
   readonly id: DocId;
   readonly path: VaultPath;
@@ -120,6 +190,8 @@ export interface SearchHit {
   readonly path: VaultPath;
   readonly title: string;
   readonly snippet: string;
+  /** 首个命中行（文件内 1-based，含 frontmatter 偏移）；空查询或正文未索引时为 null */
+  readonly line: number | null;
   readonly score: number;
 }
 
@@ -137,6 +209,30 @@ export interface LinkRecord {
   readonly resolver: 'path' | 'basename' | 'title' | 'alias' | 'ambiguous' | 'unresolved';
   readonly anchor: string | null;
   readonly line: number;
+}
+
+/**
+ * 未链接提及：某文档正文里出现了目标文档的标题或别名，但没有用 [[ 双链 ]] 包裹。
+ * 来自按需扫描（IndexService.unlinkedMentions），不进索引 rebuild 周期。
+ */
+export interface UnlinkedMention {
+  /** 提及发生在哪篇 */
+  readonly srcId: DocId;
+  /** 被提及（面板目标） */
+  readonly targetId: DocId;
+  /** 目标文档标题（展示用） */
+  readonly title: string;
+  /** 匹配发生在源文档正文中的 UTF-16 区间（JS string.slice 直接用） */
+  readonly from: number;
+  readonly to: number;
+  /** 匹配到的字符串（接受时替换这个 range） */
+  readonly match: string;
+  /** 候选来源 */
+  readonly kind: 'title' | 'alias';
+  /** 所在行（1-based，含 frontmatter 偏移） */
+  readonly line: number;
+  /** 前后各 48 字符的上下文（面板展示） */
+  readonly snippet: string;
 }
 
 export interface IndexedDocument {
@@ -159,29 +255,6 @@ export interface IndexEvent {
   readonly changedDocIds: readonly DocId[];
 }
 
-export interface CapabilityManifest {
-  readonly id: CapabilityId;
-  readonly version: string;
-  readonly displayName: string;
-  readonly description?: string;
-  /** semver range；v1 只接受满足 1.x 的声明 */
-  readonly requiresKernel: string;
-  readonly dependsOn?: readonly CapabilityId[];
-  readonly defaultEnabled: boolean;
-}
-
-export interface CapabilityState {
-  readonly id: CapabilityId;
-  /** manifest 里的中文显示名，供设置面板直接渲染 */
-  readonly displayName: string;
-  readonly description: string | null;
-  /** settings.json 里的开关 */
-  readonly enabled: boolean;
-  /** 运行期是否已激活 */
-  readonly active: boolean;
-  readonly error: string | null;
-}
-
 /** 画布网格与 scene 共用同一形状，避免两处定义漂移 */
 export type { CanvasGrid };
 
@@ -189,14 +262,20 @@ export type { CanvasGrid };
 export interface VaultSettings {
   readonly schemaVersion: 1;
   readonly vault: { readonly id: VaultId; readonly name: string; readonly createdAt: string };
-  readonly capabilities: Readonly<
-    Record<string, { readonly enabled: boolean; readonly config: Readonly<Record<string, unknown>> }>
-  >;
   readonly ui: {
-    readonly defaultView: 'canvas' | 'editor';
+    /** 主页画布（「主页固定」开关）；画布被删时由内核写 null 清除 */
     readonly defaultCanvasId?: string;
-    readonly sidebar: 'auto' | 'off';
+    /** 总览画布 id：固定的一张特殊画布 */
+    readonly overviewCanvasId?: string;
     readonly canvasGrid: CanvasGrid;
+    /** 文档浮窗上限（多文档浮窗：默认 8，可在设置调整） */
+    readonly floatLimit?: number;
+    /** 最近访问的画布 id（新在前，最多 10 条；画布切换器「最近访问」分组） */
+    readonly recentCanvasIds?: readonly string[];
+    /** 左下角工具入口（能力化，默认关闭）：番茄钟 */
+    readonly toolPomodoro?: boolean;
+    /** 左下角工具入口（能力化，默认关闭）：附件面板 */
+    readonly toolGallery?: boolean;
     readonly theme: 'ember-black';
     readonly [key: string]: unknown;
   };
@@ -205,16 +284,16 @@ export interface VaultSettings {
 }
 
 export interface SettingsPatch {
-  readonly ui?: Omit<Partial<VaultSettings['ui']>, 'canvasGrid'> & {
+  readonly ui?: Omit<Partial<VaultSettings['ui']>, 'canvasGrid' | 'defaultCanvasId' | 'overviewCanvasId'> & {
     readonly canvasGrid?: Partial<CanvasGrid>;
+    /** null = 删除该键（画布被删时清掉主页固定 / 总览指向） */
+    readonly defaultCanvasId?: string | null;
+    readonly overviewCanvasId?: string | null;
   };
-  readonly capabilities?: Readonly<
-    Record<string, { readonly enabled?: boolean; readonly config?: Readonly<Record<string, unknown>> }>
-  >;
   readonly linkOverrides?: Readonly<Record<string, DocId>>;
 }
 
-/** `.workbench/settings.json` 的唯一读写方（kernel-contract §9.1） */
+/** `.workbench/settings.json` 的唯一读写方（kernel-contract §0 第 2 条） */
 export interface SettingsService {
   read(): Promise<VaultSettings>;
   patch(patch: SettingsPatch): Promise<VaultSettings>;
@@ -252,6 +331,8 @@ export interface CanvasSummary {
   readonly id: CanvasId;
   readonly title: string;
   readonly updatedAt: string;
+  /** 场景节点数：Portal 卡片与总览展示用 */
+  readonly nodeCount: number;
 }
 
 export interface CreateCanvasInput {
@@ -264,5 +345,4 @@ export interface CommandDescriptor {
   readonly title: string;
   readonly scope: 'global' | 'editor' | 'canvas';
   readonly keybinding: { readonly key: string; readonly scope: 'global' | 'editor' | 'canvas' } | null;
-  readonly owner: CapabilityId | null;
 }

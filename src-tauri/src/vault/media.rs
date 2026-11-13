@@ -11,7 +11,7 @@ use crate::error::{VaultError, VaultResult};
 use super::{atomic, paths, Vault};
 
 /// 库内图库目录：`media/<sha256 前 2 位>/<完整 sha256>.<ext>`（常量归 paths.rs 所有）。
-pub use paths::MEDIA_DIR;
+use paths::MEDIA_DIR;
 
 /// 单张图片上限 20 MB。
 pub const MAX_ASSET_BYTES: u64 = 20 * 1024 * 1024;
@@ -231,8 +231,7 @@ pub fn read(vault: &Vault, relative: &str) -> VaultResult<AssetData> {
 
 /// 按内容哈希落盘：同内容只存一份，重复导入返回 deduped。
 pub fn save(vault: &Vault, bytes: &[u8], mime: &str) -> VaultResult<AssetSaved> {
-    // 必须走 ensure_writable：readonly() 只反映启动时是否抢到锁，
-    // 运行期心跳失败/被接管后的降级同样要拒绝图片落盘。
+    // 必须走 ensure_writable：启动未抢到锁（被另一实例占用）的只读库一律拒绝落盘。
     vault.ensure_writable()?;
     if bytes.is_empty() {
         return Err(VaultError::Encoding("图片内容为空".to_string()));
@@ -262,7 +261,7 @@ pub fn save(vault: &Vault, bytes: &[u8], mime: &str) -> VaultResult<AssetSaved> 
     let (absolute, normalized) = paths::resolve(vault.root(), &relative)?;
 
     // 去重与配额都是只读检查，放在写闸外：list 要遍历整个 media 目录，
-    // 图库接近上限时不该在闸内阻塞正文 journal 写入。
+    // 图库接近上限时不该在闸内阻塞其它写入。
     // 代价是配额存在极小的超限竞态：并发 asset_save 可能都读到 399 再各写一张，
     // 超出量以并发导入数为上限（UI 串行导入时不会发生），属可接受的软配额。
     let mut deduped = absolute.is_file();
@@ -272,9 +271,8 @@ pub fn save(vault: &Vault, bytes: &[u8], mime: &str) -> VaultResult<AssetSaved> 
         )));
     }
 
-    // 图片不走 journal，但落盘前同样要进写闸并做即时租约校验：
-    // ensure_writable 只反映心跳巡检结果，锁刚被接管时可能仍为 true。
-    // 闸放在返回之前，锁失守后连「命中已有图片」也不返回成功。
+    // 落盘前进写闸：闸内复核去重，杜绝并发导入写出两份相同内容；
+    // 独占创建模型下写闸即最后防线，命中已有图片也必须持锁返回。
     let _gate = vault.begin_write()?;
     // 闸内复核去重：配额检查与取闸之间，同一张图可能已被并发写入。
     deduped = deduped || absolute.is_file();
@@ -366,7 +364,7 @@ mod tests {
     impl TempVault {
         fn new() -> Self {
             // 目录名附加原子序号：并行测试在时钟粒度内可能拿到相同纳秒值（同 pid + 同纳秒
-            // 会共享目录并互相删对方的文件），journal/paths 测试已修过同类问题。
+            // 会共享目录并互相删对方的文件），paths 测试已修过同类问题。
             let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -380,6 +378,15 @@ mod tests {
 
         fn open(&self) -> Vault {
             Vault::open(self.root.clone()).unwrap()
+        }
+
+        /// 只读观察者：先让一个实例持有锁，再开第二个实例（被占用 → 只读）。
+        fn open_readonly(&self) -> Vault {
+            let holder = Vault::open(self.root.clone()).unwrap();
+            let observer = Vault::open(self.root.clone()).unwrap();
+            assert!(!observer.writable(), "第二实例应为只读观察者");
+            drop(holder);
+            observer
         }
     }
 
@@ -437,69 +444,17 @@ mod tests {
     }
 
     #[test]
-    fn save_rejects_runtime_readonly_degrade() {
+    fn save_rejects_readonly_vault() {
+        // 独占创建 + pid 存活模型下只读只发生在启动时（被另一实例占用）：
+        // media 落盘与文档写入一样走 ensure_writable，只读库一律拒绝。
         let temp = TempVault::new();
-        let vault = temp.open();
-        vault.write("notes/a.md", b"x", "user").unwrap();
-
-        // 运行期锁被接管：启动标志仍是可写，必须由 write_health 拒绝
-        let forged = crate::vault::lock::LockPayload {
-            vault_id: vault.id().to_string(),
-            pid: 999_999_999,
-            machine_id: "01JFORGEDMACHINEID000000".to_string(),
-            started_at: crate::vault::clock::now_iso8601(),
-            heartbeat_at: crate::vault::clock::now_iso8601(),
-            lease_token: 1,
-            app: "0.0.0".to_string(),
-        };
-        atomic::write_atomic(
-            &paths::lock_file(&temp.root),
-            &serde_json::to_vec(&forged).unwrap(),
-        )
-        .unwrap();
-        std::thread::sleep(
-            crate::vault::lock::HEARTBEAT_INTERVAL + std::time::Duration::from_millis(300),
-        );
+        let vault = temp.open_readonly();
 
         let error = save(&vault, PNG, "image/png").unwrap_err();
-        assert!(matches!(error, VaultError::Readonly), "降级后图片落盘应被拒绝：{error}");
+        assert!(matches!(error, VaultError::Readonly), "只读库图片落盘应被拒绝：{error}");
         assert!(list(&vault).unwrap().is_empty());
     }
 
-    #[test]
-    fn save_fences_stale_holder_without_waiting_for_heartbeat() {
-        let temp = TempVault::new();
-        let vault = temp.open();
-        let first = save(&vault, PNG, "image/png").unwrap();
-
-        // 伪造外部租约：代次更大、心跳时间不是本实例写下的。
-        let forged = crate::vault::lock::LockPayload {
-            vault_id: vault.id().to_string(),
-            pid: 999_999_999,
-            machine_id: "01JFORGEDMACHINEID000000".to_string(),
-            started_at: crate::vault::clock::now_iso8601(),
-            heartbeat_at: crate::vault::clock::now_iso8601(),
-            lease_token: u64::MAX,
-            app: "0.0.0".to_string(),
-        };
-        atomic::write_atomic(
-            &paths::lock_file(&temp.root),
-            &serde_json::to_vec(&forged).unwrap(),
-        )
-        .unwrap();
-
-        // 不等心跳巡检：图片落盘前同样要过即时租约栅栏。
-        let error = save(&vault, JPEG, "image/jpeg").unwrap_err();
-        assert!(
-            matches!(error, VaultError::Readonly),
-            "租约失守后图片落盘必须立即被拒：{error}"
-        );
-        assert!(!vault.writable(), "栅栏命中后本实例应转只读");
-        let assets = list(&vault).unwrap();
-        assert_eq!(assets.len(), 1, "被拒的图片不得进入图库");
-        assert_eq!(assets[0].path, first.path);
-        assert_eq!(fs::read(temp.root.join(&first.path)).unwrap(), PNG);
-    }
 
     #[test]
     fn rejects_svg_and_unknown_types() {

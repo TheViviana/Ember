@@ -13,7 +13,7 @@ pub fn generate() -> String {
     generate_at(clock::now_ms())
 }
 
-pub fn generate_at(millis: u64) -> String {
+fn generate_at(millis: u64) -> String {
     let mut bytes = [0u8; 16];
     bytes[0..6].copy_from_slice(&millis.to_be_bytes()[2..8]);
     bytes[6..16].copy_from_slice(&random_bytes());

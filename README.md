@@ -22,10 +22,11 @@ pnpm check:gates  # 只跑架构门禁与门禁自检
 
 ## 规范源
 
-- [docs/kernel-contract-v1.md](docs/kernel-contract-v1.md)：内核与各能力之间的唯一契约源。
-- [docs/vault-format.md](docs/vault-format.md)：库内文件格式（frontmatter、journal、锁、回收站等）的唯一规范源。
+- [docs/kernel-contract.md](docs/kernel-contract.md)：内核契约源（v2：画布库 / 真索引 / 基线校验+冲突副本）。
+- [docs/ai-panel.md](docs/ai-panel.md)：AI 面板行为（命令唤起 + 选区改写）。
+- [docs/vault-format.md](docs/vault-format.md)：库内文件格式（frontmatter、画布/书签、库锁、回收站等）的唯一规范源。
 
-两份文档与代码不一致时以文档为准，代码是 bug；改动协议必须同步文档。
+三份文档与代码不一致时以文档为准，代码是 bug；改动协议必须同步文档。
 
 ## 许可证
 

@@ -1,4 +1,5 @@
 import type {
+  CanvasBookmark,
   CanvasEdge,
   CanvasGrid,
   CanvasNode,
@@ -29,7 +30,8 @@ export type CanvasMutation =
   | { readonly type: 'removeEdges'; readonly ids: readonly string[] }
   | { readonly type: 'setViewport'; readonly viewport: Viewport }
   | { readonly type: 'setTitle'; readonly title: string }
-  | { readonly type: 'setGrid'; readonly grid: CanvasGrid };
+  | { readonly type: 'setGrid'; readonly grid: CanvasGrid }
+  | { readonly type: 'setBookmarks'; readonly bookmarks: readonly CanvasBookmark[] };
 
 export interface MutationResult {
   readonly ok: boolean;
@@ -63,6 +65,7 @@ export const applyMutations = (
   let title = scene.title;
   let viewport = scene.viewport;
   let grid = scene.grid;
+  let bookmarks = scene.bookmarks;
   let nodes: CanvasNode[] = [...scene.nodes];
   let edges: CanvasEdge[] = [...scene.edges];
   const issues: CanvasIssue[] = [];
@@ -136,12 +139,15 @@ export const applyMutations = (
       case 'setGrid':
         grid = op.grid;
         break;
+      case 'setBookmarks':
+        bookmarks = op.bookmarks;
+        break;
       default:
         break;
     }
   }
 
-  const next: CanvasScene = { ...scene, title, viewport, grid, nodes, edges };
+  const next: CanvasScene = { ...scene, title, viewport, grid, bookmarks, nodes, edges };
   const validationIssues = validateScene(next);
   const all = [...issues, ...validationIssues];
   if (all.length > 0) {

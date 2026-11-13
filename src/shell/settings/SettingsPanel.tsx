@@ -7,41 +7,46 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
 } from 'react';
-import type { CapabilityId } from '#doc-model';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMachineStore, type AiProviderId, type FloatPosition } from '../../data/stores/machine-store.ts';
 import {
   aiErrorCode,
   aiKeySaved,
+  deleteAiKey,
   describeAiError,
   listAiModels,
   saveAiKey,
   testAiConnection,
 } from '../../data/tauri/ai.ts';
-import type { CapabilityState, CanvasGrid, SettingsPatch, VaultSettings } from '../../kernel/types.ts';
+import type { CanvasGrid, SettingsPatch, VaultSettings } from '../../kernel/types.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
 import { moveFloatFrame, type FloatFrame } from '../editor/float-layout.ts';
+import { useKernel } from '../kernel-provider.tsx';
+import { BackupSection } from './BackupSection.tsx';
 import styles from './SettingsPanel.module.css';
 
 export interface SettingsPanelProps {
   readonly settings: VaultSettings | null;
-  readonly capabilities: readonly CapabilityState[];
   readonly kernelVersion: string;
   readonly onClose: () => void;
   readonly onPatch: (patch: SettingsPatch) => Promise<void>;
-  readonly onToggleCapability: (id: CapabilityId, enabled: boolean) => Promise<void>;
+  readonly onOpenHealth: () => void;
 }
 
 const GRID_SIZES: readonly CanvasGrid['size'][] = [8, 16, 32];
 
 /** 类目划分与现有区块一一对应，不存在没有内容的空页 */
 const SETTINGS_SECTIONS = [
-  { id: 'appearance', label: '外观' },
-  { id: 'sidebar', label: '侧栏' },
   { id: 'canvas', label: '画布' },
-  { id: 'capabilities', label: '能力' },
+  { id: 'floats', label: '浮窗' },
+  { id: 'tools', label: '工具' },
+  { id: 'index', label: '索引' },
   { id: 'ai', label: 'AI 助手' },
+  { id: 'backup', label: '备份' },
   { id: 'about', label: '关于' },
 ] as const;
+
+const FLOAT_LIMIT_CHOICES = [4, 6, 8, 10, 12] as const;
 
 type SectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
 
@@ -114,16 +119,17 @@ interface MoveDrag {
 /** 设置浮窗：默认居中，拖动后位置写机器本地 ui.json，下次打开按记忆恢复。 */
 export const SettingsPanel = ({
   settings,
-  capabilities,
   kernelVersion,
   onClose,
   onPatch,
-  onToggleCapability,
+  onOpenHealth,
 }: SettingsPanelProps): ReactElement => {
+  const kernel = useKernel();
+  const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 只切内容，不碰 frame：窗口位置与尺寸在切换类目时保持不变
-  const [activeSection, setActiveSection] = useState<SectionId>('appearance');
+  const [activeSection, setActiveSection] = useState<SectionId>('canvas');
 
   const ai = useMachineStore((state) => state.ai);
   const [aiProvider, setAiProvider] = useState<AiProviderId>(ai.provider);
@@ -386,8 +392,27 @@ export const SettingsPanel = ({
     await probeModel(aiModel.trim());
   };
 
-  const sidebar = settings?.ui.sidebar ?? 'auto';
+  /** 清除已保存密钥：换账号 / 排查密钥问题用；清除后状态回到「未保存」 */
+  const clearAiKey = async (): Promise<void> => {
+    await deleteAiKey(ai);
+    setAiKeyPresent(false);
+    setAiStatus('已清除密钥');
+  };
+
   const grid = settings?.ui.canvasGrid ?? { size: 8, snap: true };
+  const indexStats = useQuery({
+    queryKey: ['index', 'stats'],
+    queryFn: () => kernel.index.stats(),
+    enabled: activeSection === 'index',
+  });
+  const rebuildIndex = async (): Promise<void> => {
+    await kernel.index.rebuild();
+    void queryClient.invalidateQueries({ queryKey: ['index'] });
+  };
+
+  const floatLimit = settings?.ui.floatLimit ?? 8;
+  const toolPomodoro = settings?.ui.toolPomodoro === true;
+  const toolGallery = settings?.ui.toolGallery === true;
 
   return (
     <div className={styles.scrim} role="presentation" onClick={onClose}>
@@ -417,7 +442,7 @@ export const SettingsPanel = ({
         >
           <div>
             <p className={styles.eyebrow}>设置</p>
-            <h2 className={styles.title}>偏好与能力</h2>
+            <h2 className={styles.title}>偏好</h2>
           </div>
           <button
             type="button"
@@ -451,46 +476,6 @@ export const SettingsPanel = ({
           <div className={styles.content}>
             {settings === null ? <p className={styles.note}>正在读取库设置…</p> : null}
             {error === null ? null : <p className={styles.error}>{error}</p>}
-
-            {activeSection === 'appearance' ? (
-              <section className={styles.section}>
-                <h3 className={styles.sectionTitle}>外观</h3>
-                <p className={styles.note}>
-                  当前主题：纯黑。窗口无系统外框，画布为纯黑底 + 细网格。
-                </p>
-              </section>
-            ) : null}
-
-          {activeSection === 'sidebar' ? (
-            <section className={styles.section}>
-              <h3 className={styles.sectionTitle}>侧栏</h3>
-              <p className={styles.note}>自动隐藏：鼠标移到屏幕左缘滑出，移开收起。</p>
-              <div className={styles.options}>
-                <button
-                  type="button"
-                  className={`${styles.option} ${sidebar === 'auto' ? styles.optionActive : ''}`}
-                  disabled={busy !== null || sidebar === 'auto'}
-                  onClick={() => {
-                    void run('sidebar', () => onPatch({ ui: { sidebar: 'auto' } }));
-                  }}
-                >
-                  <span className={styles.optionTitle}>自动隐藏</span>
-                  <span className={styles.optionHint}>左缘热区滑出</span>
-                </button>
-                <button
-                  type="button"
-                  className={`${styles.option} ${sidebar === 'off' ? styles.optionActive : ''}`}
-                  disabled={busy !== null || sidebar === 'off'}
-                  onClick={() => {
-                    void run('sidebar', () => onPatch({ ui: { sidebar: 'off' } }));
-                  }}
-                >
-                  <span className={styles.optionTitle}>彻底关闭</span>
-                  <span className={styles.optionHint}>不再显示侧栏</span>
-                </button>
-              </div>
-            </section>
-          ) : null}
 
           {activeSection === 'canvas' ? (
             <section className={styles.section}>
@@ -526,34 +511,115 @@ export const SettingsPanel = ({
             </section>
           ) : null}
 
-          {activeSection === 'capabilities' ? (
+          {activeSection === 'floats' ? (
             <section className={styles.section}>
-              <h3 className={styles.sectionTitle}>能力</h3>
-              {capabilities.length === 0 ? <p className={styles.note}>尚未装配任何能力。</p> : null}
-              <ul className={styles.list}>
-                {capabilities.map((state) => (
-                  <li key={String(state.id)} className={styles.capabilityRow}>
-                    <div className={styles.capabilityText}>
-                      <span className={styles.capabilityName}>{state.displayName}</span>
-                      <span className={styles.capabilityDesc}>
-                        {state.description ?? '暂无说明'}
-                      </span>
-                    </div>
-                    <label className={styles.switchRow}>
-                      <input
-                        type="checkbox"
-                        checked={state.enabled}
-                        disabled={busy !== null}
-                        onChange={(event) => {
-                          const enabled = event.currentTarget.checked;
-                          void run(String(state.id), () => onToggleCapability(state.id, enabled));
-                        }}
-                      />
-                      <span>{state.active ? '运行中' : state.enabled ? '未激活' : '已停用'}</span>
-                    </label>
-                  </li>
+              <h3 className={styles.sectionTitle}>文档浮窗</h3>
+              <p className={styles.note}>
+                同时打开的文章浮窗上限。达到上限后再打开新文档，会自动收起最久未看的一篇。
+              </p>
+              <div className={styles.options}>
+                {FLOAT_LIMIT_CHOICES.map((limit) => (
+                  <button
+                    key={limit}
+                    type="button"
+                    className={`${styles.option} ${floatLimit === limit ? styles.optionActive : ''}`}
+                    disabled={busy !== null || floatLimit === limit}
+                    onClick={() => {
+                      void run('floatLimit', () => onPatch({ ui: { floatLimit: limit } }));
+                    }}
+                  >
+                    <span className={styles.optionTitle}>{limit} 篇</span>
+                  </button>
                 ))}
-              </ul>
+              </div>
+            </section>
+          ) : null}
+
+          {activeSection === 'tools' ? (
+            <section className={styles.section}>
+              <h3 className={styles.sectionTitle}>工具</h3>
+              <p className={styles.note}>左下角的常驻工具入口：默认关闭，开启后出现在画布左下角。</p>
+              <label className={styles.switchRow}>
+                <input
+                  type="checkbox"
+                  checked={toolPomodoro}
+                  disabled={busy !== null}
+                  onChange={(event) => {
+                    const enabled = event.currentTarget.checked;
+                    void run('toolPomodoro', () => onPatch({ ui: { toolPomodoro: enabled } }));
+                  }}
+                />
+                <span>番茄钟 + 白噪音</span>
+              </label>
+              <label className={styles.switchRow}>
+                <input
+                  type="checkbox"
+                  checked={toolGallery}
+                  disabled={busy !== null}
+                  onChange={(event) => {
+                    const enabled = event.currentTarget.checked;
+                    void run('toolGallery', () => onPatch({ ui: { toolGallery: enabled } }));
+                  }}
+                />
+                <span>附件</span>
+              </label>
+            </section>
+          ) : null}
+
+          {activeSection === 'index' ? (
+            <section className={styles.section}>
+              <h3 className={styles.sectionTitle}>索引</h3>
+              <p className={styles.note}>
+                搜索与反向链接来自内存索引，随文档变动增量维护；索引坏了重建一次即恢复，不影响文件与画布。
+              </p>
+              <dl className={styles.about}>
+                <div>
+                  <dt>文档</dt>
+                  <dd>{indexStats.data?.documents ?? '—'}</dd>
+                </div>
+                <div>
+                  <dt>链接</dt>
+                  <dd>{indexStats.data?.links ?? '—'}</dd>
+                </div>
+                <div>
+                  <dt>未解析 / 歧义</dt>
+                  <dd>
+                    {indexStats.data === undefined
+                      ? '—'
+                      : `${indexStats.data.unresolved} / ${indexStats.data.ambiguous}`}
+                  </dd>
+                </div>
+                <div>
+                  <dt>最近构建</dt>
+                  <dd>
+                    {indexStats.data === undefined || indexStats.data.lastBuiltAt === ''
+                      ? '构建中…'
+                      : indexStats.data.lastBuiltAt}
+                  </dd>
+                </div>
+              </dl>
+              <div className={styles.options}>
+                <button
+                  type="button"
+                  className={`${styles.option} ${styles.action}`}
+                  disabled={busy !== null}
+                  onClick={() => {
+                    void run('index-rebuild', rebuildIndex);
+                  }}
+                >
+                  <span className={styles.optionTitle}>
+                    {busy === 'index-rebuild' ? '重建中…' : '重建索引'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.option} ${styles.action}`}
+                  disabled={busy !== null}
+                  onClick={onOpenHealth}
+                >
+                  <span className={styles.optionTitle}>检查库健康</span>
+                </button>
+              </div>
             </section>
           ) : null}
 
@@ -561,7 +627,7 @@ export const SettingsPanel = ({
             <section className={styles.section}>
               <h3 className={styles.sectionTitle}>AI 助手</h3>
               <p className={styles.note}>
-                配置外部 OpenAI 兼容接口或本机 Ollama。此步只能保存配置与测试连通，对话面板在后续步骤接入。
+                配置外部 OpenAI 兼容接口或本机 Ollama，供对话面板与选区 AI 使用。
               </p>
               <div className={styles.options}>
                 <button
@@ -680,6 +746,21 @@ export const SettingsPanel = ({
                   : aiKeyPresent
                     ? '密钥：已保存（不显示明文）'
                     : '密钥：未保存'}
+                {aiKeyPresent === true ? (
+                  <>
+                    {' '}
+                    <button
+                      type="button"
+                      className={styles.clearKey}
+                      disabled={busy !== null}
+                      onClick={() => {
+                        void run('ai-clear', clearAiKey);
+                      }}
+                    >
+                      清除密钥
+                    </button>
+                  </>
+                ) : null}
               </p>
               <div className={styles.options}>
                 <button
@@ -706,6 +787,8 @@ export const SettingsPanel = ({
               {aiStatus === null ? null : <p className={styles.note}>{aiStatus}</p>}
             </section>
           ) : null}
+
+          {activeSection === 'backup' ? <BackupSection /> : null}
 
           {activeSection === 'about' ? (
             <section className={styles.section}>

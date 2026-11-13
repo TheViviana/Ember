@@ -1,24 +1,14 @@
-import type { CanvasPoint } from '#canvas-engine';
-import type { CanvasId, CapabilityId, CommandId, DocId, VaultPath } from '#doc-model';
+import type { CanvasId, CommandId, DocId, VaultPath } from '#doc-model';
 import type { Disposable, DocChange, DocRevision, VaultSettings } from './types.ts';
 
-/** 内核事件总线的事件表（kernel-contract §9） */
+/** 内核事件总线的事件表（kernel-contract §7） */
 export interface KernelEventMap {
   'doc:changed': { id: DocId; path: VaultPath; kind: DocChange['kind']; revision: DocRevision };
   'doc:conflict': { id: DocId; copyId: DocId; copyPath: VaultPath };
   'index:updated': { changedDocIds: readonly DocId[] };
   'command:executed': { id: CommandId; ok: boolean };
-  'capability:state': { id: CapabilityId; active: boolean; error: string | null };
-  'vault:mode': { readonly: boolean; reason: string | null };
   'settings:changed': { settings: VaultSettings };
   'canvas:changed': { canvasId: CanvasId; rev: number };
-  /** 内核只发意图，由 shell 打开浮窗/选择器；能力不得直接碰 UI（G1） */
-  'canvas:ui': {
-    canvasId: CanvasId;
-    action: 'openDoc' | 'editDoc' | 'attachDoc' | 'canvasSettings';
-    docId: DocId | null;
-    point?: CanvasPoint;
-  };
 }
 
 export interface EventBus {

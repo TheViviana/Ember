@@ -18,12 +18,6 @@ export interface FloatPosition {
   readonly top: number;
 }
 
-/** 今日回顾当天抽中的文档 id；day 为本地日期 YYYY-MM-DD */
-export interface RecallCache {
-  readonly day: string;
-  readonly ids: readonly string[];
-}
-
 export type PomodoroPhase = 'focus' | 'break';
 /** 白噪音类型：off = 关闭；音频全部由 WebAudio 本地合成，不携带音频资产 */
 export type PomodoroNoise = 'off' | 'white' | 'pink';
@@ -83,7 +77,6 @@ export const DEFAULT_AI: AiSettings = {
  * 位置是左上角相对主内容区（顶栏与状态栏之间）的像素坐标，尺寸与位置一起按机器记忆。
  */
 export interface AiPanelState {
-  readonly open: boolean;
   readonly x: number;
   readonly y: number;
   readonly width: number;
@@ -154,19 +147,10 @@ export const defaultAiPanelRect = (area: PanelArea = DEFAULT_PANEL_AREA): AiPane
     area,
   );
 
-export const DEFAULT_AI_PANEL: AiPanelState = { open: false, ...defaultAiPanelRect() };
+export const DEFAULT_AI_PANEL: AiPanelState = defaultAiPanelRect();
 
 /**
- * 左侧资源管理器宽度：按机器记忆（不同屏幕宽度下顺手宽度不同，不该进库）。
- * 默认值与 tokens.css 的 --sidebar-width 保持一致；最小 200 保证文件路径还能读，
- * 最大 420 保证窗口 960 时画布仍有 500 以上。
- */
-export const SIDEBAR_MIN_WIDTH = 200;
-export const SIDEBAR_MAX_WIDTH = 420;
-export const DEFAULT_SIDEBAR_WIDTH = 250;
-
-/**
- * schemaVersion 保持 1：recall / pomodoro 是新增的可选字段，
+ * schemaVersion 保持 1：pomodoro 是新增的可选字段，
  * 老文件缺字段时按默认值补齐即可；升到 2 会让既有 v1 文件整体作废（浮窗尺寸/位置丢失）。
  */
 const FLOAT_SIZE_SCHEMA_VERSION = 1;
@@ -175,12 +159,11 @@ export interface MachineUiDocument {
   readonly schemaVersion: 1;
   readonly floatSizes: Readonly<Record<string, FloatSize>>;
   readonly floatPositions: Readonly<Record<string, FloatPosition>>;
-  readonly recall: RecallCache | null;
   readonly pomodoro: PomodoroState;
   readonly ai: AiSettings;
   readonly panels: { readonly ai: AiPanelState };
-  /** 左侧资源管理器宽度（机器本地） */
-  readonly sidebarWidth: number;
+  /** 每画布的 UI 开关（最近编辑层等）；键 = canvasId */
+  readonly canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>>;
 }
 
 export interface MachineState {
@@ -188,42 +171,23 @@ export interface MachineState {
   readonly floatSizes: Readonly<Record<string, FloatSize>>;
   /** docId → 浮窗位置；拖动松手时写入 */
   readonly floatPositions: Readonly<Record<string, FloatPosition>>;
-  /** 当天回顾的三篇；null = 还没抽过 */
-  readonly recall: RecallCache | null;
   readonly pomodoro: PomodoroState;
   /** AI 提供方配置；密钥不在此 */
   readonly ai: AiSettings;
   readonly panels: { readonly ai: AiPanelState };
-  /** 左侧资源管理器宽度；拖拽松手或双击复位时写入 */
-  readonly sidebarWidth: number;
+  readonly canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>>;
   rememberFloatSize(docId: string, size: FloatSize): void;
   rememberFloatPosition(docId: string, position: FloatPosition): void;
-  rememberRecall(recall: RecallCache): void;
   setPomodoro(next: PomodoroState): void;
   setAi(patch: Partial<AiSettings>): void;
-  setSidebarWidth(width: number): void;
   setAiPanel(patch: Partial<AiPanelState>): void;
+  setCanvasFlag(canvasId: string, patch: { readonly recentEdits?: boolean }): void;
 }
 
 const clampInt = (value: unknown, fallback: number, min: number, max: number): number => {
   const number = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.min(max, Math.max(min, Math.round(number)));
-};
-
-export const parseRecall = (value: unknown): RecallCache | null => {
-  if (typeof value !== 'object' || value === null) return null;
-  const record = value as Readonly<Record<string, unknown>>;
-  const day = record.day;
-  const ids = record.ids;
-  if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
-  if (!Array.isArray(ids)) return null;
-  const unique: string[] = [];
-  for (const id of ids) {
-    if (typeof id !== 'string' || id.length === 0 || unique.includes(id)) continue;
-    unique.push(id);
-  }
-  return { day, ids: unique };
 };
 
 export const parsePomodoro = (value: unknown): PomodoroState => {
@@ -278,12 +242,11 @@ export const parseAi = (value: unknown): AiSettings => {
  * 老文件只有 { open, width } 也能正常读入。
  */
 export const parseAiPanel = (value: unknown, area: PanelArea = DEFAULT_PANEL_AREA): AiPanelState => {
-  if (!isRecord(value)) return { open: false, ...defaultAiPanelRect(area) };
+  if (!isRecord(value)) return defaultAiPanelRect(area);
   // 缺位置时按该尺寸的右下角推默认值，老文件只存宽度也能贴右边
   const width = clampInt(value.width, AI_PANEL_DEFAULT_WIDTH, 1, Number.MAX_SAFE_INTEGER);
   const height = clampInt(value.height, AI_PANEL_DEFAULT_HEIGHT, 1, Number.MAX_SAFE_INTEGER);
   return {
-    open: value.open === true,
     ...clampAiPanelRect(
       {
         x: clampInt(value.x, area.width - width - AI_PANEL_MARGIN, MIN_COORD, MAX_COORD),
@@ -354,20 +317,21 @@ export const parseMachineUi = (
       }
     }
     const panels = isRecord(record.panels) ? record.panels : {};
+    const canvasFlags: Record<string, { readonly recentEdits?: boolean }> = {};
+    if (isRecord(record.canvasFlags)) {
+      for (const [key, value] of Object.entries(record.canvasFlags)) {
+        if (!isRecord(value)) continue;
+        canvasFlags[key] = { ...(typeof value.recentEdits === 'boolean' ? { recentEdits: value.recentEdits } : {}) };
+      }
+    }
     return {
       schemaVersion: FLOAT_SIZE_SCHEMA_VERSION,
       floatSizes,
       floatPositions,
-      recall: parseRecall(record.recall),
       pomodoro: parsePomodoro(record.pomodoro),
       ai: parseAi(record.ai),
       panels: { ai: parseAiPanel(panels.ai, area) },
-      sidebarWidth: clampInt(
-        record.sidebarWidth,
-        DEFAULT_SIDEBAR_WIDTH,
-        SIDEBAR_MIN_WIDTH,
-        SIDEBAR_MAX_WIDTH,
-      ),
+      canvasFlags,
     };
   } catch {
     return null;
@@ -377,11 +341,10 @@ export const parseMachineUi = (
 export const serializeMachineUi = (
   sizes: Readonly<Record<string, FloatSize>>,
   positions: Readonly<Record<string, FloatPosition>> = {},
-  recall: RecallCache | null = null,
   pomodoro: PomodoroState = DEFAULT_POMODORO,
   ai: AiSettings = DEFAULT_AI,
   aiPanel: AiPanelState = DEFAULT_AI_PANEL,
-  sidebarWidth: number = DEFAULT_SIDEBAR_WIDTH,
+  canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>> = {},
 ): string => {
   // 已知字段覆盖写，未知字段（含 panels 下的其他面板）原样带回，避免两边同时写时互相抹掉
   const knownPanels = isRecord(preservedKeys.panels) ? preservedKeys.panels : {};
@@ -392,20 +355,18 @@ export const serializeMachineUi = (
       schemaVersion: FLOAT_SIZE_SCHEMA_VERSION,
       floatSizes: sizes,
       floatPositions: positions,
-      recall,
       pomodoro,
       ai: { ...knownAi, provider: ai.provider, baseUrl: ai.baseUrl, model: ai.model },
       panels: {
         ...knownPanels,
         ai: {
-          open: aiPanel.open,
           x: aiPanel.x,
           y: aiPanel.y,
           width: aiPanel.width,
           height: aiPanel.height,
         },
       },
-      sidebarWidth: clampInt(sidebarWidth, DEFAULT_SIDEBAR_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH),
+      canvasFlags,
     },
     null,
     2,
@@ -434,11 +395,10 @@ const queueWrite = (): void => {
   const json = serializeMachineUi(
     state.floatSizes,
     state.floatPositions,
-    state.recall,
     state.pomodoro,
     state.ai,
     state.panels.ai,
-    state.sidebarWidth,
+    state.canvasFlags,
   );
   writeChain = writeChain.then(async () => {
     try {
@@ -484,7 +444,7 @@ export const hydrateMachineUi = (): Promise<void> => {
     const text = await target.read();
     if (text === null) {
       // 首次启动还没有 ui.json：面板停在与当前窗口匹配的右下默认位
-      useMachineStore.setState({ panels: { ai: { open: false, ...defaultAiPanelRect(area) } } });
+      useMachineStore.setState({ panels: { ai: defaultAiPanelRect(area) } });
       return;
     }
     const parsed = parseMachineUi(text, area);
@@ -493,11 +453,10 @@ export const hydrateMachineUi = (): Promise<void> => {
       useMachineStore.setState({
         floatSizes: parsed.floatSizes,
         floatPositions: parsed.floatPositions,
-        recall: parsed.recall,
         pomodoro: parsed.pomodoro,
         ai: parsed.ai,
         panels: parsed.panels,
-        sidebarWidth: parsed.sidebarWidth,
+        canvasFlags: parsed.canvasFlags,
       });
       return;
     }
@@ -534,11 +493,10 @@ export const hydrateMachineUi = (): Promise<void> => {
 export const useMachineStore = create<MachineState>((set) => ({
   floatSizes: {},
   floatPositions: {},
-  recall: null,
   pomodoro: DEFAULT_POMODORO,
   ai: DEFAULT_AI,
   panels: { ai: DEFAULT_AI_PANEL },
-  sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+  canvasFlags: {},
 
   rememberFloatSize: (docId, size) => {
     const next: FloatSize = {
@@ -553,16 +511,19 @@ export const useMachineStore = create<MachineState>((set) => ({
     set((state) => ({ floatPositions: { ...state.floatPositions, [docId]: next } }));
     queueWrite();
   },
-  rememberRecall: (recall) => {
-    set({ recall });
-    queueWrite();
-  },
   setPomodoro: (next) => {
     set({ pomodoro: parsePomodoro(next) });
     queueWrite();
   },
   setAi: (patch) => {
     set((state) => ({ ai: parseAi({ ...state.ai, ...patch }) }));
+    queueWrite();
+  },
+  setCanvasFlag: (canvasId, patch) => {
+    set((state) => {
+      const current = state.canvasFlags[canvasId] ?? {};
+      return { canvasFlags: { ...state.canvasFlags, [canvasId]: { ...current, ...patch } } };
+    });
     queueWrite();
   },
   setAiPanel: (patch) => {
@@ -573,7 +534,6 @@ export const useMachineStore = create<MachineState>((set) => ({
       return {
         panels: {
           ai: {
-            open: next.open === true,
             x: clampInt(next.x, current.x, 0, Number.MAX_SAFE_INTEGER),
             y: clampInt(next.y, current.y, 0, Number.MAX_SAFE_INTEGER),
             width: clampInt(next.width, current.width, AI_PANEL_MIN_WIDTH, AI_PANEL_MAX_WIDTH),
@@ -581,12 +541,6 @@ export const useMachineStore = create<MachineState>((set) => ({
           },
         },
       };
-    });
-    queueWrite();
-  },
-  setSidebarWidth: (width) => {
-    set({
-      sidebarWidth: clampInt(width, DEFAULT_SIDEBAR_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH),
     });
     queueWrite();
   },

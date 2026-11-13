@@ -10,6 +10,7 @@ import {
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
 import { placeSubmenu } from '../canvas/menu-placement.ts';
 import { AI_ACTIONS, type AiActionId } from './actions.ts';
+import { readonlyText } from '../components/readonly-text.ts';
 import styles from './SelectionAiMenu.module.css';
 
 export interface SelectionAnchor {
@@ -23,6 +24,8 @@ export interface SelectionAnchor {
 interface SelectionAiMenuProps {
   readonly anchor: SelectionAnchor;
   readonly disabled: boolean;
+  /** 只读原因；与状态栏同一份文案，避免这里回退成笼统「只读模式」 */
+  readonly readonlyReason: string | null;
   readonly onPick: (id: AiActionId) => void;
   readonly onClose: () => void;
 }
@@ -37,6 +40,7 @@ const SELECTION_GAP = 6;
 export const SelectionAiMenu = ({
   anchor,
   disabled,
+  readonlyReason,
   onPick,
   onClose,
 }: SelectionAiMenuProps): ReactElement => {
@@ -111,7 +115,7 @@ export const SelectionAiMenu = ({
           role="menuitem"
           className={styles.item}
           disabled={disabled}
-          title={disabled ? '当前库为只读模式，无法使用 AI 操作' : action.label}
+          title={disabled ? `${readonlyText(readonlyReason)}，无法使用 AI 操作` : action.label}
           onClick={() => {
             onPick(action.id);
           }}

@@ -159,11 +159,6 @@ impl<B: SecretBackend> KeyStore<B> {
         result
     }
 
-    pub fn lock_session(&self) {
-        if let Ok(mut guard) = self.session.lock() {
-            *guard = None;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -253,8 +248,6 @@ mod tests {
         assert!(matches!(store.read(account()), Err(AiError::KeyMissing)));
 
         store.write(account(), "sk-demo").expect("再次写入");
-        store.lock_session();
-        assert!(matches!(store.read(account()), Err(AiError::KeyMissing)));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter};
 use crate::vault::paths;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1200);
-/// 轮询等待的切片步长：Drop join 最多阻塞这么久（与锁心跳同一策略）
+/// 轮询等待的切片步长：Drop join 最多阻塞这么久
 const POLL_STEP: Duration = Duration::from_millis(250);
 /// 连续无变化时逐级拉长轮询间隔（最多 6s），降低空闲态全库扫描开销；
 /// 一旦发现变化立即恢复到 1.2s，活跃期的事件延迟不变。
@@ -33,12 +33,6 @@ struct VaultChange {
     from: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct VaultMode {
-    readonly: bool,
-    reason: Option<crate::vault::lock::ReadonlyReason>,
-}
-
 /// 轮询型 watcher（不引入 notify crate）：按 mtime + size 指纹对比整库 Markdown 文件。
 pub struct Watcher {
     stop: Arc<AtomicBool>,
@@ -54,29 +48,21 @@ impl Drop for Watcher {
     }
 }
 
-pub fn spawn(app: AppHandle, root: PathBuf, health: Option<Arc<AtomicBool>>) -> Watcher {
+pub fn spawn(app: AppHandle, root: PathBuf) -> Watcher {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
     let thread = thread::Builder::new()
         .name("ember-vault-watcher".to_string())
-        .spawn(move || run(app, root, flag, health))
+        .spawn(move || run(app, root, flag))
         .map_err(|error| eprintln!("vault watcher 启动失败：{error}"))
         .ok();
 
     Watcher { stop, thread }
 }
 
-fn run(
-    app: AppHandle,
-    root: PathBuf,
-    stop: Arc<AtomicBool>,
-    health: Option<Arc<AtomicBool>>,
-) {
+fn run(app: AppHandle, root: PathBuf, stop: Arc<AtomicBool>) {
     let mut previous = scan(&root);
     let mut interval = POLL_INTERVAL;
-    let mut last_health = health
-        .as_ref()
-        .map(|flag| flag.load(Ordering::Relaxed));
     while !stop.load(Ordering::Relaxed) {
         // 切片等待：Drop 需要 join 本线程，整段 sleep 会让退出最多阻塞一个轮询周期
         let mut remaining = interval;
@@ -87,17 +73,6 @@ fn run(
         }
         if stop.load(Ordering::Relaxed) {
             break;
-        }
-
-        // 锁心跳失败/被接管：立刻通知前端切到只读 UI（端口自身也会开始拒绝写入）
-        if let Some(flag) = &health {
-            let healthy = flag.load(Ordering::Relaxed);
-            if last_health != Some(healthy) {
-                last_health = Some(healthy);
-                if !healthy {
-                    emit_mode(&app);
-                }
-            }
         }
 
         let current = scan(&root);
@@ -184,20 +159,6 @@ fn emit(app: &AppHandle, kind: &'static str, path: &str, from: Option<&str>) {
         },
     ) {
         eprintln!("vault://changed 事件发送失败：{error}");
-    }
-}
-
-/// 运行期降级通知：前端据此切只读 UI，而不是继续显示可写状态。
-fn emit_mode(app: &AppHandle) {
-    if let Err(error) = app.emit(
-        "vault://mode",
-        VaultMode {
-            readonly: true,
-            // 运行期失守只有一种原因：心跳发现锁被接管/丢失。
-            reason: Some(crate::vault::lock::ReadonlyReason::LockLost),
-        },
-    ) {
-        eprintln!("vault://mode 事件发送失败：{error}");
     }
 }
 

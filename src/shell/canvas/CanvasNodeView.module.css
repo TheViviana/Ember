@@ -365,3 +365,77 @@
   letter-spacing: 0;
   color: var(--ember-text-primary);
 }
+
+/* ── Portal 节点：代表另一张画布，双击进入 ─────────────────────── */
+
+.node.portal {
+  background: var(--ember-secondary-tint);
+  border: 1px solid var(--ember-secondary-border);
+  box-shadow: var(--ember-node-shadow);
+}
+
+.node.portal .title {
+  color: var(--ember-text-accent);
+}
+
+.portalHint {
+  position: absolute;
+  right: var(--space-sm);
+  bottom: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--ember-secondary);
+  opacity: 0.8;
+}
+
+/* ── 过滤器不匹配压暗 ──────────────────────────────────────── */
+
+.dimmed {
+  opacity: 0.22;
+  filter: saturate(0.4);
+}
+
+/* ── 在画布中定位：短暂高亮 ─────────────────────────────────── */
+
+.highlighted {
+  outline: 2px solid var(--ember-primary);
+  box-shadow: var(--glow-primary);
+}
+
+/* ── 失效占位：引用的文档已被外部删除 ────────────────────────── */
+
+.node.missing {
+  background: var(--ember-bg-base);
+  border: 1px dashed var(--ember-border);
+  opacity: 0.55;
+}
+
+.node.missing .title {
+  color: var(--ember-text-muted);
+}
+
+/* ── 图片节点 ──────────────────────────────────────────────── */
+
+.node.image {
+  padding: 0;
+  overflow: hidden;
+}
+
+.node.image .imageBody {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  user-select: none;
+}
+
+.imageHint,
+.imageMissing {
+  margin: 0;
+  display: grid;
+  place-items: center;
+  height: 100%;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+}

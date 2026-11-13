@@ -34,6 +34,7 @@ const scene = (): CanvasScene => ({
   grid: { size: 8, snap: true },
   nodes: [node('n1'), node('n2'), node('g1', { kind: 'group', rect: { x: 0, y: 0, w: 400, h: 300 } }), node('m1', { groupId: 'g1' })],
   edges: [edge('e1', 'n1', 'n2')],
+bookmarks: [],
 });
 
 void test('整批拒绝：批次里任何一步非法，整批不生效并返回原场景（V5）', () => {
@@ -67,6 +68,7 @@ void test('updateEdge：空串标签归一化为 null，与清空同义（§8.2�
   const withLabel: CanvasScene = {
     ...scene(),
     edges: [edge('e1', 'n1', 'n2', { label: '引用' })],
+  bookmarks: [],
   };
 
   const cleared = applyMutations(withLabel, [
@@ -101,6 +103,7 @@ void test('updateNode meta 按键合并而不是整体替换', () => {
     ...scene(),
     nodes: [node('n1', { meta: { color: 'red', keep: 1 } })],
     edges: [],
+  bookmarks: [],
   };
   const result = applyMutations(base, [
     { type: 'updateNode', id: 'n1', patch: { meta: { color: 'blue' } } },

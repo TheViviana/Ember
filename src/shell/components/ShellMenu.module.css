@@ -1,0 +1,267 @@
+.root {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.trigger:hover,
+.triggerOpen {
+  border-color: var(--ember-border-focus);
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.panel {
+  position: absolute;
+  top: calc(100% + var(--space-sm));
+  left: 0;
+  width: 240px;
+  max-height: min(72vh, 560px);
+  overflow-y: auto;
+  padding: var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-lg);
+  background: var(--ember-menu-bg);
+  box-shadow: var(--shadow-lg);
+  z-index: calc(var(--layer-float) + 4);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .panel {
+    -webkit-backdrop-filter: blur(var(--ember-glass-blur)) saturate(var(--ember-glass-saturate));
+    backdrop-filter: blur(var(--ember-glass-blur)) saturate(var(--ember-glass-saturate));
+  }
+}
+
+.sectionLabel {
+  margin: var(--space-sm) var(--space-xs) var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.08em;
+  color: var(--ember-text-muted);
+}
+
+.sectionLabel:first-child {
+  margin-top: var(--space-xs);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item:hover {
+  background: var(--ember-menu-hover);
+  color: var(--ember-text-primary);
+}
+
+.itemActive {
+  background: var(--ember-primary-tint-weak);
+  color: var(--ember-text-primary);
+}
+
+.icon {
+  flex: 0 0 16px;
+  text-align: center;
+  color: var(--ember-text-muted);
+  font-size: var(--text-xs);
+}
+
+.kbd {
+  margin-left: auto;
+  padding: 0 var(--space-xs);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--ember-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.subPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin: 2px 0 var(--space-xs);
+  padding: var(--space-sm);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-surface);
+}
+
+.fieldRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--ember-border-input);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-base);
+  color: var(--ember-text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  outline: none;
+}
+
+.input:focus {
+  border-color: var(--ember-border-focus);
+}
+
+.smallButton {
+  flex: 0 0 auto;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--ember-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.smallButton:hover {
+  border-color: var(--ember-border-strong);
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.fieldLabel {
+  margin: var(--space-xs) 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.08em;
+  color: var(--ember-text-muted);
+}
+
+.fieldEmpty {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ember-text-muted);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.chip {
+  padding: 2px var(--space-sm);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.chip:hover {
+  border-color: var(--ember-border-strong);
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
+.chipActive {
+  border-color: var(--ember-border-glow);
+  background: var(--ember-primary-tint-weak);
+  color: var(--ember-primary);
+}
+
+.modeRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--ember-menu-separator);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.bookmarkList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bookmarkRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.bookmarkName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: var(--space-xs) var(--space-sm);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.bookmarkName:hover {
+  background: var(--ember-menu-hover);
+  color: var(--ember-text-primary);
+}
+
+.bookmarkDelete {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ember-text-muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.bookmarkDelete:hover {
+  background: var(--ember-bg-hover);
+  color: var(--ember-danger);
+}

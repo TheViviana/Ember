@@ -13,6 +13,7 @@ interface FormatToolbarProps {
   readonly onHeading: (level: HeadingLevel) => void;
   readonly onLink: () => void;
   readonly onToggleMode: () => void;
+  readonly onHistory: () => void;
 }
 
 interface ToolButtonProps {
@@ -59,12 +60,14 @@ export const FormatToolbar = ({
   onHeading,
   onLink,
   onToggleMode,
+  onHistory,
 }: FormatToolbarProps): ReactElement => {
   const blockDisabled = disabled || state.inCodeBlock;
   if (mode === 'read') {
     return (
       <div className={styles.bar} role="toolbar" aria-label="阅读模式工具栏">
         <ToolButton label="编辑" title="返回编辑模式" disabled={disabled} onClick={onToggleMode} />
+        <ToolButton label="历史" title="查看文档历史版本" disabled={false} onClick={onHistory} />
       </div>
     );
   }
@@ -169,6 +172,7 @@ export const FormatToolbar = ({
       />
 
       <span className={styles.spacer} aria-hidden="true" />
+      <ToolButton label="历史" title="查看文档历史版本" disabled={false} onClick={onHistory} />
       <ToolButton label="阅读" title="阅读模式" disabled={disabled} onClick={onToggleMode} />
     </div>
   );

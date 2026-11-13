@@ -177,6 +177,7 @@ void test('连线命中：按贝塞尔距离判定，阈值内取最近一条', 
     grid: { size: 8, snap: true },
     nodes: [node('a', from, 0), node('b', to, 1)],
     edges: [edge],
+  bookmarks: [],
   };
   assert.equal(hitTestEdge(scene, { x: 600, y: 532 }, 12), 'e1');
   assert.equal(hitTestEdge(scene, { x: 588, y: 562 }, 12), null);

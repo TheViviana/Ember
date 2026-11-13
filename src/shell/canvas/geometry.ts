@@ -152,8 +152,6 @@ export const rectCenter = (rect: CanvasRect): CanvasPoint => ({
 });
 
 /** 连接锚点：屏幕尺寸常量，世界坐标按 1 / zoom 换算，保证任何缩放下都点得到 */
-export const ANCHOR_SIZE_PX = 10;
-export const ANCHOR_SIZE_HOVER_PX = 12;
 export const ANCHOR_HIT_PX = 16;
 export const ANCHOR_INSET_PX = 4;
 

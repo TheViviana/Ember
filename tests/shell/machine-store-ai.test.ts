@@ -30,7 +30,6 @@ void test('老文件缺 AI 字段时取默认值，既有字段一个不丢', ()
   assert.ok(parsed !== null);
   assert.deepEqual(parsed.floatSizes.doc, { width: 700, height: 480 });
   assert.deepEqual(parsed.floatPositions.doc, { left: 40, top: 60 });
-  assert.deepEqual(parsed.recall, { day: '2026-11-11', ids: ['a', 'b', 'c'] });
   assert.deepEqual(parsed.pomodoro, {
     focusMinutes: 45,
     breakMinutes: 10,
@@ -65,14 +64,14 @@ void test('写回时未知/他人字段原样保留，AI 字段覆盖写', async
     baseUrl: 'https://api.example.test/v1',
     model: 'demo-model',
   });
-  useMachineStore.getState().setAiPanel({ open: true, x: 844, y: 208, width: 420, height: 480 });
+  useMachineStore.getState().setAiPanel({ x: 844, y: 208, width: 420, height: 480 });
   await flushMachineUiWrites();
 
   const raw = JSON.parse(stored) as Record<string, unknown>;
   assert.deepEqual(raw.futureField, { note: '另一路写入的字段' });
   assert.deepEqual(raw.panels, {
     legacyPanel: { pinned: true },
-    ai: { open: true, x: 844, y: 208, width: 420, height: 480 },
+    ai: { x: 844, y: 208, width: 420, height: 480 },
   });
   assert.deepEqual(raw.floatSizes, { doc: { width: 700, height: 480 } });
   assert.deepEqual(raw.floatPositions, { doc: { left: 40, top: 60 } });
@@ -90,20 +89,18 @@ void test('写回时未知/他人字段原样保留，AI 字段覆盖写', async
     baseUrl: 'https://api.example.test/v1',
     model: 'demo-model',
   });
-  assert.deepEqual(reread.panels.ai, { open: true, x: 844, y: 208, width: 420, height: 480 });
+  assert.deepEqual(reread.panels.ai, { x: 844, y: 208, width: 420, height: 480 });
 });
 
 void test('非法 AI 字段回落到默认值，面板尺寸夹到合法区间', () => {
   assert.deepEqual(parseAi({ provider: 'unknown', baseUrl: 42, model: null }), DEFAULT_AI);
   assert.deepEqual(parseAiPanel({ open: 'yes', width: 9999 }), {
-    open: false,
     x: 16,
     y: 208,
     width: 720,
     height: 480,
   });
   assert.deepEqual(parseAiPanel({ open: true, width: 1 }), {
-    open: true,
     x: 944,
     y: 208,
     width: 320,
@@ -113,7 +110,7 @@ void test('非法 AI 字段回落到默认值，面板尺寸夹到合法区间',
 
 void test('老文件只有 { open, width } 时补默认 x/y/height，停右下角', () => {
   const parsed = parseAiPanel({ open: true, width: 400 });
-  assert.deepEqual(parsed, { open: true, x: 864, y: 208, width: 400, height: 480 });
+  assert.deepEqual(parsed, { x: 864, y: 208, width: 400, height: 480 });
   assert.equal(parsed.x + parsed.width, 1280 - 16);
   assert.equal(parsed.y + parsed.height, 740 - AI_PANEL_BOTTOM_RESERVE);
 });
@@ -136,5 +133,5 @@ void test('默认位置随可用区域变化：小窗口也落在底部上方', 
   const small = defaultAiPanelRect({ width: 900, height: 600 });
   assert.deepEqual(small, { x: 524, y: 68, width: 360, height: 480 });
   assert.equal(small.y + small.height, 600 - AI_PANEL_BOTTOM_RESERVE);
-  assert.deepEqual(parseAiPanel(null, { width: 900, height: 600 }), { open: false, ...small });
+  assert.deepEqual(parseAiPanel(null, { width: 900, height: 600 }), small);
 });

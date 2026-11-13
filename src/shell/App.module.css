@@ -39,3 +39,18 @@
   display: flex;
   background: var(--ember-bg-base);
 }
+
+.libraryError {
+  position: absolute;
+  top: calc(var(--topbar-height) + var(--space-sm));
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-full);
+  background: var(--ember-danger-tint);
+  color: var(--ember-danger);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  z-index: calc(var(--layer-canvas) + 3);
+}

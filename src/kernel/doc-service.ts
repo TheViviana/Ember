@@ -2,29 +2,30 @@ import {
   createUlid,
   deriveSummary,
   joinFrontmatter,
-  merge3,
-  normalizeFrontmatter,
-  splitFrontmatter,
   toSerializable,
   unsafeContentHash,
   asDocId,
   type ContentHash,
   type DocId,
   type Frontmatter,
-  type FrontmatterIssue,
   type VaultPath,
 } from '#doc-model';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { stringify as stringifyYaml } from 'yaml';
+import { canonicalText, hashBytes, isUtf8, parseDocText, utcNow } from './doc-text.ts';
 import type { EventBus } from './events.ts';
 import { EmberError } from './errors.ts';
 import type { PathTools } from './paths.ts';
 import type { VaultPort } from './ports.ts';
 import type {
+  AdoptConflictOptions,
+  AdoptConflictResult,
   ConflictCopy,
   CreateDocInput,
   Disposable,
   DocChange,
   DocFilter,
+  DocHistoryEntry,
+  DocHistoryPreview,
   DocMeta,
   DocPatch,
   DocSnapshot,
@@ -44,6 +45,28 @@ export interface DocService {
   rename(id: DocId, next: VaultPath, opts: WriteOptions): Promise<WriteOutcome>;
   /** 用户删除：移入系统回收站，库内不保留副本 */
   remove(id: DocId, opts: WriteOptions): Promise<void>;
+
+  /** 列出该文档历史版本（新→旧）；索引缺失/损坏返回空数组并告警，不抛错 */
+  listHistory(id: DocId): Promise<readonly DocHistoryEntry[]>;
+  /** 只读预览；版本不存在抛 doc_not_found，索引哈希不符/非 UTF-8 抛 invalid_payload；不写盘 */
+  readHistory(id: DocId, versionId: string): Promise<DocHistoryPreview>;
+  /** 恢复：校验当前 base.hash；一致则当前版入历史后提交目标版，失配落冲突副本 */
+  restoreHistory(id: DocId, versionId: string, opts: WriteOptions): Promise<WriteOutcome>;
+
+  /**
+   * 采用副本：正文与 title/summary/tags/aliases 写回原文（保留原 id 与 created），
+   * 成功后把副本移入系统回收站；两步非事务，删除失败返回 copyRemoved: false。
+   */
+  adoptCopy(copyId: DocId, opts: AdoptConflictOptions): Promise<AdoptConflictResult>;
+  /** 另存为普通文档：清除副本的 ember.conflictOf，不改 id / 路径 / 正文 */
+  detachCopy(copyId: DocId, opts: WriteOptions): Promise<DocSnapshot>;
+
+  /**
+   * 为缺少 id 的既有 `.md` 文件补写身份（库健康检查的显式 adoption）。
+   * 仅当文件仍无 id、字节 hash 等于 expectedHash、且为合法 UTF-8 时写入；
+   * 不改正文，只补 `id` / 缺失的 `created` / 刷新 `updated`。
+   */
+  adopt(path: VaultPath, expectedHash: ContentHash): Promise<DocSnapshot>;
 
   flush(): Promise<void>;
   watch(listener: (change: DocChange) => void): Disposable;
@@ -65,18 +88,12 @@ interface CatalogEntry {
   path: VaultPath;
   rev: number;
   hash: ContentHash;
-  /** 完整文件文本，canonical（LF、无 BOM）：编辑器正文与三方合并的 base 都用它 */
+  /** 完整文件文本，canonical（LF、无 BOM）：编辑器正文用它 */
   text: string;
   /** 磁盘上的字节风格，写回时原样恢复；create/refresh 从真实文件探测 */
   style: FileStyle;
   /** 严格 UTF-8 解码是否成功；false 时拒绝一切会重编码的写入 */
   utf8Valid: boolean;
-}
-
-/** 上一成功提交前的内容快照：只给同 id 排队写入做三方合并，队列排空即清空 */
-interface CommittedSnapshot {
-  readonly hash: ContentHash;
-  readonly text: string;
 }
 
 export interface DocServiceOptions {
@@ -89,8 +106,14 @@ export interface DocServiceOptions {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: false });
-/** 严格解码只用于探测非 UTF-8：fatal 遇到非法序列直接抛，不会产生 U+FFFD */
-const strictDecoder = new TextDecoder('utf-8', { fatal: true });
+
+/** 文档历史目录：`.workbench/history/documents/<docId>/`（与画布历史同属 history/） */
+const HISTORY_DOC_DIR = '.workbench/history/documents';
+/** 每篇文档保留的历史版本数 */
+const HISTORY_KEEP = 20;
+/** 每篇文档历史版本的字节预算 */
+const HISTORY_BUDGET = 64 * 1024 * 1024;
+const HISTORY_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 /**
  * 磁盘文件的字节风格。目录里的 `text` 一律是 canonical（LF、无 BOM），
@@ -124,83 +147,14 @@ const detectTextStyle = (text: string): FileStyle => ({
   eol: detectEol(text),
 });
 
-/** 目录与编辑器统一使用 canonical 文本：去掉 BOM、CRLF 归一为 LF */
-const canonicalText = (text: string): string =>
-  (text.startsWith('\uFEFF') ? text.slice(1) : text).replace(/\r\n/g, '\n');
-
 /**
  * canonical → 落盘字节前的还原。`\r\n → \n` 先归一，再整篇换行，
- * 避免三方合并残留的 `\r` 被二次转义成 `\r\r\n`。
+ * 避免正文里残留的孤立 `\r` 被二次转义成 `\r\r\n`。
  */
 const applyStyle = (text: string, style: FileStyle): string => {
   const canonical = canonicalText(text);
   const styled = style.eol === 'crlf' ? canonical.replace(/\n/g, '\r\n') : canonical;
   return style.bom ? `\uFEFF${styled}` : styled;
-};
-
-const isUtf8 = (bytes: Uint8Array): boolean => {
-  try {
-    strictDecoder.decode(bytes);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const toHex = (buffer: ArrayBuffer): string =>
-  [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-
-const hashBytes = async (bytes: Uint8Array): Promise<ContentHash> => {
-  const view = new Uint8Array(bytes);
-  return unsafeContentHash(`sha256:${toHex(await crypto.subtle.digest('SHA-256', view))}`);
-};
-
-const utcNow = (at: Date): string => at.toISOString().replace(/\.\d{3}Z$/, 'Z');
-
-interface ParsedText {
-  readonly frontmatter: Frontmatter;
-  readonly body: string;
-  /** frontmatter 块存在但 YAML 语法非法：整段原文按 body 降级保留，文档等待 adoption */
-  readonly frontmatterBroken: boolean;
-  /** 取值非法的保留键（原值已在 extra 中保留，修正前不参与语义） */
-  readonly issues: readonly FrontmatterIssue[];
-}
-
-const parseDocText = (text: string): ParsedText => {
-  const split = splitFrontmatter(text);
-  if (split.raw === null) {
-    return {
-      frontmatter: normalizeFrontmatter({}).frontmatter,
-      body: text,
-      frontmatterBroken: false,
-      issues: [],
-    };
-  }
-  // YAML 语法非法的 frontmatter 不能炸穿 refresh（否则一行坏文件让整库不可用）。
-  // 降级为「无合法 frontmatter」并把逐字节原文按 body 保留：id 缺失 → refresh 跳过等待
-  // adoption，内核任何写路径都拿不到该文档，磁盘内容不会被改写。
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(split.raw);
-  } catch {
-    return {
-      frontmatter: normalizeFrontmatter({}).frontmatter,
-      body: text,
-      frontmatterBroken: true,
-      issues: [],
-    };
-  }
-  const record: Readonly<Record<string, unknown>> =
-    typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Readonly<Record<string, unknown>>)
-      : {};
-  const normalized = normalizeFrontmatter(record);
-  return {
-    frontmatter: normalized.frontmatter,
-    body: split.body,
-    frontmatterBroken: false,
-    issues: normalized.issues,
-  };
 };
 
 const composeDocText = (frontmatter: Frontmatter, body: string): string => {
@@ -222,6 +176,24 @@ const withFrontmatterPatch = (base: Frontmatter, patch: DocPatch): Frontmatter =
   };
 };
 
+/** 保留策略：最多 HISTORY_KEEP 版、总字节不超过 HISTORY_BUDGET，永远保留最新一条 */
+const pruneHistory = (
+  entries: readonly DocHistoryEntry[],
+): { readonly kept: DocHistoryEntry[]; readonly dropped: DocHistoryEntry[] } => {
+  const dropped: DocHistoryEntry[] = [];
+  let total = entries.reduce((sum, entry) => sum + entry.size, 0);
+  for (let index = entries.length - 1; index >= 1; index -= 1) {
+    if (entries.length - dropped.length <= HISTORY_KEEP && total <= HISTORY_BUDGET) break;
+    const victim = entries[index];
+    if (victim === undefined) continue;
+    dropped.push(victim);
+    total -= victim.size;
+  }
+  if (dropped.length === 0) return { kept: [...entries], dropped };
+  const droppedIds = new Set(dropped.map((entry) => entry.versionId));
+  return { kept: entries.filter((entry) => !droppedIds.has(entry.versionId)), dropped };
+};
+
 /** 目录对账：只收录已具备合法且唯一 id 的文档；adoption 尚未实现（vault-format §3.3） */
 export const createDocService = (options: DocServiceOptions): DocServiceInternal => {
   const { port, paths, events, log } = options;
@@ -234,12 +206,10 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
   let scanned = false;
 
   /**
-   * per-docId 串行链：读盘 → base 校验 → 合并 → 写盘 → 目录更新必须整体入队，
+   * per-docId 串行链：读盘 → base 校验 → 写盘 → 目录更新必须整体入队，
    * 否则两个写入者可以都通过 base 校验、先后各写一次（丢更新）。
    */
   const queues = new Map<string, Promise<void>>();
-  /** 队列非空期间的上一版快照，供「两个排队写入都基于上一版」时三方合并 */
-  const previousCommitted = new Map<string, CommittedSnapshot>();
   /** 每个 id 的目录变更代数：refresh/read 读盘期间若被写操作推进，就放弃回写，避免旧内容覆盖新内容 */
   const versions = new Map<string, number>();
   let refreshInFlight: Promise<void> | null = null;
@@ -261,7 +231,6 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       // 只有当前 tail 仍是队尾时才清理，避免把后入队的工作误删
       if (queues.get(key) === tail) {
         queues.delete(key);
-        previousCommitted.delete(key);
       }
     });
     return run;
@@ -280,8 +249,16 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
 
   const assertWritable = (): void => {
     if (port.readonlyMode) {
-      throw new EmberError('vault_locked', '当前库为只读模式，写操作被拒绝');
+      throw new EmberError('vault_locked', '库为只读，写操作被拒绝（原因见状态栏）', {
+        reason: port.readonlyReason,
+      });
     }
+  };
+
+  /** 冲突副本归属：只认合法 ULID，其余一律视为普通文档 */
+  const conflictOfOf = (frontmatter: Frontmatter): DocId | null => {
+    const raw = frontmatter.ember['conflictOf'];
+    return typeof raw === 'string' ? asDocId(raw) : null;
   };
 
   const metaOf = (entry: CatalogEntry): DocMeta => {
@@ -298,6 +275,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       updated: parsed.frontmatter.updated ?? '',
       rev: { rev: entry.rev, hash: entry.hash },
       flags: { needsAdoption: false, idInvalid: false, duplicateId: false },
+      conflictOf: conflictOfOf(parsed.frontmatter),
     };
   };
 
@@ -315,6 +293,121 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
   };
 
   const readBytes = async (path: VaultPath): Promise<Uint8Array | null> => port.read(path);
+
+  const historyRoot = paths.normalize(HISTORY_DOC_DIR);
+  const historyDir = (id: DocId): VaultPath => paths.join(historyRoot, String(id));
+  const historyIndexPath = (id: DocId): VaultPath => paths.join(historyDir(id), 'index.json');
+  const historyVersionPath = (id: DocId, versionId: string): VaultPath =>
+    paths.join(historyDir(id), `${versionId}.md`);
+
+  /**
+   * 读取历史索引：缺失视为无历史；结构非法按整表损坏处理（告警 + 空列表），
+   * 不让一份坏 index.json 阻断编辑器。下次记录会以新表覆盖它。
+   */
+  const readHistoryIndex = async (id: DocId): Promise<readonly DocHistoryEntry[]> => {
+    const bytes = await port.read(historyIndexPath(id));
+    if (bytes === null) return [];
+    try {
+      const parsed: unknown = JSON.parse(decoder.decode(bytes));
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('索引根节点不是对象');
+      }
+      const record = parsed as Readonly<Record<string, unknown>>;
+      if (record.schemaVersion !== 1) throw new Error('索引版本不支持');
+      if (record.docId !== String(id)) throw new Error('索引文档 id 不匹配');
+      const rawVersions = record.versions;
+      if (!Array.isArray(rawVersions)) throw new Error('versions 不是数组');
+      const versions: DocHistoryEntry[] = [];
+      for (const item of rawVersions as readonly unknown[]) {
+        if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+          throw new Error('版本条目不是对象');
+        }
+        const raw = item as Readonly<Record<string, unknown>>;
+        const versionId = typeof raw.versionId === 'string' ? raw.versionId : '';
+        const hash = typeof raw.hash === 'string' ? raw.hash : '';
+        const path = typeof raw.path === 'string' ? raw.path : '';
+        const at = typeof raw.at === 'string' ? raw.at : '';
+        const size = raw.size;
+        if (asDocId(versionId) === null) throw new Error('版本 id 非法');
+        if (!HISTORY_HASH_PATTERN.test(hash)) throw new Error('版本 hash 非法');
+        if (at === '') throw new Error('版本时间缺失');
+        if (typeof size !== 'number' || !Number.isInteger(size) || size < 0) {
+          throw new Error('版本大小非法');
+        }
+        const normalized = paths.normalize(path);
+        versions.push({ versionId, hash: unsafeContentHash(hash), path: normalized, at, size });
+      }
+      return versions;
+    } catch (error) {
+      log.warn('文档历史索引损坏，按无历史处理', {
+        id: String(id),
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
+  };
+
+  /** 整表重写；Rust 端 write_atomic 保证 rename 原子替换 */
+  const writeHistoryIndex = async (id: DocId, versions: readonly DocHistoryEntry[]): Promise<void> => {
+    const payload = { schemaVersion: 1, docId: String(id), versions };
+    await port.write(historyIndexPath(id), encoder.encode(`${JSON.stringify(payload, null, 2)}\n`), 'system');
+  };
+
+  /**
+   * 内容提交前记录旧版：先写版本原始字节，再原子更新索引，最后尽力清理被淘汰的文件。
+   * 任一步失败都清理本次新版本文件并向上抛，调用方不得提交主文。
+   */
+  const recordHistory = async (id: DocId, docPath: VaultPath, bytes: Uint8Array): Promise<void> => {
+    const versionId = createUlid(now().getTime());
+    const versionPath = historyVersionPath(id, versionId);
+    const entry: DocHistoryEntry = {
+      versionId,
+      path: docPath,
+      hash: await hashBytes(bytes),
+      at: utcNow(now()),
+      size: bytes.byteLength,
+    };
+    await port.write(versionPath, bytes, 'system');
+    try {
+      const existing = await readHistoryIndex(id);
+      const merged = [entry, ...existing.filter((item) => item.versionId !== versionId)];
+      const { kept, dropped } = pruneHistory(merged);
+      await writeHistoryIndex(id, kept);
+      for (const victim of dropped) {
+        await port.purge(historyVersionPath(id, victim.versionId)).catch(() => undefined);
+      }
+    } catch (error) {
+      await port.purge(versionPath).catch(() => undefined);
+      throw error;
+    }
+  };
+
+  const listHistory = async (id: DocId): Promise<readonly DocHistoryEntry[]> => readHistoryIndex(id);
+
+  const readHistory = async (id: DocId, versionId: string): Promise<DocHistoryPreview> => {
+    if (asDocId(versionId) === null) {
+      throw new EmberError('invalid_payload', `历史版本 id 非法：${versionId}`, { id: String(id) });
+    }
+    const entry = (await readHistoryIndex(id)).find((item) => item.versionId === versionId);
+    if (entry === undefined) {
+      throw new EmberError('doc_not_found', `历史版本不存在：${versionId}`, { id: String(id) });
+    }
+    const bytes = await port.read(historyVersionPath(id, versionId));
+    if (bytes === null) {
+      throw new EmberError('doc_not_found', `历史版本文件已消失：${versionId}`, { id: String(id) });
+    }
+    if (!isUtf8(bytes)) {
+      throw new EmberError('invalid_payload', '历史版本不是合法 UTF-8，无法预览', {
+        id: String(id),
+        versionId,
+      });
+    }
+    const hash = await hashBytes(bytes);
+    if (hash !== entry.hash) {
+      throw new EmberError('invalid_payload', '历史版本内容与索引不一致', { id: String(id), versionId });
+    }
+    return { entry, text: canonicalText(decoder.decode(bytes)) };
+  };
 
   const runRefresh = async (): Promise<void> => {
     const pathsInVault = await port.list();
@@ -450,8 +543,6 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
     const hash = await hashBytes(bytes);
     // 入队时捕获的 entry 可能已被 refresh 替换：更新 map 中的当前对象，避免改到脱管副本
     const current = entries.get(String(entry.id)) ?? entry;
-    // 记录写前快照：排队中的下一个写入者若仍以它为 base，可做三方合并而不是丢更新
-    previousCommitted.set(String(entry.id), { hash: current.hash, text: current.text });
     current.text = canonical;
     current.hash = hash;
     current.rev += 1;
@@ -513,7 +604,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         // 读盘期间条目已被写操作推进：丢弃这份可能过期的读结果，返回当前缓存
         return snapshotOf(entry);
       }
-      // 磁盘内容已变：只同步内存缓存（后续三方合并要以最新磁盘内容为基）。
+      // 磁盘内容已变：只同步内存缓存（保存的基线校验以最新磁盘内容为准）。
       // external 事件统一由 watcher → refresh 链广播（契约 D6：read 不做写入，
       // 也不充当第二事件源）；rev 仍对齐磁盘，保证返回的 DocMeta.rev 可用作 base（D5）。
       entry.rev += 1;
@@ -591,6 +682,72 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       return snapshotOf(entry);
     },
 
+    adopt: async (path, expectedHash) => {
+      await ensureScanned();
+      return enqueue(`adopt:${String(path)}`, async () => {
+        assertWritable();
+        if (paths.ext(path).toLowerCase() !== '.md') {
+          throw new EmberError('invalid_payload', `只有 .md 文件可以纳入库管理：${String(path)}`);
+        }
+        if (byPath.has(String(path))) {
+          throw new EmberError('invalid_payload', `文件已纳入目录，无需 adoption：${String(path)}`);
+        }
+        const bytes = await readBytes(path);
+        if (bytes === null) throw new EmberError('doc_not_found', `文件已消失：${String(path)}`);
+        if (!isUtf8(bytes)) {
+          throw new EmberError('invalid_payload', '文件不是合法 UTF-8，无法补写 id', {
+            path: String(path),
+          });
+        }
+        const diskHash = await hashBytes(bytes);
+        if (diskHash !== expectedHash) {
+          throw new EmberError('stale_revision', '文件在扫描后已变化，请重新检查', {
+            path: String(path),
+          });
+        }
+        const rawText = decoder.decode(bytes);
+        const parsed = parseDocText(rawText);
+        if (parsed.frontmatterBroken) {
+          throw new EmberError('invalid_payload', 'frontmatter YAML 无法解析，只报告不修复', {
+            path: String(path),
+          });
+        }
+        if (parsed.issues.some((item) => item.code === 'id_invalid')) {
+          throw new EmberError('invalid_payload', 'id 格式非法，只报告不修复', {
+            path: String(path),
+          });
+        }
+        if (parsed.frontmatter.id !== null) {
+          throw new EmberError('invalid_payload', '文件已有 id（含非法 id），不做 adoption', {
+            path: String(path),
+          });
+        }
+        const idValue = createUlid(now().getTime());
+        const id = asDocId(idValue);
+        if (id === null || entries.has(String(id))) {
+          throw new EmberError('duplicate_id', `无法分配唯一 id：${idValue}`);
+        }
+        const stamp = utcNow(now());
+        const frontmatter: Frontmatter = {
+          ...parsed.frontmatter,
+          id: idValue,
+          created: parsed.frontmatter.created ?? stamp,
+          updated: stamp,
+        };
+        const text = composeDocText(frontmatter, parsed.body);
+        const style = detectStyle(bytes, rawText);
+        const encoded = encoder.encode(applyStyle(text, style));
+        await track(port.write(path, encoded, 'migration'));
+        const hash = await hashBytes(encoded);
+        const entry: CatalogEntry = { id, path, rev: 1, hash, text, style, utf8Valid: true };
+        entries.set(String(id), entry);
+        byPath.set(String(path), id);
+        bumpVersion(String(id));
+        emitChange({ id, path, kind: 'created', revision: { rev: 1, hash } });
+        return snapshotOf(entry);
+      });
+    },
+
     update: async (id, patch, opts) => {
       await ensureScanned();
       return enqueue(String(id), async () => {
@@ -619,32 +776,16 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         const localComposed = composeDocText(nextFrontmatter, patch.body ?? parsed.body);
 
         if (opts.base.hash === diskHash) {
+          // 历史先落盘：写失败直接抛出，主文保持原样（spec §4）
+          await recordHistory(id, entry.path, bytes);
           const committed = await commit(entry, localComposed, opts.intent);
           const snapshot = snapshotOf(committed);
           emitChange({ id, path: committed.path, kind: 'updated', revision: snapshot.meta.rev });
           return { snapshot, merged: true, conflict: null };
         }
 
-        const previous = previousCommitted.get(String(id));
-        const mergeBase =
-          opts.base.hash === entry.hash && entry.text !== diskText
-            ? entry.text
-            : previous !== undefined && previous.hash === opts.base.hash
-              ? previous.text
-              : null;
-        if (mergeBase !== null) {
-          const merged = merge3(mergeBase, localComposed, diskText, {
-            local: 'local (Ember)',
-            disk: 'disk (mtime)',
-          });
-          if (merged.kind === 'clean') {
-            const committed = await commit(entry, merged.lines.join('\n'), opts.intent);
-            const snapshot = snapshotOf(committed);
-            emitChange({ id, path: committed.path, kind: 'updated', revision: snapshot.meta.rev });
-            return { snapshot, merged: true, conflict: null };
-          }
-        }
-
+        // 基线不符即落冲突副本并保留磁盘版本（不做自动三路合并）：
+        // 正文唯一真相在磁盘，冲突副本保住本地改动，绝不静默覆盖外部修改
         const copy = await conflictCopy(entry, localComposed, opts.intent);
         // 队列内不会再有同 id 写入交错，这里同步的是只在本次 read 之后发生的外部变化
         if (diskHash !== entry.hash) {
@@ -653,7 +794,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
           entry.text = diskText;
           bumpVersion(String(id));
         }
-        log.warn('三方合并未能自动解决，保留磁盘版本并落盘冲突副本', {
+        log.warn('保存基线已过期：保留磁盘版本并落盘冲突副本', {
           id: String(id),
           baseRev: opts.base.rev,
         });
@@ -714,6 +855,230 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         versions.delete(String(id));
         byPath.delete(String(entry.path));
         emitChange({ id, path: entry.path, kind: 'removed', revision: { rev: entry.rev + 1, hash } });
+      });
+    },
+
+    listHistory,
+
+    readHistory,
+
+    restoreHistory: async (id, versionId, opts) => {
+      await ensureScanned();
+      return enqueue(String(id), async () => {
+        assertWritable();
+        const entry = requireEntry(id);
+        if (asDocId(versionId) === null) {
+          throw new EmberError('invalid_payload', `历史版本 id 非法：${versionId}`, { id: String(id) });
+        }
+        const bytes = await readBytes(entry.path);
+        if (bytes === null) throw new EmberError('doc_not_found', `文件已消失：${String(entry.path)}`);
+        if (!isUtf8(bytes)) {
+          throw new EmberError('invalid_payload', '文件不是合法 UTF-8，恢复会破坏原始字节，已拒绝写入', {
+            id: String(id),
+            path: String(entry.path),
+          });
+        }
+        const diskHash = await hashBytes(bytes);
+        const target = (await readHistoryIndex(id)).find((item) => item.versionId === versionId);
+        if (target === undefined) {
+          throw new EmberError('doc_not_found', `历史版本不存在：${versionId}`, { id: String(id) });
+        }
+        const targetBytes = await port.read(historyVersionPath(id, versionId));
+        if (targetBytes === null) {
+          throw new EmberError('doc_not_found', `历史版本文件已消失：${versionId}`, { id: String(id) });
+        }
+        if (!isUtf8(targetBytes)) {
+          throw new EmberError('invalid_payload', '历史版本不是合法 UTF-8，拒绝恢复', {
+            id: String(id),
+            versionId,
+          });
+        }
+        const targetHash = await hashBytes(targetBytes);
+        if (targetHash !== target.hash) {
+          throw new EmberError('invalid_payload', '历史版本内容与索引不一致，拒绝恢复', {
+            id: String(id),
+            versionId,
+          });
+        }
+        const targetRaw = decoder.decode(targetBytes);
+        if (opts.base.hash !== diskHash) {
+          // 基线过期：磁盘版本是唯一真相，把目标版内容另存为冲突副本，主文与历史都不动
+          const copy = await conflictCopy(entry, canonicalText(targetRaw), opts.intent);
+          log.warn('恢复基线已过期：保留磁盘版本并落盘冲突副本', {
+            id: String(id),
+            versionId,
+            baseRev: opts.base.rev,
+          });
+          return { snapshot: snapshotOf(entry), merged: false, conflict: copy };
+        }
+        // 当前版先入历史，再提交目标版原始字节：恢复可逆，且后续历史不删除
+        await recordHistory(id, entry.path, bytes);
+        await port.write(entry.path, targetBytes, opts.intent);
+        const current = entries.get(String(id)) ?? entry;
+        current.text = canonicalText(targetRaw);
+        current.style = detectStyle(targetBytes, targetRaw);
+        current.utf8Valid = true;
+        current.hash = targetHash;
+        current.rev += 1;
+        bumpVersion(String(id));
+        const snapshot = snapshotOf(current);
+        emitChange({ id, path: current.path, kind: 'updated', revision: snapshot.meta.rev });
+        return { snapshot, merged: true, conflict: null };
+      });
+    },
+
+    adoptCopy: async (copyId, opts) => {
+      await ensureScanned();
+      const initialCopy = requireEntry(copyId);
+      const originalId = conflictOfOf(parseDocText(initialCopy.text).frontmatter);
+      if (originalId === null || String(originalId) === String(copyId)) {
+        throw new EmberError('invalid_payload', '该文档不是冲突副本，无法采用', { id: String(copyId) });
+      }
+      if (!entries.has(String(originalId))) {
+        throw new EmberError('doc_not_found', '原文已不存在，只能另存或删除副本', {
+          id: String(copyId),
+          conflictOf: String(originalId),
+        });
+      }
+      // 在原文队列内执行：正文写回原文；副本读盘与删除不经副本队列，
+      // 因此两步之间没有跨文件事务，删除失败由返回值显式报告。
+      return enqueue(String(originalId), async () => {
+        assertWritable();
+        const original = requireEntry(originalId);
+        const copy = requireEntry(copyId);
+        const copyBytes = await readBytes(copy.path);
+        if (copyBytes === null) {
+          throw new EmberError('doc_not_found', `冲突副本文件已消失：${String(copy.path)}`, {
+            id: String(copyId),
+          });
+        }
+        if (!isUtf8(copyBytes)) {
+          throw new EmberError('invalid_payload', '冲突副本不是合法 UTF-8，拒绝采用', {
+            id: String(copyId),
+            path: String(copy.path),
+          });
+        }
+        const copyHash = await hashBytes(copyBytes);
+        if (copyHash !== opts.copyBase.hash) {
+          throw new EmberError('stale_revision', '冲突副本已变化，请刷新后重新查看再采用', {
+            id: String(copyId),
+          });
+        }
+        const copyParsed = parseDocText(canonicalText(decoder.decode(copyBytes)));
+        if (conflictOfOf(copyParsed.frontmatter) === null) {
+          throw new EmberError('invalid_payload', '该文档已不再是冲突副本，无法采用', {
+            id: String(copyId),
+          });
+        }
+
+        const originalBytes = await readBytes(original.path);
+        if (originalBytes === null) {
+          throw new EmberError('doc_not_found', `原文文件已消失：${String(original.path)}`, {
+            id: String(originalId),
+          });
+        }
+        if (!isUtf8(originalBytes)) {
+          throw new EmberError('invalid_payload', '原文不是合法 UTF-8，拒绝写入', {
+            id: String(originalId),
+            path: String(original.path),
+          });
+        }
+        const originalHash = await hashBytes(originalBytes);
+        if (originalHash !== opts.base.hash) {
+          // 采用不是保存：基线不符时直接失败，绝不再次制造冲突副本
+          throw new EmberError('stale_revision', '原文已变化，请刷新后重新查看再采用', {
+            id: String(originalId),
+          });
+        }
+        const originalRaw = decoder.decode(originalBytes);
+        original.style = detectStyle(originalBytes, originalRaw);
+        const originalParsed = parseDocText(canonicalText(originalRaw));
+        const nextFrontmatter: Frontmatter = {
+          ...originalParsed.frontmatter,
+          // 允许迁移的元数据：标题 / 简介 / 标签 / 别名；id、created、ember、extra 保留原文
+          title: copyParsed.frontmatter.title,
+          summary: copyParsed.frontmatter.summary,
+          tags: copyParsed.frontmatter.tags,
+          aliases: copyParsed.frontmatter.aliases,
+          updated: utcNow(now()),
+        };
+        await recordHistory(originalId, original.path, originalBytes);
+        const committed = await commit(
+          original,
+          composeDocText(nextFrontmatter, copyParsed.body),
+          opts.intent,
+        );
+        const snapshot = snapshotOf(committed);
+        emitChange({ id: originalId, path: committed.path, kind: 'updated', revision: snapshot.meta.rev });
+
+        // 第二步：删除副本（非事务）。删除前复核 hash，避免删掉刚被外部改动的内容。
+        let copyRemoved = false;
+        try {
+          const latest = await readBytes(copy.path);
+          if (latest !== null && (await hashBytes(latest)) === copyHash) {
+            await port.remove(copy.path);
+            entries.delete(String(copyId));
+            versions.delete(String(copyId));
+            byPath.delete(String(copy.path));
+            emitChange({
+              id: copyId,
+              path: copy.path,
+              kind: 'removed',
+              revision: { rev: copy.rev + 1, hash: copyHash },
+            });
+            copyRemoved = true;
+          } else {
+            log.warn('采用副本后副本已变化，保留副本不删除', { id: String(copyId) });
+          }
+        } catch (error) {
+          log.warn('采用副本后删除副本失败，副本保留', {
+            id: String(copyId),
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return { snapshot, copyRemoved };
+      });
+    },
+
+    detachCopy: async (copyId, opts) => {
+      await ensureScanned();
+      return enqueue(String(copyId), async () => {
+        assertWritable();
+        const entry = requireEntry(copyId);
+        const bytes = await readBytes(entry.path);
+        if (bytes === null) throw new EmberError('doc_not_found', `文件已消失：${String(entry.path)}`);
+        if (!isUtf8(bytes)) {
+          throw new EmberError('invalid_payload', '文件不是合法 UTF-8，拒绝写入', {
+            id: String(copyId),
+            path: String(entry.path),
+          });
+        }
+        const rawText = decoder.decode(bytes);
+        entry.style = detectStyle(bytes, rawText);
+        const diskHash = await hashBytes(bytes);
+        if (opts.base.hash !== diskHash) {
+          throw new EmberError('stale_revision', '另存前修订已过期，请重新读取后再操作', {
+            id: String(copyId),
+          });
+        }
+        const parsed = parseDocText(canonicalText(rawText));
+        if (conflictOfOf(parsed.frontmatter) === null) {
+          throw new EmberError('invalid_payload', '该文档不是冲突副本，无需另存', {
+            id: String(copyId),
+          });
+        }
+        const ember: Record<string, unknown> = { ...parsed.frontmatter.ember };
+        delete ember['conflictOf'];
+        const nextFrontmatter: Frontmatter = {
+          ...parsed.frontmatter,
+          ember,
+          updated: utcNow(now()),
+        };
+        await recordHistory(copyId, entry.path, bytes);
+        const committed = await commit(entry, composeDocText(nextFrontmatter, parsed.body), opts.intent);
+        const snapshot = snapshotOf(committed);
+        emitChange({ id: copyId, path: committed.path, kind: 'updated', revision: snapshot.meta.rev });
+        return snapshot;
       });
     },
 

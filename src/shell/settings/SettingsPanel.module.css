@@ -324,6 +324,10 @@
   cursor: pointer;
 }
 
+.switchRow + .switchRow {
+  margin-top: var(--space-sm);
+}
+
 .switchRow > span {
   white-space: nowrap;
 }
@@ -389,31 +393,6 @@
   gap: var(--space-sm);
 }
 
-.capabilityRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-md);
-  padding: var(--space-sm) 0;
-  border-bottom: 1px solid var(--ember-border-subtle);
-}
-
-.capabilityText {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.capabilityName {
-  font-size: var(--text-sm);
-  color: var(--ember-text-primary);
-}
-
-.capabilityDesc {
-  font-size: var(--text-xs);
-  color: var(--ember-text-muted);
-}
 
 .about {
   margin: 0;
@@ -439,4 +418,99 @@
   color: var(--ember-text-secondary);
   word-break: break-all;
   text-align: right;
+}
+
+.clearKey {
+  border: none;
+  background: transparent;
+  color: var(--ember-danger);
+  font-family: var(--font-body);
+  font-size: var(--text-2xs);
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.clearKey:hover {
+  text-decoration: underline;
+}
+
+.clearKey:disabled {
+  color: var(--ember-text-muted);
+  cursor: default;
+}
+
+/* 备份预检结果：结论表 + 按严重度着色的条目清单 */
+.inspection {
+  margin-top: var(--space-md);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--ember-border-subtle);
+}
+
+.issues {
+  list-style: none;
+  margin: var(--space-md) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.issue {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--ember-bg-base);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--ember-text-secondary);
+}
+
+.issueTag {
+  flex: 0 0 auto;
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-2xs);
+  line-height: 1.6;
+}
+
+.issueBody {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.issuePath {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ember-text-muted);
+}
+
+.issueError {
+  border-color: var(--ember-danger-border);
+  background: var(--ember-danger-tint);
+}
+
+.issueError .issueTag {
+  background: var(--ember-danger);
+  color: var(--ember-bg-base);
+}
+
+.issueConflict {
+  border-color: var(--ember-warning-border, var(--ember-border-strong));
+}
+
+.issueConflict .issueTag {
+  background: var(--ember-warning, var(--ember-text-secondary));
+  color: var(--ember-bg-base);
+}
+
+.issueWarn .issueTag {
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-muted);
 }

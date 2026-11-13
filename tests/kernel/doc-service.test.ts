@@ -269,7 +269,7 @@ const createServiceWith = (
   return { service, events };
 };
 
-void test('并发 update 不重叠时三方合并，双方改动都落盘且 rev 连续推进', async () => {
+void test('并发 update：先写入者提交，后写入者基线过期落冲突副本，不丢内容', async () => {
   const vault = createMemoryVault({ files: { [VALID]: VALID_TEXT } });
   const { service } = createServiceWith(vault);
   const meta = (await service.list())[0];
@@ -283,13 +283,15 @@ void test('并发 update 不重叠时三方合并，双方改动都落盘且 rev
 
   assert.equal(first.merged, true);
   assert.equal(first.conflict, null);
-  assert.equal(second.merged, true);
-  assert.equal(second.conflict, null, '不重叠的并发改动应自动合并');
+  // 基线校验 + 冲突副本：第二个写入者不再做自动合并
+  assert.equal(second.merged, false);
+  assert.ok(second.conflict !== null, '基线过期的并发写入应落冲突副本');
   const stored = vault.dump()[VALID] ?? '';
-  assert.ok(stored.includes('合并标题'));
-  assert.ok(stored.includes('合并正文'));
+  assert.ok(stored.includes('合并标题'), '磁盘保留先写入者的变更');
+  const all = Object.values(vault.dump()).join('\n');
+  assert.ok(all.includes('合并正文'), '后写入者的内容保留在冲突副本里');
   const after = (await service.list())[0];
-  assert.equal(after?.rev.rev, base.rev + 2, '两次成功写入应各推进一次 rev');
+  assert.equal(after?.rev.rev, base.rev + 1, '只有先写入者推进了磁盘 rev');
 });
 
 void test('并发 update 改动重叠时保留磁盘版本并落冲突副本，不丢内容', async () => {
@@ -379,7 +381,9 @@ void test('update 与 remove 交错：remove 报 stale_revision，不产生复�
   assert.ok((vault.dump()[VALID] ?? '').includes('交错更新'), '文件仍在且保留已写入内容');
   const list = await service.list();
   assert.equal(list.length, 1, '目录条目不能被误删');
-  assert.deepEqual(Object.keys(vault.dump()), [VALID], '不应产生孤儿文件或遗留 trash');
+  // 历史版本是有意保留的：孤儿检查只看历史目录之外的文件
+  const orphans = Object.keys(vault.dump()).filter((path) => !path.startsWith('.workbench/history/'));
+  assert.deepEqual(orphans, [VALID], '不应产生孤儿文件或遗留 trash（历史版本除外）');
 });
 
 void test('flush 等待队列排空，且队列单元失败不会让 flush reject', async () => {

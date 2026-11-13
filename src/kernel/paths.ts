@@ -10,7 +10,7 @@ import {
 } from '#doc-model';
 import { EmberError } from './errors.ts';
 
-/** 路径工具：`VaultPath` 的唯一合法出口（kernel-contract §9） */
+/** 路径工具：`VaultPath` 的唯一合法出口（kernel-contract §0 第 1 条） */
 export interface PathTools {
   normalize(input: string): VaultPath;
   join(base: VaultPath, ...segments: readonly string[]): VaultPath;

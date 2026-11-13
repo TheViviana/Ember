@@ -20,7 +20,6 @@ const command = (value: string, title: string, scope: CommandDescriptor['scope']
   title,
   scope,
   keybinding: null,
-  owner: null,
 });
 
 const COMMANDS: readonly CommandDescriptor[] = [

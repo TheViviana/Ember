@@ -1,8 +1,11 @@
 import { create } from 'zustand';
 import type { DocId } from '#doc-model';
 
-/** 文章浮窗上限 */
-export const FLOAT_LIMIT = 5;
+/** 文章浮窗上限的默认值（可在设置里调整，settings.ui.floatLimit） */
+export const DEFAULT_FLOAT_LIMIT = 8;
+/** 浮窗上限的合法区间（与 settings-service 的归一化一致） */
+export const FLOAT_LIMIT_MIN = 1;
+export const FLOAT_LIMIT_MAX = 12;
 
 /** 单扇浮窗：只放窗口元数据，正文/光标/保存状态一律留在 FloatEditor 内部 */
 export interface FloatWindow {
@@ -15,38 +18,33 @@ export interface FloatWindow {
   readonly lastActiveAt: number;
 }
 
-export interface FloatLimitNotice {
-  readonly requestedDocId: DocId;
-  readonly requestedFocus: 'title' | null;
-  /** 满额时最久未激活的窗口；null 表示没有可挤掉的窗口 */
-  readonly evictedDocId: DocId | null;
-}
-
 export interface FloatStoreData {
   readonly windows: readonly FloatWindow[];
   readonly activeId: DocId | null;
   /** 单调计数，代替 Date.now()，让激活顺序可预测、可测试 */
   readonly tick: number;
-  readonly notice: FloatLimitNotice | null;
+  /** 当前上限：来自设置，满额时静默挤掉最久未激活的一扇 */
+  readonly limit: number;
 }
 
-export type FloatOpenResult = 'opened' | 'focused' | 'limit';
+export type FloatOpenResult = 'opened' | 'focused';
 
 export interface FloatStore extends FloatStoreData {
   readonly open: (docId: DocId, focus: 'title' | null) => FloatOpenResult;
   readonly close: (docId: DocId) => void;
   readonly activate: (docId: DocId) => void;
-  /** 用户显式点击「关闭最久未激活的《X》并打开」时调用 */
-  readonly evictLeastRecentAndOpen: (docId: DocId, focus: 'title' | null) => FloatOpenResult;
-  readonly dismissNotice: () => void;
+  readonly setLimit: (limit: number) => void;
 }
 
 export const initialFloatData: FloatStoreData = {
   windows: [],
   activeId: null,
   tick: 0,
-  notice: null,
+  limit: DEFAULT_FLOAT_LIMIT,
 };
+
+export const clampFloatLimit = (value: number): number =>
+  Math.min(FLOAT_LIMIT_MAX, Math.max(FLOAT_LIMIT_MIN, Math.trunc(value)));
 
 const sameDoc = (left: DocId, right: DocId): boolean => String(left) === String(right);
 
@@ -86,7 +84,10 @@ export const deriveStackOrder = (
     )
     .map((window, index) => ({ docId: window.docId, z: index + 1 }));
 
-/** 打开 / 聚焦：已开只更新激活序号与 nonce；满额只记录提示，不改窗口列表 */
+/**
+ * 打开 / 聚焦：已开只更新激活序号与 nonce；
+ * 满额时静默挤掉最久未激活的一扇再打开（多文档浮窗：默认 8 可配置，去掉挤占提示）。
+ */
 export const openFloatWindow = (
   state: FloatStoreData,
   docId: DocId,
@@ -105,34 +106,29 @@ export const openFloatWindow = (
         ),
         activeId: docId,
         tick,
-        notice: null,
+        limit: state.limit,
       },
     };
   }
 
-  if (state.windows.length >= FLOAT_LIMIT) {
-    const oldest = leastRecentWindow(state.windows);
-    return {
-      result: 'limit',
-      state: {
-        ...state,
-        notice: {
-          requestedDocId: docId,
-          requestedFocus: focus,
-          evictedDocId: oldest === null ? null : oldest.docId,
-        },
-      },
-    };
-  }
+  const base =
+    state.windows.length >= state.limit
+      ? (() => {
+          const oldest = leastRecentWindow(state.windows);
+          return oldest === null
+            ? state.windows
+            : state.windows.filter((window) => !sameDoc(window.docId, oldest.docId));
+        })()
+      : state.windows;
 
   const tick = state.tick + 1;
   return {
     result: 'opened',
     state: {
-      windows: [...state.windows, { docId, focus, nonce: 1, lastActiveAt: tick }],
+      windows: [...base, { docId, focus, nonce: 1, lastActiveAt: tick }],
       activeId: docId,
       tick,
-      notice: null,
+      limit: state.limit,
     },
   };
 };
@@ -144,8 +140,7 @@ export const closeFloatWindow = (state: FloatStoreData, docId: DocId): FloatStor
     state.activeId !== null && sameDoc(state.activeId, docId)
       ? (mostRecentWindow(windows)?.docId ?? null)
       : state.activeId;
-  // 关掉任何一扇都会腾出槽位，满额提示随即失效
-  return { ...state, windows, activeId, notice: null };
+  return { ...state, windows, activeId };
 };
 
 export const activateFloatWindow = (state: FloatStoreData, docId: DocId): FloatStoreData => {
@@ -162,32 +157,6 @@ export const activateFloatWindow = (state: FloatStoreData, docId: DocId): FloatS
   };
 };
 
-/** 显式挤掉最久未激活的一扇并打开目标；目标已开时退化为聚焦，不挤人 */
-export const evictFloatWindow = (
-  state: FloatStoreData,
-  docId: DocId,
-  focus: 'title' | null,
-): { readonly state: FloatStoreData; readonly result: FloatOpenResult } => {
-  if (findWindow(state.windows, docId) !== null) {
-    return openFloatWindow(state, docId, focus);
-  }
-  const oldest = leastRecentWindow(state.windows);
-  if (oldest === null) {
-    return openFloatWindow(state, docId, focus);
-  }
-  const windows = state.windows.filter((window) => !sameDoc(window.docId, oldest.docId));
-  const tick = state.tick + 1;
-  return {
-    result: 'opened',
-    state: {
-      windows: [...windows, { docId, focus, nonce: 1, lastActiveAt: tick }],
-      activeId: docId,
-      tick,
-      notice: null,
-    },
-  };
-};
-
 export const useFloatStore = create<FloatStore>((set, get) => ({
   ...initialFloatData,
   open: (docId, focus) => {
@@ -201,12 +170,25 @@ export const useFloatStore = create<FloatStore>((set, get) => ({
   activate: (docId) => {
     set(activateFloatWindow(get(), docId));
   },
-  evictLeastRecentAndOpen: (docId, focus) => {
-    const next = evictFloatWindow(get(), docId, focus);
-    set(next.state);
-    return next.result;
-  },
-  dismissNotice: () => {
-    set({ notice: null });
+  setLimit: (limit) => {
+    const next = clampFloatLimit(limit);
+    // 上限调小立即裁剪到新上限：设置语义就是「最多同时 N 扇」
+    set((state) => {
+      if (state.windows.length <= next) return { limit: next };
+      // 裁掉最久未激活的，保留最近激活的 next 扇
+      const keep = [...state.windows]
+        .sort(
+          (left, right) =>
+            right.lastActiveAt - left.lastActiveAt ||
+            String(right.docId).localeCompare(String(left.docId)),
+        )
+        .slice(0, next);
+      const keepIds = new Set(keep.map((window) => String(window.docId)));
+      const activeId =
+        state.activeId !== null && keepIds.has(String(state.activeId))
+          ? state.activeId
+          : (keep[0]?.docId ?? null);
+      return { limit: next, windows: keep, activeId };
+    });
   },
 }));

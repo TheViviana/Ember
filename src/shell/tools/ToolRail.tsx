@@ -1,19 +1,26 @@
 import { useCallback, useEffect, useState, type ReactElement } from 'react';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
 import { FloatSwitcher } from '../editor/FloatSwitcher.tsx';
-import { GalleryEntry } from './GalleryEntry.tsx';
 import { PomodoroEntry } from './PomodoroEntry.tsx';
-import { RecallEntry } from './RecallEntry.tsx';
 import { useToolCommands, type ToolPanelKey } from './tool-commands.ts';
+import entryStyles from './ToolEntry.module.css';
 import styles from './ToolRail.module.css';
 
+export interface ToolRailProps {
+  /** 工具能力化开关（settings.ui.tool*，默认全关）：关闭时入口不出现 */
+  readonly entries: { readonly pomodoro: boolean; readonly gallery: boolean };
+  /** 附件面板入口（与左下角按钮同一开关态，面板本体由 App 挂载） */
+  readonly onOpenAttachments: () => void;
+  readonly attachmentsOpen: boolean;
+}
+
 /**
- * 画布左下角的唯一横排：侧栏启动图标之后的全部入口。
- * 顺序固定为 今日回顾 → 番茄钟 → 图库 → 浮窗胶囊，
- * 胶囊永远在最后：入口增删只影响它自己的位置，前面的按钮不会被顶动。
+ * 画布左下角的唯一横排：常驻工具入口 + 浮窗胶囊。
+ * 工具入口能力化：默认关闭，设置里开启后才出现；胶囊永远在最后，
+ * 入口增删只影响它自己的位置，前面的按钮不会被顶动。
  * 同一时间只展开一个工具面板，避免两个浮层在左下角互相遮挡。
  */
-export const ToolRail = (): ReactElement => {
+export const ToolRail = ({ entries, onOpenAttachments, attachmentsOpen }: ToolRailProps): ReactElement => {
   const [panel, setPanel] = useState<ToolPanelKey | null>(null);
 
   // 命令总线的「打开某面板」与横排按钮共用同一份开关状态
@@ -46,33 +53,28 @@ export const ToolRail = (): ReactElement => {
 
   return (
     <div className={styles.rail} data-tool-rail="">
-      <RecallEntry
-        open={panel === 'recall'}
-        onToggle={() => {
-          toggle('recall');
-        }}
-        onClose={() => {
-          setPanel(null);
-        }}
-      />
-      <PomodoroEntry
-        open={panel === 'pomodoro'}
-        onToggle={() => {
-          toggle('pomodoro');
-        }}
-        onClose={() => {
-          setPanel(null);
-        }}
-      />
-      <GalleryEntry
-        open={panel === 'gallery'}
-        onToggle={() => {
-          toggle('gallery');
-        }}
-        onClose={() => {
-          setPanel(null);
-        }}
-      />
+      {entries.pomodoro ? (
+        <PomodoroEntry
+          open={panel === 'pomodoro'}
+          onToggle={() => {
+            toggle('pomodoro');
+          }}
+          onClose={() => {
+            setPanel(null);
+          }}
+        />
+      ) : null}
+      {entries.gallery ? (
+        <button
+          type="button"
+          className={entryStyles.entry}
+          aria-expanded={attachmentsOpen}
+          title="附件面板"
+          onClick={onOpenAttachments}
+        >
+          ◧ 附件
+        </button>
+      ) : null}
       <FloatSwitcher />
     </div>
   );

@@ -1,6 +1,8 @@
 export type {
+  CanvasBookmark,
   CanvasDocument,
   CanvasEdge,
+  CanvasFilters,
   CanvasFrame,
   CanvasGrid,
   CanvasLayer,

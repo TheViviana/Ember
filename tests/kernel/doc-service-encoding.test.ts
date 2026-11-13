@@ -54,6 +54,8 @@ const createByteVault = (
       return Promise.resolve();
     },
     list: () => Promise.resolve([...files.keys()].map((path) => unsafeVaultPath(path))),
+    listCanvases: () => Promise.resolve([]),
+    scan: () => Promise.resolve([]),
     stat: (path) => {
       const bytes = files.get(String(path));
       return Promise.resolve(bytes === undefined ? null : { mtime: new Date(0).toISOString(), size: bytes.byteLength });

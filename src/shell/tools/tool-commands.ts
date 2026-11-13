@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { asCommandId, type CommandId } from '#doc-model';
 import { useKernel } from '../kernel-provider.tsx';
 
-export type ToolPanelKey = 'recall' | 'pomodoro' | 'gallery';
+export type ToolPanelKey = 'pomodoro';
 
 const commandId = (value: string): CommandId => {
   const id = asCommandId(value);
@@ -10,9 +10,7 @@ const commandId = (value: string): CommandId => {
   return id;
 };
 
-export const TOOL_RECALL_COMMAND = commandId('ember.tool.recall');
 export const TOOL_POMODORO_COMMAND = commandId('ember.tool.pomodoro');
-export const TOOL_GALLERY_COMMAND = commandId('ember.tool.gallery');
 
 /**
  * 左下角工具面板的打开命令。
@@ -23,15 +21,6 @@ export const useToolCommands = (open: (panel: ToolPanelKey) => void): void => {
   const kernel = useKernel();
 
   useEffect(() => {
-    const recall = kernel.commands.register<void>({
-      id: TOOL_RECALL_COMMAND,
-      title: '打开今日回顾',
-      scope: 'global',
-      run: () => {
-        open('recall');
-      },
-    });
-
     const pomodoro = kernel.commands.register<void>({
       id: TOOL_POMODORO_COMMAND,
       title: '打开番茄钟',
@@ -41,19 +30,8 @@ export const useToolCommands = (open: (panel: ToolPanelKey) => void): void => {
       },
     });
 
-    const gallery = kernel.commands.register<void>({
-      id: TOOL_GALLERY_COMMAND,
-      title: '打开图库',
-      scope: 'global',
-      run: () => {
-        open('gallery');
-      },
-    });
-
     return () => {
-      recall.dispose();
       pomodoro.dispose();
-      gallery.dispose();
     };
   }, [kernel, open]);
 };

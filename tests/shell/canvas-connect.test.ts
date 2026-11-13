@@ -44,6 +44,7 @@ const makeScene = (nodes: readonly CanvasNode[], edges: readonly CanvasEdge[] = 
   grid: { size: 8, snap: true },
   nodes,
   edges,
+  bookmarks: [],
 });
 
 const idFactory = (): ((prefix: 'n' | 'e') => string) => {

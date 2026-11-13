@@ -9,7 +9,13 @@ interface RawStat {
   readonly size: number;
 }
 
-/** 分块转换：逐字符拼接大文件（图库上限 20MB）会在主线程上明显卡顿 */
+interface RawScanEntry {
+  readonly path: string;
+  readonly kind: string;
+  readonly size: number;
+}
+
+/** 分块转换：逐字符拼接大文件（图库上限见 `src-tauri/src/vault/media.rs::MAX_ASSET_BYTES`）会在主线程上明显卡顿 */
 const toBase64 = (bytes: Uint8Array): string => {
   let binary = '';
   const chunk = 0x8000;
@@ -33,22 +39,17 @@ export interface TauriVaultPortOptions {
 }
 
 /**
- * Rust vault 的 IPC 适配层：journal 两阶段、库锁、watcher 全在 Rust 侧，
+ * Rust vault 的 IPC 适配层：原子写、库锁、watcher 全在 Rust 侧，
  * 这里只做字节编码与命令名映射。
  */
 export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort => {
-  // 运行期锁被接管后由 vault://mode 翻转；各内核服务每次写入时读这个值
-  let readonly = options.readonlyMode;
-  let readonlyReason = options.readonlyReason ?? null;
+  // 独占创建 + pid 存活模型下，只读只在启动时确定（被另一实例占用），运行期不变
+  const readonly = options.readonlyMode;
+  const readonlyReason = options.readonlyReason ?? null;
 
   return {
-    get readonlyMode() {
-      return readonly;
-    },
-
-    get readonlyReason() {
-      return readonlyReason;
-    },
+    readonlyMode: readonly,
+    readonlyReason,
 
     read: async (path) => {
       const payload = await invoke<string | null>('vault_read', { path: String(path) });
@@ -63,7 +64,7 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
       await invoke('vault_remove', { path: String(path) });
     },
 
-    // 回滚内部使用：不注册为命令（core.doc.purge 仍为 v1 未实现）
+    // 仅供文章回滚与画布历史轮转；不注册为内核用户命令
     purge: async (path) => {
       await invoke('vault_purge', { path: String(path) });
     },
@@ -74,6 +75,20 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
 
     list: async () => {
       const paths = await invoke<readonly string[]>('vault_list');
+      return paths.map((path) => unsafeVaultPath(path));
+    },
+
+    scan: async () => {
+      const entries = await invoke<readonly RawScanEntry[]>('vault_scan');
+      return entries.map((entry) => ({
+        path: unsafeVaultPath(entry.path),
+        kind: entry.kind === 'symlink' ? 'symlink' : 'file',
+        size: entry.size,
+      }));
+    },
+
+    listCanvases: async () => {
+      const paths = await invoke<readonly string[]>('vault_list_canvases');
       return paths.map((path) => unsafeVaultPath(path));
     },
 
@@ -116,34 +131,6 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
         },
       };
       return disposable;
-    },
-
-    watchMode: (listener) => {
-      let disposed = false;
-      let unlisten: (() => void) | null = null;
-      void listen<{ readonly: boolean; reason: string | null }>('vault://mode', (event) => {
-        readonly = event.payload.readonly;
-        readonlyReason = event.payload.reason;
-        listener(event.payload);
-      })
-        .then((fn) => {
-          if (disposed) {
-            fn();
-            return;
-          }
-          unlisten = fn;
-        })
-        .catch((error: unknown) => {
-          console.error('订阅 vault://mode 失败', error);
-        });
-
-      return {
-        dispose: (): void => {
-          disposed = true;
-          unlisten?.();
-          unlisten = null;
-        },
-      } satisfies Disposable;
     },
   };
 };

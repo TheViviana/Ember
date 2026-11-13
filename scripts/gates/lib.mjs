@@ -16,8 +16,6 @@ export const GATE_FLOORS = Object.freeze({
   'layer:shell': 40,
   'layer:kernel': 6,
   'layer:data': 4,
-  'layer:capabilities': 2,
-  'layer:assembly': 1,
   'layer:pkg:doc-model': 6,
   'layer:pkg:canvas-engine': 2,
   bansFiles: 140,
@@ -28,7 +26,6 @@ export const REQUIRED_DIRS = Object.freeze([
   'src/kernel',
   'src/shell',
   'src/data',
-  'src/capabilities',
   'packages/doc-model',
   'packages/canvas-engine',
 ]);
@@ -41,8 +38,6 @@ export const REQUIRED_DIRS = Object.freeze([
 export const MODULE_LAYOUT = Object.freeze([
   { prefix: 'packages/doc-model/', layer: 'pkg:doc-model' },
   { prefix: 'packages/canvas-engine/', layer: 'pkg:canvas-engine' },
-  { exact: 'src/capabilities/index.ts', layer: 'assembly' },
-  { prefix: 'src/capabilities/', layer: 'capabilities', capabilityFromSegment: true },
   { prefix: 'src/kernel/', layer: 'kernel' },
   { prefix: 'src/data/', layer: 'data' },
   { prefix: 'src/shell/', layer: 'shell' },
@@ -474,10 +469,6 @@ export function classify(root, absolutePath) {
       continue;
     }
     if (!rel.startsWith(entry.prefix)) continue;
-    if (entry.capabilityFromSegment === true) {
-      const segment = rel.slice(entry.prefix.length).split('/')[0];
-      return { layer: entry.layer, capability: segment ?? null };
-    }
     return { layer: entry.layer, capability: null };
   }
   return null;
@@ -513,27 +504,19 @@ const STATE_LIBS = /^(?:zustand|@tanstack\/)/;
 /** 各层的外部依赖禁令与内部层禁令 */
 export const LAYER_RULES = {
   'pkg:doc-model': {
-    denyLayers: ['shell', 'data', 'kernel', 'capabilities', 'assembly'],
+    denyLayers: ['shell', 'data', 'kernel'],
     denyExternal: [REACT, TAURI, NODE_BUILTIN, STATE_LIBS, /^@codemirror\//],
   },
   'pkg:canvas-engine': {
-    denyLayers: ['shell', 'data', 'kernel', 'capabilities', 'assembly'],
+    denyLayers: ['shell', 'data', 'kernel'],
     denyExternal: [REACT, TAURI, NODE_BUILTIN, STATE_LIBS, /^@codemirror\//],
   },
   kernel: {
-    denyLayers: ['shell', 'data', 'capabilities', 'assembly'],
-    denyExternal: [TAURI, REACT, STATE_LIBS],
-  },
-  capabilities: {
     denyLayers: ['shell', 'data'],
-    denyExternal: [TAURI, NODE_BUILTIN, REACT, STATE_LIBS],
-  },
-  assembly: {
-    denyLayers: [],
     denyExternal: [TAURI, REACT, STATE_LIBS],
   },
   data: {
-    denyLayers: ['shell', 'capabilities', 'assembly'],
+    denyLayers: ['shell'],
     denyExternal: [],
   },
   shell: { denyLayers: [], denyExternal: [] },
@@ -548,13 +531,6 @@ export const LAYER_RULES = {
 export function checkEdge(from, to, spec) {
   const rules = LAYER_RULES[from.layer];
   if (rules === undefined) return null;
-
-  if (from.layer === 'capabilities' && to.layer === 'capabilities') {
-    if (from.capability !== null && to.capability !== null && from.capability !== to.capability) {
-      return { rule: 'capability-cross-import', detail: `${from.capability} → ${to.capability}` };
-    }
-    return null;
-  }
 
   if (rules.denyLayers.includes(to.layer)) {
     return { rule: 'forbidden-internal', detail: `${from.layer} → ${to.layer} (${spec})` };

@@ -1,4 +1,4 @@
-/** 内核错误模型（kernel-contract §10）。`code` 是稳定契约，`message` 可改。 */
+/** 内核错误模型（kernel-contract §8）。`code` 是稳定契约，`message` 可改。 */
 export type EmberErrorCode =
   | 'not_implemented'
   | 'doc_not_found'
@@ -9,17 +9,16 @@ export type EmberErrorCode =
   | 'invalid_payload'
   | 'duplicate_id'
   | 'vault_locked'
+  | 'vault_uninitialized'
   | 'index_unavailable'
   | 'command_not_found'
   | 'command_reentrant'
   | 'duplicate_command'
   | 'invalid_command_id'
-  | 'duplicate_capability'
-  | 'capability_failed'
-  | 'duplicate_slot'
   | 'duplicate_extension'
   | 'canvas_invalid'
-  | 'io_failed';
+  | 'io_failed'
+  | 'startup_failed';
 
 export class EmberError extends Error {
   readonly code: EmberErrorCode;
@@ -47,13 +46,4 @@ export const toErrorText = (value: unknown): string => {
     if (message !== null) return code === null ? message : `${code}: ${message}`;
   }
   return String(value);
-};
-
-/** 保留原始错误对象与栈，供诊断使用 */
-export const toEmberError = (value: unknown, fallback: EmberErrorCode = 'io_failed'): EmberError => {
-  if (isEmberError(value)) return value;
-  if (value instanceof Error) {
-    return new EmberError(fallback, value.message, { cause: value.name });
-  }
-  return new EmberError(fallback, String(value));
 };

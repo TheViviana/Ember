@@ -1,4 +1,4 @@
-import { isCommandId, type CapabilityId, type CommandId, type DocId } from '#doc-model';
+import { isCommandId, type CommandId, type DocId } from '#doc-model';
 import type { KernelContext } from './context.ts';
 import { EmberError, toErrorText } from './errors.ts';
 import type { EventBus } from './events.ts';
@@ -41,10 +41,8 @@ export interface CommandBus {
   watch(listener: (descriptors: readonly CommandDescriptor[]) => void): Disposable;
 }
 
-/** 内核内部使用的命令总线能力；不暴露给能力 */
+/** 内核内部使用的命令总线能力；不暴露给 shell 之外的调用方 */
 export interface CommandBusHost extends CommandBus {
-  /** 能力激活期间建立 owner 作用域（K4）；激活是串行的，因此作用域不会交叉 */
-  withOwner<T>(owner: CapabilityId | null, run: () => T | Promise<T>): Promise<T>;
   bindKernel(resolve: () => KernelContext): void;
   /** 当前活动文档/表面，由 shell 在切换焦点时写入 */
   setSurface(surface: CommandScope, docId: DocId | null): void;
@@ -52,7 +50,6 @@ export interface CommandBusHost extends CommandBus {
 
 interface Registration {
   readonly command: Command<unknown>;
-  readonly owner: CapabilityId | null;
   disposed: boolean;
 }
 
@@ -72,27 +69,21 @@ export const createCommandBus = (options: CommandBusOptions = {}): CommandBusHos
   const inFlight = new Set<string>();
 
   let resolveKernel: (() => KernelContext) | null = null;
-  let ownerScope: CapabilityId | null = null;
   let surface: CommandScope = 'global';
   let surfaceDocId: DocId | null = null;
 
   const descriptors = (): readonly CommandDescriptor[] => {
     const list: CommandDescriptor[] = [];
     for (const registration of registrations.values()) {
-      const { command, owner } = registration;
+      const { command } = registration;
       list.push({
         id: command.id,
         title: command.title,
         scope: command.scope,
         keybinding: command.keybinding ?? null,
-        owner,
       });
     }
-    return list.sort((left, right) => {
-      const leftOwner = left.owner === null ? '' : String(left.owner);
-      const rightOwner = right.owner === null ? '' : String(right.owner);
-      return leftOwner.localeCompare(rightOwner) || String(left.id).localeCompare(String(right.id));
-    });
+    return list.sort((left, right) => String(left.id).localeCompare(String(right.id)));
   };
 
   const notify = (): void => {
@@ -137,7 +128,6 @@ export const createCommandBus = (options: CommandBusOptions = {}): CommandBusHos
     }
     const registration: Registration = {
       command,
-      owner: ownerScope,
       disposed: false,
     };
     registrations.set(key, registration);
@@ -164,15 +154,6 @@ export const createCommandBus = (options: CommandBusOptions = {}): CommandBusHos
           watchers.delete(listener);
         },
       };
-    },
-    withOwner: async (owner, run) => {
-      const previous = ownerScope;
-      ownerScope = owner;
-      try {
-        return await run();
-      } finally {
-        ownerScope = previous;
-      }
     },
     bindKernel: (resolve) => {
       resolveKernel = resolve;

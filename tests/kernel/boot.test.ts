@@ -1,18 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { asCapabilityId, asCommandId, asVaultId, unsafeVaultPath } from '#doc-model';
+import { asCommandId, asVaultId, unsafeVaultPath } from '#doc-model';
 import { bootKernel, type Kernel } from '../../src/kernel/boot.ts';
-import type { CapabilityModule } from '../../src/kernel/capability-host.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
 import type { VaultPort } from '../../src/kernel/ports.ts';
 import type { Logger } from '../../src/kernel/types.ts';
-import { createMemoryIndex, createMemoryVault, type MemoryVault } from './fakes.ts';
+import { createMemoryVault, type MemoryVault } from './fakes.ts';
 
 const VAULT_ID = asVaultId('01JB8ZQ3K4M5N6P7Q8R9S0T1V2');
-const CAPABILITY_ID = asCapabilityId('ember.core.slash');
-const COMMAND_ID = asCommandId('core.slash.open');
-assert.ok(VAULT_ID !== null && CAPABILITY_ID !== null && COMMAND_ID !== null);
+assert.ok(VAULT_ID !== null);
 
 const silentLogger: Logger = {
   debug: (): void => {},
@@ -21,31 +18,10 @@ const silentLogger: Logger = {
   error: (): void => {},
 };
 
-const slashCapability = (calls: string[]): CapabilityModule => ({
-  manifest: {
-    id: CAPABILITY_ID,
-    version: '1.0.0',
-    displayName: 'Slash',
-    requiresKernel: '^1.0.0',
-    defaultEnabled: true,
-  },
-  activate: (ctx) => {
-    ctx.commands.register({
-      id: COMMAND_ID,
-      title: '打开斜杠菜单',
-      scope: 'global',
-      run: () => {
-        calls.push('slash');
-      },
-    });
-  },
-});
-
-const boot = async (vault: MemoryVault, calls: string[]): Promise<Kernel> =>
+const boot = async (vault: MemoryVault): Promise<Kernel> =>
   bootKernel({
     vaultId: VAULT_ID,
-    ports: { vault: vault.port, index: createMemoryIndex().port },
-    capabilities: [slashCapability(calls)],
+    ports: { vault: vault.port },
     log: silentLogger,
   });
 
@@ -69,8 +45,7 @@ void test('watcher 连续事件合并：扫描中只补扫一次，不会每个�
   };
   const kernel = await bootKernel({
     vaultId: VAULT_ID,
-    ports: { vault: port, index: createMemoryIndex().port },
-    capabilities: [],
+    ports: { vault: port },
     log: silentLogger,
   });
 
@@ -88,76 +63,35 @@ void test('watcher 连续事件合并：扫描中只补扫一次，不会每个�
   assert.equal(listCalls, 2);
 });
 
-void test('运行期库锁失守：watchMode 转发为 vault:mode 事件并翻只读', async () => {
-  const vault = createMemoryVault();
-  let readonly = false;
-  const listeners: ((state: { readonly: boolean; reason: string | null }) => void)[] = [];
-  const port: VaultPort = {
-    ...vault.port,
-    get readonlyMode() {
-      return readonly;
-    },
-    get readonlyReason() {
-      // 运行期降级由内核恒定归因为 lockLost，替身保持同一形状
-      return readonly ? 'lockLost' : null;
-    },
-    watchMode: (listener) => {
-      listeners.push(listener);
-      return {
-        dispose: (): void => {
-          const index = listeners.indexOf(listener);
-          if (index >= 0) listeners.splice(index, 1);
-        },
-      };
-    },
-  };
-  const kernel = await bootKernel({
-    vaultId: VAULT_ID,
-    ports: { vault: port, index: createMemoryIndex().port },
-    capabilities: [],
-    log: silentLogger,
-  });
-  const modes: boolean[] = [];
-  const subscription = kernel.context.events.on('vault:mode', ({ readonly: next }) => {
-    modes.push(next);
-  });
-  assert.equal(kernel.context.env.readonlyMode, false);
-
-  readonly = true;
-  const listener = listeners[0];
-  assert.ok(listener !== undefined);
-  listener({ readonly: true, reason: 'library lock unavailable' });
-
-  assert.deepEqual(modes, [true]);
-  assert.equal(kernel.context.env.readonlyMode, true, 'env 必须跟随端口，而不是固化启动值');
-
-  subscription.dispose();
-  await kernel.shutdown();
-  assert.equal(listeners.length, 0, '关闭后注销运行期监听');
-});
-
-void test('启动后能力激活、命令可执行、关闭后命令消失', async () => {
+void test('启动后命令可注册与执行，注销后消失', async () => {
   const vault = createMemoryVault();
   const calls: string[] = [];
-  const kernel = await boot(vault, calls);
+  const kernel = await boot(vault);
 
-  assert.equal(kernel.context.capabilities.isActive(CAPABILITY_ID), true);
-  const listed = kernel.context.commands.list();
-  assert.equal(listed.length, 1);
-  assert.equal(listed[0]?.owner, CAPABILITY_ID);
+  const pingId = asCommandId('ember.test.ping');
+  assert.ok(pingId !== null);
+  const registration = kernel.context.commands.register({
+    id: pingId,
+    title: '测试命令',
+    scope: 'global',
+    run: () => {
+      calls.push('ping');
+    },
+  });
+  assert.deepEqual(kernel.context.commands.list().map((item) => String(item.id)), ['ember.test.ping']);
 
-  const result = await kernel.context.commands.execute(COMMAND_ID);
+  const result = await kernel.context.commands.execute(pingId);
   assert.equal(result.ok, true);
-  assert.deepEqual(calls, ['slash']);
+  assert.deepEqual(calls, ['ping']);
 
-  await kernel.shutdown();
-  assert.equal(kernel.context.capabilities.isActive(CAPABILITY_ID), false);
+  registration.dispose();
   assert.deepEqual(kernel.context.commands.list(), []);
+  await kernel.shutdown();
 });
 
 void test('创建文档写入 frontmatter 身份，读取可往返', async () => {
   const vault = createMemoryVault();
-  const kernel = await boot(vault, []);
+  const kernel = await boot(vault);
 
   const snapshot = await kernel.context.docs.create({
     path: unsafeVaultPath('notes/a.md'),
@@ -186,7 +120,7 @@ void test('创建文档写入 frontmatter 身份，读取可往返', async () =>
 
 void test('base 命中时走快路径，写入后 rev 递增', async () => {
   const vault = createMemoryVault();
-  const kernel = await boot(vault, []);
+  const kernel = await boot(vault);
 
   const created = await kernel.context.docs.create({
     path: unsafeVaultPath('notes/b.md'),
@@ -208,9 +142,9 @@ void test('base 命中时走快路径，写入后 rev 递增', async () => {
   await kernel.shutdown();
 });
 
-void test('磁盘被外部改动时三方合并成功，不覆盖外部内容', async () => {
+void test('磁盘被外部改动时保留磁盘版本并落盘冲突副本，不静默覆盖', async () => {
   const vault = createMemoryVault();
-  const kernel = await boot(vault, []);
+  const kernel = await boot(vault);
 
   const created = await kernel.context.docs.create({
     path: unsafeVaultPath('notes/c.md'),
@@ -226,18 +160,21 @@ void test('磁盘被外部改动时三方合并成功，不覆盖外部内容', 
     { base: created.meta.rev, intent: 'user' },
   );
 
-  assert.equal(outcome.merged, true);
-  assert.equal(outcome.conflict, null);
-  const merged = vault.dump()['notes/c.md'] ?? '';
-  assert.match(merged, /inserted/);
-  assert.match(merged, /TWO/);
+  assert.equal(outcome.merged, false);
+  assert.ok(outcome.conflict !== null);
+  // 磁盘版本保持外部内容，本地改动完整进入冲突副本
+  assert.match(vault.dump()['notes/c.md'] ?? '', /TWO/);
+  assert.doesNotMatch(vault.dump()['notes/c.md'] ?? '', /inserted/);
+  const copy = vault.dump()[String(outcome.conflict.path)] ?? '';
+  assert.match(copy, /inserted/);
+  assert.match(copy, /conflictOf/);
 
   await kernel.shutdown();
 });
 
 void test('无法自动合并时落盘冲突副本且保留磁盘版本（I13）', async () => {
   const vault = createMemoryVault();
-  const kernel = await boot(vault, []);
+  const kernel = await boot(vault);
 
   const created = await kernel.context.docs.create({
     path: unsafeVaultPath('notes/d.md'),
@@ -267,7 +204,7 @@ void test('无法自动合并时落盘冲突副本且保留磁盘版本（I13）
 
 void test('只读模式下写操作抛 vault_locked，索引仍可用（G2）', async () => {
   const vault = createMemoryVault({ readonlyMode: true });
-  const kernel = await boot(vault, []);
+  const kernel = await boot(vault);
 
   assert.equal(kernel.context.env.readonlyMode, true);
   await assert.rejects(
@@ -283,7 +220,7 @@ void test('只读模式下写操作抛 vault_locked，索引仍可用（G2）', 
 
 void test('shutdown 单飞：并发调用共享同一 promise，完成后重复调用保持幂等', async () => {
   const vault = createMemoryVault();
-  const kernel = await boot(vault, []);
+  const kernel = await boot(vault);
 
   const first = kernel.shutdown();
   const second = kernel.shutdown();
@@ -291,6 +228,4 @@ void test('shutdown 单飞：并发调用共享同一 promise，完成后重复�
 
   await Promise.all([first, second]);
   await kernel.shutdown();
-  assert.equal(kernel.context.capabilities.isActive(CAPABILITY_ID), false);
-  assert.deepEqual(kernel.context.commands.list(), []);
 });

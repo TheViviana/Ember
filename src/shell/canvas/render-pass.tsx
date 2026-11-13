@@ -100,9 +100,17 @@ export interface CanvasNodePassProps {
   readonly editingId: string | null;
   readonly connect: ConnectDraft | null;
   readonly viewport: Viewport;
+  /** 画布清单索引：Portal 节点解析目标画布标题/节点数/是否存在 */
+  readonly canvasIndex: ReadonlyMap<string, { readonly title: string; readonly nodeCount: number }>;
+  /** 过滤器命中（压暗未命中的节点） */
+  readonly dimmedIds: ReadonlySet<string>;
+  /** 在画布中定位：短暂高亮的节点 id */
+  readonly highlightId: string | null;
   readonly onStartEdit: (id: string) => void;
   readonly onCommitText: (id: string, text: string) => void;
   readonly onOpenDoc: (id: string) => void;
+  readonly onEnterPortal: (target: string) => void;
+  readonly onOpenAsset: (assetPath: string) => void;
 }
 
 /** 渲染 pass：世界坐标节点层 */
@@ -114,9 +122,14 @@ export const CanvasNodePass = ({
   editingId,
   connect,
   viewport,
+  canvasIndex,
+  dimmedIds,
+  highlightId,
   onStartEdit,
   onCommitText,
   onOpenDoc,
+  onEnterPortal,
+  onOpenAsset,
 }: CanvasNodePassProps): ReactElement => (
   <div
     className={styles.world}
@@ -137,13 +150,37 @@ export const CanvasNodePass = ({
         doc={node.docId === null ? null : (docIndex.get(String(node.docId)) ?? null)}
         editing={editingId === node.id}
         connectTarget={connect?.target === node.id}
+        dimmed={dimmedIds.has(node.id)}
+        highlighted={highlightId === node.id}
+        portal={portalInfoOf(node, canvasIndex)}
         onStartEdit={onStartEdit}
         onCommitText={onCommitText}
         onOpenDoc={onOpenDoc}
+        onEnterPortal={onEnterPortal}
+        onOpenAsset={onOpenAsset}
       />
     ))}
   </div>
 );
+
+const portalInfoOf = (
+  node: CanvasNode,
+  canvasIndex: ReadonlyMap<string, { readonly title: string; readonly nodeCount: number }>,
+) => {
+  if (node.kind !== 'portal') return null;
+  const target = node.meta['portalTarget'];
+  if (typeof target !== 'string' || target.length === 0) return null;
+  const found = canvasIndex.get(target);
+  const metaTitle = node.meta['portalTitle'];
+  const metaCount = node.meta['portalNodeCount'];
+  return {
+    target,
+    title: typeof metaTitle === 'string' && metaTitle !== '' ? metaTitle : (found?.title ?? target),
+    nodeCount:
+      typeof metaCount === 'number' ? metaCount : (found?.nodeCount ?? 0),
+    missing: found === undefined,
+  };
+};
 
 /** 渲染 pass：框选矩形 */
 export const CanvasMarquee = ({

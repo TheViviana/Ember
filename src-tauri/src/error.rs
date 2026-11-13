@@ -3,7 +3,7 @@
 pub enum VaultError {
     #[error("路径越界：{0}")]
     PathOutside(String),
-    #[error("库为只读模式，写操作被拒绝")]
+    #[error("库为只读，写操作被拒绝（原因见状态栏）")]
     Readonly,
     #[error("文件不存在：{0}")]
     NotFound(String),

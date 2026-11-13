@@ -133,3 +133,15 @@
   border-color: var(--ember-border-strong);
   background: var(--ember-bg-hover);
 }
+
+.conflict {
+  color: var(--ember-warning);
+  border-color: var(--ember-warning-border);
+  background: var(--ember-warning-tint);
+}
+
+.conflict:hover {
+  color: var(--ember-warning);
+  border-color: var(--ember-warning);
+  background: var(--ember-warning-tint);
+}

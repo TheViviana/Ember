@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { asCapabilityId, asCommandId, type CapabilityId, type CommandId } from '#doc-model';
+import { asCommandId, type CommandId } from '#doc-model';
 import { createCommandBus, type Command } from '../../src/kernel/command-bus.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
 import { createEventBus } from '../../src/kernel/events.ts';
@@ -9,12 +9,6 @@ import { stubContext } from './fakes.ts';
 const cid = (value: string): CommandId => {
   const id = asCommandId(value);
   assert.ok(id !== null, `命令 id 非法：${value}`);
-  return id;
-};
-
-const capId = (value: string): CapabilityId => {
-  const id = asCapabilityId(value);
-  assert.ok(id !== null, `能力 id 非法：${value}`);
   return id;
 };
 
@@ -88,16 +82,13 @@ void test('命令重入被拒绝', async () => {
   assert.match(inner ?? '', /command_reentrant/);
 });
 
-void test('owner 由 withOwner 填充，注销后从 list 消失且顺序稳定', async () => {
+void test('注销后从 list 消失且顺序稳定', () => {
   const bus = createBus();
-  const capability = capId('ember.core.slash');
-  const registration = await bus.withOwner(capability, () =>
-    bus.register({ id: cid('core.test.owned'), title: 'owned', scope: 'editor', run: noop }),
-  );
+  const registration = bus.register({ id: cid('core.test.owned'), title: 'owned', scope: 'editor', run: noop });
 
   const listed = bus.list();
   assert.equal(listed.length, 1);
-  assert.equal(listed[0]?.owner, capability);
+  assert.equal(String(listed[0]?.id), 'core.test.owned');
 
   bus.register({ id: cid('core.test.free'), title: 'free', scope: 'global', run: noop });
   const sorted = bus.list().map((descriptor) => String(descriptor.id));

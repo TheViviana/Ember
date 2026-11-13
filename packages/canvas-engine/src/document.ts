@@ -1,7 +1,9 @@
 import { asCanvasId, asDocId } from '../../doc-model/src/ids.ts';
 import type {
+  CanvasBookmark,
   CanvasDocument,
   CanvasEdge,
+  CanvasFilters,
   CanvasGrid,
   CanvasNode,
   CanvasScene,
@@ -28,6 +30,41 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const asString = (value: unknown): string | null => (typeof value === 'string' ? value : null);
 const asNumber = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+/**
+ * 视图书签解析：书签是布局数据，坏一条跳过一条而不是炸掉整张画布；
+ * 旧文件没有该字段时回退空数组（unknown keys 在旧解析里本来就被丢弃，兼容无虞）。
+ */
+const parseBookmarks = (raw: unknown): readonly CanvasBookmark[] => {
+  if (!Array.isArray(raw)) return [];
+  const bookmarks: CanvasBookmark[] = [];
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const id = asString(item['id']);
+    const name = asString(item['name']);
+    if (id === null || id === '' || name === null) continue;
+    const viewportItem = isRecord(item['viewport']) ? item['viewport'] : null;
+    const vx = asNumber(viewportItem?.['x']);
+    const vy = asNumber(viewportItem?.['y']);
+    const vz = asNumber(viewportItem?.['zoom']);
+    if (vx === null || vy === null || vz === null) continue;
+    let filters: CanvasFilters | null = null;
+    const rawFilters = item['filters'];
+    if (isRecord(rawFilters)) {
+      const tags = Array.isArray(rawFilters['tags'])
+        ? rawFilters['tags'].filter((tag): tag is string => typeof tag === 'string')
+        : [];
+      const kinds = Array.isArray(rawFilters['kinds'])
+        ? rawFilters['kinds'].filter((kind): kind is string => typeof kind === 'string')
+        : [];
+      const text = asString(rawFilters['text']) ?? '';
+      const mode = rawFilters['mode'] === 'hide' ? 'hide' : 'dim';
+      filters = { tags, kinds, text, mode };
+    }
+    bookmarks.push({ id, name, viewport: { x: vx, y: vy, zoom: vz }, filters });
+  }
+  return bookmarks;
+};
 
 /**
  * 磁盘格式（vault-format §8.2）→ 运行时文档。
@@ -122,6 +159,7 @@ export const parseCanvasDocument = (raw: unknown): ParseResult => {
     grid,
     nodes,
     edges,
+    bookmarks: parseBookmarks(raw['bookmarks']),
   };
   const issues = validateScene(scene);
   const document: CanvasDocument = {
@@ -166,6 +204,24 @@ export const toCanvasFile = (document: CanvasDocument): Record<string, unknown> 
       arrow: edge.arrow,
       kind: edge.kind,
       meta: edge.meta,
+    })),
+    bookmarks: scene.bookmarks.map((bookmark) => ({
+      id: bookmark.id,
+      name: bookmark.name,
+      viewport: {
+        x: bookmark.viewport.x,
+        y: bookmark.viewport.y,
+        zoom: bookmark.viewport.zoom,
+      },
+      filters:
+        bookmark.filters === null
+          ? null
+          : {
+              tags: [...bookmark.filters.tags],
+              kinds: [...bookmark.filters.kinds],
+              text: bookmark.filters.text,
+              mode: bookmark.filters.mode,
+            },
     })),
     capabilityData: document.capabilityData,
   };

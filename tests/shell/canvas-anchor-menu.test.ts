@@ -136,6 +136,7 @@ const makeScene = (nodes: readonly CanvasNode[]): CanvasScene => ({
   grid: { size: 8, snap: true },
   nodes,
   edges: [],
+bookmarks: [],
 });
 
 const anchorNode: CanvasNode = {
