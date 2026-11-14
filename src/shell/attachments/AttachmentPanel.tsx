@@ -25,6 +25,18 @@ export interface AttachmentPanelProps {
 
 /** 复用机器本地 ui.json 的 floatPositions/floatSizes 记录，键不与文档 id（ULID）冲突 */
 const PANEL_FLOAT_KEY = 'attachments';
+/** 面板与容器边缘的留白；与浮窗的顶部留白同一档 */
+const PANEL_INSET = 8;
+
+/**
+ * 面板是 position:absolute 挂在 .body 内（.body 从顶栏下沿起算），
+ * 而 getBoundingClientRect 返回视口坐标。帧必须换算到包含块坐标再写回，
+ * 否则按下拖拽/缩放的第一帧就会整体下跳一个顶栏高度。
+ */
+const panelParent = (root: HTMLElement | null): HTMLElement | null => {
+  const parent = root?.offsetParent;
+  return parent instanceof HTMLElement ? parent : (root?.parentElement ?? null);
+};
 
 interface PanelFrame {
   readonly left: number;
@@ -249,14 +261,34 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
     return meta === undefined || meta.title.trim().length === 0 ? '未命名' : meta.title;
   };
 
-  /** 面板缩放边界：与浮窗同源的夹紧规则，顶部避开顶栏带 */
-  const panelBounds = (): FloatBounds => ({
-    maxWidth: window.innerWidth - 16,
-    maxHeight: window.innerHeight - 16,
-    minWidth: 320,
-    minHeight: 240,
-    topInset: 8,
-  });
+  /** 面板缩放边界：容器实际尺寸，顶部留白避开顶栏带 */
+  const panelBounds = (): FloatBounds => {
+    const parent = panelParent(rootRef.current);
+    const width = parent?.clientWidth ?? window.innerWidth;
+    const height = parent?.clientHeight ?? window.innerHeight;
+    return {
+      maxWidth: Math.max(0, width - PANEL_INSET * 2),
+      maxHeight: Math.max(0, height - PANEL_INSET * 2),
+      minWidth: 320,
+      minHeight: 240,
+      topInset: PANEL_INSET,
+    };
+  };
+
+  /** 当前帧的包含块坐标：拖拽/缩放的起点与落点都必须用这套坐标 */
+  const readPanelFrame = (): PanelFrame | null => {
+    const root = rootRef.current;
+    const parent = panelParent(root);
+    if (root === null || parent === null) return null;
+    const rootRect = root.getBoundingClientRect();
+    const parentRect = parent.getBoundingClientRect();
+    return {
+      left: Math.round(rootRect.left - parentRect.left),
+      top: Math.round(rootRect.top - parentRect.top),
+      width: Math.round(rootRect.width),
+      height: Math.round(rootRect.height),
+    };
+  };
 
   const persistFrame = (next: PanelFrame): void => {
     const machine = useMachineStore.getState();
@@ -267,22 +299,27 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
   const beginDrag = (event: ReactPointerEvent<HTMLElement>): void => {
     const target = event.target as HTMLElement;
     if (target.closest('button, label, input, select') !== null) return;
-    const rect = rootRef.current?.getBoundingClientRect();
-    if (rect === undefined) return;
+    const start = readPanelFrame();
+    if (start === null) return;
     event.preventDefault();
-    const start = {
-      x: event.clientX,
-      y: event.clientY,
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-      height: rect.height,
+    const parent = panelParent(rootRef.current);
+    const area = {
+      width: parent?.clientWidth ?? window.innerWidth,
+      height: parent?.clientHeight ?? window.innerHeight,
     };
-    setFrame({ left: start.left, top: start.top, width: start.width, height: start.height });
+    const originX = event.clientX;
+    const originY = event.clientY;
+    setFrame(start);
     const onMove = (moveEvent: PointerEvent): void => {
       setFrame({
-        left: Math.max(8, Math.min(start.left + moveEvent.clientX - start.x, window.innerWidth - start.width - 8)),
-        top: Math.max(8, Math.min(start.top + moveEvent.clientY - start.y, window.innerHeight - start.height - 8)),
+        left: Math.max(
+          PANEL_INSET,
+          Math.min(start.left + moveEvent.clientX - originX, area.width - start.width - PANEL_INSET),
+        ),
+        top: Math.max(
+          PANEL_INSET,
+          Math.min(start.top + moveEvent.clientY - originY, area.height - start.height - PANEL_INSET),
+        ),
         width: start.width,
         height: start.height,
       });
@@ -291,10 +328,8 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       // 松手才写记忆；拖动期间不写机器状态
-      const current = rootRef.current?.getBoundingClientRect();
-      if (current !== undefined) {
-        persistFrame({ left: current.left, top: current.top, width: current.width, height: current.height });
-      }
+      const current = readPanelFrame();
+      if (current !== null) persistFrame(current);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -302,23 +337,32 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
 
   /** 四角缩放：对角固定，几何运算复用浮窗的 resolveFloatResize */
   const beginResize = (zone: FloatZone, event: ReactPointerEvent<HTMLDivElement>): void => {
-    const rect = rootRef.current?.getBoundingClientRect();
-    if (rect === undefined) return;
+    const start = readPanelFrame();
+    if (start === null) return;
     event.preventDefault();
     event.stopPropagation();
-    const start: PanelFrame = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-    const bounds = panelBounds();
+    const parent = panelParent(rootRef.current);
+    const areaWidth = parent?.clientWidth ?? window.innerWidth;
+    const areaHeight = parent?.clientHeight ?? window.innerHeight;
+    // 西/北侧缩放时对角固定在右下：可用空间从固定角倒推，避免越界后被推回整窗平移
+    const bounds: FloatBounds = {
+      ...panelBounds(),
+      maxWidth:
+        zone.includes('w') ? start.left + start.width - PANEL_INSET : areaWidth - start.left - PANEL_INSET,
+      maxHeight:
+        zone.includes('n') ? start.top + start.height - PANEL_INSET : areaHeight - start.top - PANEL_INSET,
+    };
+    const originX = event.clientX;
+    const originY = event.clientY;
     setFrame(start);
     const onMove = (moveEvent: PointerEvent): void => {
-      setFrame(resolveFloatResize(zone, start, moveEvent.clientX - event.clientX, moveEvent.clientY - event.clientY, bounds));
+      setFrame(resolveFloatResize(zone, start, moveEvent.clientX - originX, moveEvent.clientY - originY, bounds));
     };
     const onUp = (): void => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
-      const current = rootRef.current?.getBoundingClientRect();
-      if (current !== undefined) {
-        persistFrame({ left: current.left, top: current.top, width: current.width, height: current.height });
-      }
+      const current = readPanelFrame();
+      if (current !== null) persistFrame(current);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -336,6 +380,8 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
               top: frame.top,
               width: frame.width,
               height: frame.height,
+              // 帧生效后宽度由拖拽决定；CSS 的 max-width 会把「变宽」压成「整窗左移」
+              maxWidth: 'none',
               right: 'auto',
               bottom: 'auto',
             }
