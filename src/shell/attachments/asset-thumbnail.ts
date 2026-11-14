@@ -17,6 +17,16 @@ const toBase64 = (bytes: Uint8Array): string => {
   return btoa(binary);
 };
 
+/** base64 直接还原字节：data URL 不能走 fetch（CSP connect-src 会拦下） */
+const fromBase64 = (base64: string): Uint8Array<ArrayBuffer> => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+};
+
 export interface AssetImage {
   readonly dataUrl: string | null;
   readonly error: string | null;
@@ -37,7 +47,7 @@ const downscaleThumbnail = async (mime: string, base64: string): Promise<string>
   if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') {
     return original;
   }
-  const blob = await (await fetch(original)).blob();
+  const blob = new Blob([fromBase64(base64)], { type: mime });
   const bitmap = await createImageBitmap(blob);
   try {
     const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(bitmap.width, bitmap.height));

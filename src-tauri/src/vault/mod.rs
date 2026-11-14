@@ -135,7 +135,7 @@ impl Vault {
         atomic::write_atomic(&absolute, bytes).map_err(|error| with_path(error, &absolute))
     }
 
-    /// 删除：移入操作系统回收站，库内不保留副本（vault-format §8.6）。
+    /// 删除：优先系统回收站，不可用时降级 Finder 与库内回收目录（vault-format §8.3）。
     /// 文件不存在视为成功，便于内核做幂等对账。
     pub fn remove(&self, relative: &str) -> VaultResult<()> {
         self.ensure_writable()?;

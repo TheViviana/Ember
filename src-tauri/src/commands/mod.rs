@@ -111,7 +111,7 @@ pub async fn vault_write(
     vault.write(&path, &bytes, &intent)
 }
 
-/// 用户删除：移入系统回收站（vault-format §8.6）。
+/// 用户删除：优先系统回收站，不可用时降级 Finder 与库内回收目录（vault-format §8.3）。
 #[tauri::command]
 pub async fn vault_remove(vault: State<'_, Vault>, path: String) -> VaultResult<()> {
     vault.remove(&path)

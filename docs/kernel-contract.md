@@ -38,7 +38,7 @@
 | **I6** | 画布节点引用文档身份（`docId`），不引用路径。 | 外部搬动文件断链 | 画布节点类型固定 `docId: DocId \| null` |
 | **I7** | 画布只存摆放：节点、连线、视口、书签、Portal 指向；不承载正文。 | 画布变成第二真相源 | `CanvasDocument` 无正文字段 |
 | **I8** | 文件被外部删除后，画布节点保留失效占位（不自动消失），右键可清理；从回收站放回后自动恢复可用。 | 误删布局 | 外部对账 + 失效占位测试 |
-| **I9** | 用户删除一律进系统回收站（`vault_remove`）；`vault_purge` 仅供内核回滚（文章创建后画布写失败）与画布历史轮转，不注册为用户命令。 | 不可恢复的删除 | media/trash 测试 |
+| **I9** | 用户删除一律不永久删除：`vault_remove` 优先系统回收站，不可用时降级 Finder 与库内回收目录（细节见 vault-format §8.3）；`vault_purge` 仅供内核回滚（文章创建后画布写失败）与画布历史轮转，不注册为用户命令。 | 不可恢复的删除 | media/trash 测试 |
 | **I10** | Markdown 只有一条解析管线：`unified` + `remark-parse` + `remark-frontmatter` + `remark-gfm` + `remark-math`，产出单一 `mdast`。 | 两套 AST 语义漂移 | `packages/doc-model/src/markdown/pipeline.ts` 是唯一入口 |
 | **I11** | 未识别 frontmatter 键必须往返保留（语义级）。 | 破坏用户/其它工具数据 | 往返测试 |
 | **I12** | 基线冲突必须落盘冲突副本并 emit `doc:conflict`，不得只在内存里提示。 | 冲突被后续写入吞掉 | `WriteOutcome.conflict` 非空即已落盘 |
@@ -71,7 +71,7 @@ export interface DocService {
   create(input: CreateDocInput): Promise<DocSnapshot>;
   update(id: DocId, patch: DocPatch, opts: WriteOptions): Promise<WriteOutcome>;
   rename(id: DocId, next: VaultPath, opts: WriteOptions): Promise<WriteOutcome>;
-  remove(id: DocId, opts: WriteOptions): Promise<void>;   // 系统回收站
+  remove(id: DocId, opts: WriteOptions): Promise<void>;   // 系统回收站（降级见 vault-format §8.3）
   listHistory(id: DocId): Promise<readonly DocHistoryEntry[]>;
   readHistory(id: DocId, versionId: string): Promise<DocHistoryPreview>;
   restoreHistory(id: DocId, versionId: string, opts: WriteOptions): Promise<WriteOutcome>;

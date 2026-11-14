@@ -7,7 +7,7 @@ import { toErrorText } from '../../kernel/errors.ts';
 
 /**
  * 导出当前文档 PDF：正文走内核唯一的 Markdown 解析管线（readingBlocks），
- * 组装成自包含 HTML 后丢进隐藏 iframe 调 print() —— 走系统打印对话框的
+ * 组装成打印用 HTML 后丢进隐藏 iframe 调 print() —— 走系统打印对话框的
  * 「存储为 PDF」，不装任何导出依赖，也不引用外域资源。
  * 图片：media/ 资产读盘转 data URL 内嵌；外链一律跳过（运行时零联网）。
  */
@@ -123,46 +123,7 @@ const blocksToHtml = async (blocks: readonly ReadBlock[], images: ImageResolver)
   return parts.join('\n');
 };
 
-const PRINT_CSS = `
-  * { box-sizing: border-box; }
-  body {
-    margin: 0 auto;
-    max-width: 720px;
-    padding: 32px 24px;
-    color: #1f2328;
-    background: #ffffff;
-    font-family: "Songti SC", "PingFang SC", Georgia, serif;
-    font-size: 14px;
-    line-height: 1.75;
-  }
-  h1, h2, h3, h4, h5, h6 { line-height: 1.4; margin: 1.6em 0 0.6em; }
-  h1 { font-size: 1.7em; }
-  h2 { font-size: 1.4em; }
-  h3 { font-size: 1.2em; }
-  p { margin: 0.6em 0; }
-  pre {
-    padding: 10px 12px;
-    background: #f6f7f9;
-    border-radius: 6px;
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 12px;
-    overflow-x: auto;
-    break-inside: avoid;
-  }
-  code { font-family: "SF Mono", Menlo, monospace; font-size: 0.92em; background: #f0f1f3; padding: 1px 4px; border-radius: 4px; }
-  pre code { background: none; padding: 0; }
-  table { border-collapse: collapse; width: 100%; margin: 1em 0; break-inside: avoid; }
-  th, td { border: 1px solid #d5d9de; padding: 6px 10px; text-align: left; }
-  th { background: #f6f7f9; }
-  img { max-width: 100%; }
-  blockquote { margin: 1em 0; padding: 4px 16px; border-left: 3px solid #d5d9de; color: #57606a; }
-  hr { border: none; border-top: 1px solid #d5d9de; margin: 1.6em 0; }
-  .math { font-family: Georgia, serif; font-style: italic; }
-  .wiki { color: #0969da; }
-  .missing-image { color: #a40e26; font-size: 0.9em; }
-`;
-
-/** 打印自包含 HTML：iframe onload 后触发系统打印（含「存储为 PDF」） */
+/** 打印用 HTML：样式走应用内 /print.css（生产 CSP 禁止内联 <style>） */
 const printHtml = (title: string, bodyHtml: string): void => {
   const frame = document.createElement('iframe');
   frame.setAttribute('aria-hidden', 'true');
@@ -174,7 +135,7 @@ const printHtml = (title: string, bodyHtml: string): void => {
   frame.style.border = '0';
   frame.srcdoc =
     `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
-    `<style>${PRINT_CSS}</style></head><body>${bodyHtml}</body></html>`;
+    `<link rel="stylesheet" href="/print.css"></head><body>${bodyHtml}</body></html>`;
   frame.onload = () => {
     window.setTimeout(() => {
       frame.contentWindow?.focus();

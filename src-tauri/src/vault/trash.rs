@@ -1,7 +1,8 @@
-//! macOS 系统回收站适配层（vault-format §8.6）。
+//! macOS 系统回收站适配层（vault-format §8.3）。
 //!
-//! 用户删除的唯一落点是 `NSFileManager.trashItemAtURL`：文件离开库目录后由系统接管，
-//! 应用内不再保留任何副本。非 macOS 平台明确失败，**绝不**回退为 `fs::remove_file`。
+//! 用户删除的落点依次为：`NSFileManager.trashItemAtURL`（系统回收站）→ Finder 代删
+//! （`osascript`，落点同样是系统回收站）→ 库内 `.workbench/trash/<ULID>/`（30 天后
+//! 启动清扫回收）。任何路径都不调用 `fs::remove_file`，不会永久删除；非 macOS 平台明确失败。
 //!
 //! `unsafe` 只允许出现在本文件：objc2 的 FFI 边界集中在这里，每处都写明前置条件。
 
