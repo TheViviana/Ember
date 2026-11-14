@@ -100,7 +100,7 @@ export const DocumentTreeView = ({
   const onFolderDragOver = (event: ReactDragEvent<HTMLButtonElement>, dir: string): void => {
     if (dragging === null) return;
     event.preventDefault();
-    event.stopPropagation();
+    // 不拦冒泡：列表容器还要按上下边缘 12px 自动滚动
     event.dataTransfer.dropEffect = 'move';
     setDragOverDir(dir);
     if (expandedRef.current.has(dir) || hoverPathRef.current === dir) return;
