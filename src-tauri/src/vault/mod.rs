@@ -136,18 +136,15 @@ impl Vault {
     }
 
     /// 删除：优先系统回收站，不可用时降级 Finder 与库内回收目录（vault-format §8.3）。
-    /// 文件不存在视为成功，便于内核做幂等对账。
-    pub fn remove(&self, relative: &str) -> VaultResult<()> {
+    /// 返回实际落点；文件不存在视为成功并返回 `None`，便于内核做幂等对账。
+    pub fn remove(&self, relative: &str) -> VaultResult<Option<trash::TrashDestination>> {
         self.ensure_writable()?;
         let (absolute, normalized) = paths::resolve(&self.root, relative)?;
         paths::ensure_not_reserved(&normalized)?;
         let _gate = self.begin_write()?;
         match fs::symlink_metadata(&absolute) {
-            Ok(_) => {
-                trash::trash(&self.root, &absolute)?;
-                Ok(())
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Ok(Some(trash::trash(&self.root, &absolute)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(with_path(error.into(), &absolute)),
         }
     }
@@ -285,16 +282,19 @@ fn with_path(error: VaultError, path: &Path) -> VaultError {
 
 /// 启动期惰性清扫（持锁后执行；只读观察者不执行）。
 ///
-/// - 全库孤儿 `.ember-tmp-` 临时文件（>24h）：崩溃遗留，永远无人清理；
-/// - `.workbench/trash/<ULID>/`（>30 天）：**旧版**软删除副本的惰性回收。
-///   删除直接进系统回收站，库内不再产生新副本；历史库的副本冻结保留到期后清理。
+/// - `.workbench/` 与内容区里孤儿 `.ember-tmp-` 临时文件（>24h）：崩溃遗留，按
+///   原子写临时名整名精确匹配 + 普通文件校验，用户文件即使名字含该子串也不碰；
+/// - `.workbench/trash/<ULID>/`（>30 天）：删除降级到库内回收目录后的惰性回收
+///   （系统回收站可用时不会产生这类副本）。
 ///
 /// 全部失败只记日志不影响启动；mtime 不可读按保守不删处理。
-/// `.workbench/` 内的临时文件同样参与清扫：24h 年龄门槛远大于一次原子写的
-/// 存活时间，不会误删在途 temp。
+/// 24h 年龄门槛远大于一次原子写的存活时间，不会误删在途 temp。
 fn sweep_housekeeping(root: &Path) {
     let now = SystemTime::now();
-    let temps = sweep_orphan_temps(root, now);
+    let workbench = paths::workbench(root);
+    // `.workbench` 单独扫一遍；内容区扫描排除该子树，避免重复计数
+    let temps =
+        sweep_orphan_temps(&workbench, now, None) + sweep_orphan_temps(root, now, Some(&workbench));
     let claims = sweep_claim_copies(root, now);
     let trash = sweep_expired_trash(root, now);
     if temps > 0 || claims > 0 || trash > 0 {
@@ -335,7 +335,29 @@ fn sweep_claim_copies(root: &Path, now: SystemTime) -> usize {
     removed
 }
 
-fn sweep_orphan_temps(dir: &Path, now: SystemTime) -> usize {
+/// 原子写临时名形如 `.{目标文件名}.ember-tmp-{纳秒}-{序号}`（见 `atomic::temp_path`）。
+/// 只认整名精确匹配：用户自带 `.ember-tmp-` 子串的文件不得被当作孤儿。
+fn is_orphan_temp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some(index) = rest.rfind(".ember-tmp-") else {
+        return false;
+    };
+    if index == 0 {
+        return false;
+    }
+    let suffix = &rest[index + ".ember-tmp-".len()..];
+    let mut parts = suffix.split('-');
+    let (Some(nanos), Some(counter), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    [nanos, counter]
+        .iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn sweep_orphan_temps(dir: &Path, now: SystemTime, excluded: Option<&Path>) -> usize {
     let mut removed = 0usize;
     let entries = match fs::read_dir(dir) {
         Ok(value) => value,
@@ -343,17 +365,27 @@ fn sweep_orphan_temps(dir: &Path, now: SystemTime) -> usize {
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        if excluded == Some(path.as_path()) {
+            continue;
+        }
         match entry.file_type() {
             // 符号链接两臂都不命中（与 resolve 的拒链接策略一致）
             Ok(file_type) if file_type.is_dir() => {
-                removed += sweep_orphan_temps(&path, now);
+                removed += sweep_orphan_temps(&path, now, excluded);
             }
             Ok(file_type) if file_type.is_file() => {
                 let name = entry.file_name();
-                if !name.to_string_lossy().contains(".ember-tmp-") {
+                if !is_orphan_temp_name(&name.to_string_lossy()) {
                     continue;
                 }
                 if !older_than(&path, now, ORPHAN_TEMP_MAX_AGE) {
+                    continue;
+                }
+                // 删前复核：symlink_metadata 不跟随链接，符号链接一律跳过
+                let regular = fs::symlink_metadata(&path)
+                    .map(|meta| meta.file_type().is_file())
+                    .unwrap_or(false);
+                if !regular {
                     continue;
                 }
                 if fs::remove_file(&path).is_ok() {
@@ -632,7 +664,7 @@ mod tests {
     fn remove_missing_file_is_idempotent() {
         let temp = TempVault::new();
         // 内核做幂等对账：不存在就是成功，不报错、不产生回收站动作
-        temp.vault.remove("notes/never-existent.md").unwrap();
+        assert_eq!(temp.vault.remove("notes/never-existent.md").unwrap(), None);
         temp.vault.purge("notes/never-existent.md").unwrap();
     }
 
@@ -668,8 +700,9 @@ mod tests {
         let landed = system_trash_path(&name);
         assert!(!landed.exists(), "回收站不应已有同名残留：{}", landed.display());
 
-        temp.vault.remove(&relative).unwrap();
+        let destination = temp.vault.remove(&relative).unwrap();
 
+        assert_eq!(destination, Some(trash::TrashDestination::System));
         assert!(!source.exists(), "源文件必须离开库内");
         assert!(
             temp.vault
@@ -833,7 +866,7 @@ mod tests {
         let temp = TempVault::new();
         temp.vault.write("notes/a.md", b"body", "user").unwrap();
 
-        // 孤儿临时文件：崩溃遗留（mtime 拨旧 → 应被清扫）
+        // 内容区崩溃遗留的临时文件：与 .workbench 同样的精确匹配 + 超龄即回收
         let orphan = temp.root.join("notes").join(".a.md.ember-tmp-100-1");
         fs::write(&orphan, b"half").unwrap();
         backdate(&orphan);
@@ -855,18 +888,96 @@ mod tests {
         backdate(&expired_trash);
 
         let now = SystemTime::now();
-        let temps = sweep_orphan_temps(&temp.root, now);
+        let temps = sweep_orphan_temps(&paths::workbench(&temp.root), now, None)
+            + sweep_orphan_temps(&temp.root, now, Some(&paths::workbench(&temp.root)));
         let trash = sweep_expired_trash(&temp.root, now);
 
-        assert_eq!(temps, 2, "回收孤儿临时文件（含 .workbench 内部）");
+        assert_eq!(temps, 2, "回收 .workbench 与内容区的孤儿临时文件");
         assert_eq!(trash, 1, "只清理过期回收目录");
-        assert!(!orphan.exists(), "孤儿临时文件应被回收");
+        assert!(!orphan.exists(), "内容区超龄孤儿临时文件应被回收");
         assert!(fresh.exists(), "在途临时文件不得误删");
         assert!(!stale_internal.exists(), ".workbench 内超龄 temp 应被回收");
         assert!(fresh_internal.exists(), "在途 temp 不得误删");
         assert!(!expired_trash.exists(), "过期回收目录应被回收");
         assert!(fresh_trash.exists(), "保留期内的回收目录不得误删");
         assert!(temp.vault.read("notes/a.md").unwrap().is_some(), "正文不受清扫影响");
+    }
+
+    #[test]
+    fn housekeeping_sweeps_content_area_only_on_exact_orphan_names() {
+        let temp = TempVault::new();
+        let workbench = paths::workbench(&temp.root);
+        let notes = temp.root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        // 内容区精确名超龄 → 删
+        let exact = notes.join(".a.md.ember-tmp-100-1");
+        fs::write(&exact, b"orphan").unwrap();
+        backdate(&exact);
+        // 只含子串（缺纳秒/序号）→ 不删，库根与内容区各一
+        let lookalike_root = temp.root.join("report.ember-tmp-backup.md");
+        fs::write(&lookalike_root, b"user data").unwrap();
+        backdate(&lookalike_root);
+        let lookalike_notes = notes.join("notes.ember-tmp-backup.md");
+        fs::write(&lookalike_notes, b"user data").unwrap();
+        backdate(&lookalike_notes);
+        // 符号链接即使名字精确也不删
+        let target = notes.join("keep.txt");
+        fs::write(&target, b"keep").unwrap();
+        backdate(&target);
+        #[cfg(unix)]
+        {
+            let link = notes.join(".link.ember-tmp-100-2");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+        }
+
+        let removed = sweep_orphan_temps(&temp.root, SystemTime::now(), Some(&workbench));
+
+        assert_eq!(removed, 1);
+        assert!(!exact.exists(), "内容区精确名超龄 temp 应被回收");
+        assert!(lookalike_root.exists(), "只含子串的用户文件不得删除");
+        assert!(lookalike_notes.exists(), "只含子串的用户文件不得删除");
+        #[cfg(unix)]
+        {
+            assert!(target.exists(), "符号链接目标不得删除");
+            assert!(notes.join(".link.ember-tmp-100-2").symlink_metadata().is_ok());
+        }
+    }
+
+    #[test]
+    fn housekeeping_sweeps_only_exact_temp_names_in_workbench() {
+        let temp = TempVault::new();
+        let workbench = paths::workbench(&temp.root);
+        let exact = workbench.join(".lock.ember-tmp-100-1");
+        fs::write(&exact, b"stale").unwrap();
+        backdate(&exact);
+        // 只有子串命中（缺纳秒/序号）的文件不得删除
+        let embedded = workbench.join("notes.ember-tmp-backup.md");
+        fs::write(&embedded, b"user").unwrap();
+        backdate(&embedded);
+        // 符号链接即使名字精确也不删
+        let outside = tempfile_dir("ember-orphan-symlink");
+        fs::create_dir_all(&outside).unwrap();
+        let target = outside.join(".lock.ember-tmp-100-2");
+        fs::write(&target, b"outside").unwrap();
+        backdate(&target);
+        #[cfg(unix)]
+        {
+            let link = workbench.join(".x.ember-tmp-100-3");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+        }
+
+        let removed = sweep_orphan_temps(&workbench, SystemTime::now(), None);
+
+        assert_eq!(removed, 1);
+        assert!(!exact.exists(), "精确命名的超龄 temp 应被回收");
+        assert!(embedded.exists(), "子串命中不得删除");
+        #[cfg(unix)]
+        {
+            assert!(target.exists(), "符号链接目标不得删除");
+            let link = workbench.join(".x.ember-tmp-100-3");
+            assert!(link.symlink_metadata().is_ok(), "符号链接本身不得删除");
+        }
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
