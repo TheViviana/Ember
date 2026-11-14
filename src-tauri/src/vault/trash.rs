@@ -67,6 +67,43 @@ pub fn trash(root: &Path, absolute: &Path) -> VaultResult<TrashDestination> {
     }
 }
 
+/// 目录删除专用：只进系统回收站，系统回收站不可用即失败。
+///
+/// 与 [`trash`] 的区别只有一点：绝不降级到库内回收目录。目录删除会把整棵子树
+/// 一起移走，落点必须是用户能在系统回收站里一眼找到、可整体还原的地方；
+/// 库内回收目录（30 天后启动清扫）不适合承载这类批量删除，失败就保持原样。
+pub fn trash_system_only(root: &Path, absolute: &Path) -> VaultResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let system = trash_system(root, absolute);
+        if system.is_ok() {
+            return Ok(());
+        }
+        let finder = trash_via_finder(absolute);
+        if finder.is_ok() {
+            return Ok(());
+        }
+        let detail = match (system, finder) {
+            (Err(system_error), Err(finder_error)) => {
+                format!("：{system_error}；Finder 代删也失败：{finder_error}")
+            }
+            _ => String::new(),
+        };
+        Err(io_at(
+            absolute,
+            &format!("系统回收站不可用，文件夹保持原样{detail}"),
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        Err(io_at(
+            absolute,
+            "当前平台不支持系统回收站，文件夹删除被拒绝（不会降级为库内回收或永久删除）",
+        ))
+    }
+}
+
 /// 把 `absolute` 移入系统回收站，并校验转移结果。
 ///
 /// 校验项（任一不满足即报错，源文件已无法回滚，但绝不留下「以为删了实际还在」的假象）：

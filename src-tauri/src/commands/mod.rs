@@ -181,6 +181,30 @@ pub async fn vault_list(state: State<'_, VaultApp>) -> VaultResult<Vec<String>> 
     session.vault()?.list()
 }
 
+/// 新建单层文件夹：父目录必须已存在；命名与保留路径在 Rust 侧独立校验。
+#[tauri::command]
+pub async fn vault_create_dir(
+    state: State<'_, VaultApp>,
+    path: String,
+) -> VaultResult<String> {
+    let session = state.session()?;
+    session.vault()?.create_dir(&path)
+}
+
+/// 删除文件夹：只进系统回收站，系统回收站不可用即失败（不降级库内回收）。
+#[tauri::command]
+pub async fn vault_remove_dir(state: State<'_, VaultApp>, path: String) -> VaultResult<()> {
+    let session = state.session()?;
+    session.vault()?.remove_dir(&path)
+}
+
+/// 全库目录清单（含空目录），供文档树与「移动到…」使用。
+#[tauri::command]
+pub async fn vault_list_dirs(state: State<'_, VaultApp>) -> VaultResult<Vec<String>> {
+    let session = state.session()?;
+    session.vault()?.list_dirs()
+}
+
 #[tauri::command]
 pub async fn vault_list_canvases(state: State<'_, VaultApp>) -> VaultResult<Vec<String>> {
     let session = state.session()?;

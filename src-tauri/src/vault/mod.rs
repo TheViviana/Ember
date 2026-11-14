@@ -278,6 +278,100 @@ impl Vault {
         Ok(())
     }
 
+    /// 新建单层文件夹：父目录必须已存在，命名与保留路径在这里独立校验。
+    /// 返回归一化后的相对路径。
+    pub fn create_dir(&self, relative: &str) -> VaultResult<String> {
+        self.ensure_writable()?;
+        let (absolute, normalized) = paths::resolve(&self.root, relative)?;
+        validate_dir_name(&normalized)?;
+        paths::ensure_not_reserved(&normalized)?;
+        let parent = absolute
+            .parent()
+            .ok_or_else(|| VaultError::PathOutside(relative.to_string()))?;
+        let _gate = self.begin_write()?;
+        // 父目录缺失时明确报错，而不是让 fs::create_dir 抛一个没有上下文的 ENOENT。
+        match fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(VaultError::NotFound(format!(
+                    "上级路径不是文件夹：{}",
+                    parent.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(VaultError::NotFound(format!(
+                    "上级文件夹不存在：{}",
+                    parent.display()
+                )));
+            }
+            Err(error) => return Err(with_path(error.into(), parent)),
+        }
+        // 同名目录与同名文件的文案分开，前端可直接展示。
+        match fs::symlink_metadata(&absolute) {
+            Ok(metadata) if metadata.is_dir() => {
+                return Err(VaultError::PathExists(format!(
+                    "同名文件夹已存在：{normalized}"
+                )));
+            }
+            Ok(_) => {
+                return Err(VaultError::PathExists(format!(
+                    "已有同名文件：{normalized}"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(with_path(error.into(), &absolute)),
+        }
+        match fs::create_dir(&absolute) {
+            Ok(()) => Ok(normalized),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(VaultError::PathExists(format!(
+                    "同名文件夹已存在：{normalized}"
+                )))
+            }
+            Err(error) => Err(with_path(error.into(), &absolute)),
+        }
+    }
+
+    /// 删除文件夹：只进系统回收站，系统回收站不可用即失败（不降级库内、不直接删除）。
+    /// 只删空文件夹——非空目录可能装着整棵文档树，批量入篓超出「删文件夹」的语义。
+    /// 目录本就不存在时视为成功，便于幂等对账。
+    pub fn remove_dir(&self, relative: &str) -> VaultResult<()> {
+        self.ensure_writable()?;
+        let (absolute, normalized) = paths::resolve(&self.root, relative)?;
+        paths::ensure_not_reserved(&normalized)?;
+        let _gate = self.begin_write()?;
+        let metadata = match fs::symlink_metadata(&absolute) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(with_path(error.into(), &absolute)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(VaultError::IoAt {
+                path: absolute.display().to_string(),
+                message: "只能删除文件夹（符号链接与普通文件请走文章删除）".to_string(),
+            });
+        }
+        let mut entries =
+            fs::read_dir(&absolute).map_err(|error| with_path(error.into(), &absolute))?;
+        if entries.next().is_some() {
+            return Err(VaultError::IoAt {
+                path: absolute.display().to_string(),
+                message: "文件夹不为空，请先移走其中的文档".to_string(),
+            });
+        }
+        trash::trash_system_only(&self.root, &absolute)
+    }
+
+    /// 全库目录清单（相对 POSIX 路径，字典序）：空目录也会出现，供文档树与「移动到…」使用。
+    /// 跳过规则与 `list` 一致，额外排除 `media/`（内核自管存储）与保留路径；不跟随符号链接。
+    pub fn list_dirs(&self) -> VaultResult<Vec<String>> {
+        let ignored = ignored_dirs(&self.root);
+        let mut dirs = Vec::new();
+        collect_dirs(&self.root, &self.root, &ignored, &mut dirs)?;
+        dirs.sort();
+        Ok(dirs)
+    }
+
     /// 全库 Markdown 文件清单（相对 POSIX 路径，字典序），跳过 `.workbench/`、
     /// 隐藏目录与忽略目录（`node_modules`、`.git` 及 settings 配置项）。
     pub fn list(&self) -> VaultResult<Vec<String>> {
@@ -359,6 +453,37 @@ impl Vault {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(gate)
     }
+}
+
+/// 用户可见文件夹名的后端校验：只看归一化路径的最后一段。
+/// 前端与服务层各有同一套规则，这里独立再判一次，不信任调用方。
+fn validate_dir_name(normalized: &str) -> VaultResult<()> {
+    let name = normalized.rsplit('/').next().unwrap_or(normalized);
+    let reject = |message: &str| Err(VaultError::Encoding(message.to_string()));
+    if name.is_empty() {
+        return reject("文件夹名称不能为空");
+    }
+    if name == "." || name == ".." {
+        return reject("文件夹名称不能是 . 或 ..");
+    }
+    if name.contains('/') || name.contains('\\') {
+        return reject("文件夹名称不能包含斜杠");
+    }
+    // 隐藏目录不进入库索引范围，用户也不该从 UI 造出看不见的文件夹。
+    // 逐段检查：直接 IPC 传入 `.workbench/x` 这类路径同样要拦住。
+    if normalized
+        .split('/')
+        .any(|segment| segment.starts_with('.'))
+    {
+        return reject("路径不能包含隐藏目录");
+    }
+    if name.eq_ignore_ascii_case(paths::MEDIA_DIR) {
+        return reject("media 是库保留目录，不能用作文件夹名");
+    }
+    if name.chars().any(|character| character.is_control()) {
+        return reject("文件夹名称包含非法字符");
+    }
+    Ok(())
 }
 
 /// 给 IO 错误补上绝对磁盘路径，便于用户直接定位文件。
@@ -573,6 +698,42 @@ fn identity_from(text: &str) -> VaultResult<String> {
         return Err(VaultError::Uninitialized);
     }
     Ok(id.to_string())
+}
+
+/// 目录清单遍历：与 `collect_documents` 同一套跳过规则，但不要求目录里有 `.md`，
+/// 因此空目录（含多级空目录）也会被收录。
+fn collect_dirs(
+    root: &Path,
+    dir: &Path,
+    ignored: &[String],
+    out: &mut Vec<String>,
+) -> VaultResult<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == paths::WORKBENCH_DIR || name.starts_with('.') || is_ignored_dir(&name, ignored) {
+            continue;
+        }
+        // file_type 不跟随符号链接：指向库外的目录链接在这里直接跳过。
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let relative = match entry.path().strip_prefix(root) {
+            Ok(value) => value.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+        if relative == paths::MEDIA_DIR || paths::is_reserved(&relative) {
+            continue;
+        }
+        out.push(relative);
+        collect_dirs(root, &entry.path(), ignored, out)?;
+    }
+    Ok(())
 }
 
 fn collect_documents(
@@ -1225,6 +1386,81 @@ mod tests {
         assert!(vault.writable());
         drop(vault);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn create_dir_rejects_invalid_names_and_missing_parent() {
+        let temp = TempVault::new();
+        for path in [
+            "",
+            ".",
+            "..",
+            ".hidden",
+            ".workbench/nested",
+            "media",
+            "MEDIA",
+            "a\\b",
+            "bad\u{0}name",
+        ] {
+            let error = temp.vault.create_dir(path).unwrap_err();
+            assert!(
+                matches!(error, VaultError::Encoding(_) | VaultError::PathOutside(_)),
+                "应拒绝 {path}：{error}"
+            );
+        }
+        let error = temp.vault.create_dir("missing/child").unwrap_err();
+        assert!(matches!(error, VaultError::NotFound(_)), "父目录缺失应报不存在：{error}");
+    }
+
+    #[test]
+    fn create_dir_reports_same_name_dir_and_file() {
+        let temp = TempVault::new();
+        assert_eq!(temp.vault.create_dir("notes").unwrap(), "notes");
+
+        let error = temp.vault.create_dir("notes").unwrap_err();
+        assert_eq!(error.code(), "path_exists");
+        assert!(error.to_string().contains("同名文件夹"), "{error}");
+
+        temp.vault.write("root.md", b"x", "user").unwrap();
+        let error = temp.vault.create_dir("root.md").unwrap_err();
+        assert_eq!(error.code(), "path_exists");
+        assert!(error.to_string().contains("同名文件"), "{error}");
+    }
+
+    #[test]
+    fn list_dirs_includes_empty_directories_and_skips_ignored() {
+        let temp = TempVault::new();
+        temp.vault.create_dir("empty").unwrap();
+        temp.vault.create_dir("empty/deep").unwrap();
+        temp.vault.create_dir("notes").unwrap();
+        temp.vault.write("notes/a.md", b"x", "user").unwrap();
+        fs::create_dir_all(temp.root.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(temp.root.join(".hidden")).unwrap();
+        fs::create_dir_all(temp.root.join("media/ab")).unwrap();
+
+        assert_eq!(
+            temp.vault.list_dirs().unwrap(),
+            vec!["empty".to_string(), "empty/deep".to_string(), "notes".to_string()]
+        );
+    }
+
+    #[test]
+    fn remove_dir_rejects_files_non_empty_dirs_and_reserved_paths() {
+        let temp = TempVault::new();
+        temp.vault.write("a.md", b"x", "user").unwrap();
+        let error = temp.vault.remove_dir("a.md").unwrap_err();
+        assert_eq!(error.code(), "io_failed");
+        assert!(error.to_string().contains("只能删除文件夹"), "{error}");
+
+        temp.vault.create_dir("notes").unwrap();
+        temp.vault.write("notes/a.md", b"x", "user").unwrap();
+        let error = temp.vault.remove_dir("notes").unwrap_err();
+        assert!(error.to_string().contains("文件夹不为空"), "{error}");
+
+        let error = temp.vault.remove_dir(".workbench").unwrap_err();
+        assert_eq!(error.code(), "path_outside_vault");
+        // 不存在的目录视为已删除，便于幂等对账。
+        temp.vault.remove_dir("gone").unwrap();
     }
 
     #[cfg(unix)]
