@@ -247,6 +247,17 @@ pub async fn asset_read(
     media::read(session.vault()?, &path)
 }
 
+/// 正文图片解析：按文章目录 → 文章目录/images → 库根依次探测，只读、不改正文。
+#[tauri::command]
+pub async fn asset_resolve(
+    state: State<'_, VaultApp>,
+    document_path: String,
+    reference: String,
+) -> VaultResult<media::ImageResolution> {
+    let session = state.session()?;
+    media::resolve_reference(session.vault()?, &document_path, &reference)
+}
+
 /// 导入图片：校验白名单类型 / magic bytes / 20 MB 上限，按 sha256 内容寻址去重。
 #[tauri::command]
 pub async fn asset_save(

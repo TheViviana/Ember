@@ -32,12 +32,39 @@ export interface AssetSaved {
   readonly deduped: boolean;
 }
 
-/** `media/` 下全部合法图片，相对路径字典序。 */
+/** 正文图片解析结果；缺失时带原因码，供占位文案使用。 */
+export type ImageResolution =
+  | {
+      readonly status: 'found';
+      readonly path: string;
+      readonly mime: string;
+      readonly bytes: number;
+      readonly data: string;
+    }
+  | {
+      readonly status: 'missing';
+      readonly reason:
+        | 'notFound'
+        | 'outsideVault'
+        | 'unsupportedType'
+        | 'tooLarge'
+        | 'unreadable'
+        | 'external';
+    };
+
+/** `media/` 内容寻址资产 + 指针型库中按真实布局散落的磁盘图片。 */
 export const listAssets = (): Promise<readonly AssetEntry[]> =>
   invoke<readonly AssetEntry[]>('asset_list');
 
-/** 读单张图片；只接受 `media/` 下的资产路径。 */
+/** 读单张图片；`media/` 走内容寻址，其余走库内磁盘图片安全校验。 */
 export const readAsset = (path: string): Promise<AssetData> => invoke<AssetData>('asset_read', { path });
+
+/**
+ * 按文章路径解析正文图片引用：文章目录 → 文章目录/images → 库根，命中即停。
+ * 只读，不改正文；缺失时返回原因而不抛错。
+ */
+export const resolveArticleImage = (documentPath: string, reference: string): Promise<ImageResolution> =>
+  invoke<ImageResolution>('asset_resolve', { documentPath, reference });
 
 /** 导入图片：内容与声明的 MIME 必须一致，同内容返回 deduped。 */
 export const saveAsset = (data: string, mime: string): Promise<AssetSaved> =>

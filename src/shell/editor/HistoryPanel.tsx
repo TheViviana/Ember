@@ -193,7 +193,11 @@ export const HistoryPanel = ({
                   {String(preview.data.entry.path)}
                 </p>
                 <div className={styles.previewBody}>
-                  <ReadingView markdown={preview.data.text} onWikiLink={() => undefined} />
+                  <ReadingView
+                    markdown={preview.data.text}
+                    documentPath={preview.data.entry.path}
+                    onWikiLink={() => undefined}
+                  />
                 </div>
               </>
             )}

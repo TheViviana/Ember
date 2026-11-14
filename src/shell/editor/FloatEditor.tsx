@@ -110,6 +110,8 @@ export const FloatEditor = ({
   const { setWikiPrompt, wikiPrompt } = doc;
   const focused = frame.focused;
   const phaseInfo = PHASE[doc.phase];
+  /** 正文图片的解析基准：文章在库内的当前路径 */
+  const documentPath = doc.documents.data?.find((entry) => entry.id === docId)?.path ?? null;
 
   useEffect(() => {
     if (!active) {
@@ -462,6 +464,7 @@ export const FloatEditor = ({
         {mode === 'read' ? (
           <ReadingView
             markdown={doc.readMarkdown}
+            documentPath={documentPath}
             onWikiLink={doc.openWikiTarget}
             translations={translateState.entries}
             note={translateState.note}

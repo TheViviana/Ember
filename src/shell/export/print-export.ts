@@ -1,6 +1,5 @@
 import { splitFrontmatter, type DocId } from '#doc-model';
-import { readAsset } from '../../data/tauri/asset-port.ts';
-import { localAssetPath } from '../editor/reading-asset.ts';
+import { resolveArticleImage } from '../../data/tauri/asset-port.ts';
 import { readingBlocks, type ReadBlock, type ReadInline } from '../canvas/read-markdown.ts';
 import type { KernelContext } from '../../kernel/context.ts';
 import { toErrorText } from '../../kernel/errors.ts';
@@ -9,7 +8,7 @@ import { toErrorText } from '../../kernel/errors.ts';
  * 导出当前文档 PDF：正文走内核唯一的 Markdown 解析管线（readingBlocks），
  * 组装成打印用 HTML 后丢进隐藏 iframe 调 print() —— 走系统打印对话框的
  * 「存储为 PDF」，不装任何导出依赖，也不引用外域资源。
- * 图片：media/ 资产读盘转 data URL 内嵌；外链一律跳过（运行时零联网）。
+ * 图片：按文章路径解析（文章目录 → images → 库根）后内嵌 data URL；外链一律跳过（运行时零联网）。
  */
 
 const escapeHtml = (text: string): string =>
@@ -21,17 +20,19 @@ const escapeHtml = (text: string): string =>
 
 type ImageResolver = (src: string) => Promise<string | null>;
 
-const makeImageResolver = (log: KernelContext['log']): ImageResolver => async (src) => {
+const makeImageResolver = (log: KernelContext['log'], documentPath: string): ImageResolver => async (src) => {
   const trimmed = src.trim();
   if (trimmed.startsWith('data:')) return trimmed;
-  const assetPath = localAssetPath(trimmed);
-  if (assetPath === null) return null;
   try {
-    const asset = await readAsset(assetPath);
-    return `data:${asset.mime};base64,${asset.data}`;
+    const resolved = await resolveArticleImage(documentPath, trimmed);
+    if (resolved.status === 'missing') {
+      log.error('导出 PDF：图片未解析到，已跳过该图', { path: trimmed, reason: resolved.reason });
+      return null;
+    }
+    return `data:${resolved.mime};base64,${resolved.data}`;
   } catch (error) {
     // 导出时跳过读不出的图片，但要留下线索：否则导出件里少图没有任何原因可查
-    log.error('导出 PDF：图片资产读取失败，已跳过该图', { path: assetPath, error: toErrorText(error) });
+    log.error('导出 PDF：图片读取失败，已跳过该图', { path: trimmed, error: toErrorText(error) });
     return null;
   }
 };
@@ -198,7 +199,7 @@ export const exportDocPdf = async (kernel: KernelContext, docId: DocId, title: s
   const snapshot = await kernel.docs.read(docId);
   const body = splitFrontmatter(snapshot.text).body;
   const blocks = readingBlocks(body);
-  const bodyHtml = await blocksToHtml(blocks, makeImageResolver(kernel.log));
+  const bodyHtml = await blocksToHtml(blocks, makeImageResolver(kernel.log, snapshot.meta.path));
   const displayTitle = title.trim().length === 0 ? '未命名文档' : title.trim();
   await printHtml(displayTitle, bodyHtml);
 };

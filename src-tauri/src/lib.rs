@@ -51,6 +51,7 @@ pub fn run() {
             commands::vault_scan,
             commands::asset_list,
             commands::asset_read,
+            commands::asset_resolve,
             commands::asset_save,
             commands::asset_delete,
             commands::machine_ui_read,

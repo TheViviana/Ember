@@ -146,6 +146,11 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
     queryFn: async () => {
       const map = new Map<string, UsageInfo['canvasRefs']>();
       for (const asset of assets.data ?? []) {
+        // 画布图片节点只引用 media/ 资产；磁盘图片无需逐张全画布扫描
+        if (!asset.path.startsWith('media/')) {
+          map.set(asset.path, []);
+          continue;
+        }
         const locations = await kernel.canvas.locateAsset(asset.path);
         map.set(
           asset.path,

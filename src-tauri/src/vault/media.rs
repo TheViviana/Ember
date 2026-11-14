@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -19,6 +20,9 @@ pub const MAX_ASSET_BYTES: u64 = 20 * 1024 * 1024;
 /// 图库图片数量上限。
 pub const MAX_ASSETS: usize = 400;
 
+/// 指针型库的图片按真实布局散落在文章目录里，扫描深度必须有界，避免异常目录树。
+const MAX_SCAN_DEPTH: usize = 32;
+
 /// 图库扩展名白名单。刻意不含 svg：它是 XML，可以内嵌脚本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageFormat {
@@ -27,6 +31,8 @@ pub enum ImageFormat {
     Gif,
     Webp,
     Avif,
+    /// 仅用于按磁盘布局只读；asset_save 不接受（from_mime 仍不含 bmp）
+    Bmp,
 }
 
 impl ImageFormat {
@@ -37,6 +43,7 @@ impl ImageFormat {
             ImageFormat::Gif => "image/gif",
             ImageFormat::Webp => "image/webp",
             ImageFormat::Avif => "image/avif",
+            ImageFormat::Bmp => "image/bmp",
         }
     }
 
@@ -47,6 +54,7 @@ impl ImageFormat {
             ImageFormat::Gif => "gif",
             ImageFormat::Webp => "webp",
             ImageFormat::Avif => "avif",
+            ImageFormat::Bmp => "bmp",
         }
     }
 
@@ -68,6 +76,7 @@ impl ImageFormat {
             "gif" => Some(ImageFormat::Gif),
             "webp" => Some(ImageFormat::Webp),
             "avif" => Some(ImageFormat::Avif),
+            "bmp" => Some(ImageFormat::Bmp),
             _ => None,
         }
     }
@@ -88,6 +97,9 @@ impl ImageFormat {
         }
         if is_avif(bytes) {
             return Some(ImageFormat::Avif);
+        }
+        if bytes.starts_with(b"BM") {
+            return Some(ImageFormat::Bmp);
         }
         None
     }
@@ -145,8 +157,18 @@ pub struct AssetSaved {
     pub deduped: bool,
 }
 
-/// 全库图片清单（相对 POSIX 路径字典序）。目录不存在时返回空表。
+/// 图库清单：内容寻址的 `media/` 资产 + 指针型库里按真实布局散落的磁盘图片。
+/// 磁盘图片只做元数据扫描，不读内容、不解码。
 pub fn list(vault: &Vault) -> VaultResult<Vec<AssetEntry>> {
+    let mut entries = list_media(vault)?;
+    let mut seen: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
+    collect_disk_images(vault.root(), vault.root(), 0, &mut entries, &mut seen)?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(entries)
+}
+
+/// 仅内容寻址的 `media/` 资产（配额判断必须用它，不能被磁盘图片撑爆）。
+fn list_media(vault: &Vault) -> VaultResult<Vec<AssetEntry>> {
     let mut entries = Vec::new();
     let root = vault.root().join(MEDIA_DIR);
     let shards = match fs::read_dir(&root) {
@@ -194,9 +216,87 @@ pub fn list(vault: &Vault) -> VaultResult<Vec<AssetEntry>> {
     Ok(entries)
 }
 
+/// 递归收集磁盘图片。隐藏目录（`.workbench`/`.git`）、`media/` 与符号链接一律跳过；
+/// 只收白名单扩展名，`hash` 留空表示不是内容寻址资产。
+fn collect_disk_images(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    entries: &mut Vec<AssetEntry>,
+    seen: &mut HashSet<String>,
+) -> VaultResult<()> {
+    if depth > MAX_SCAN_DEPTH {
+        return Ok(());
+    }
+    let children = match fs::read_dir(dir) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for child in children {
+        let child = child?;
+        let name = child.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let file_type = child.file_type()?;
+        // 不跟随符号链接：目录和文件都直接跳过
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if depth == 0 && name == MEDIA_DIR {
+                continue;
+            }
+            collect_disk_images(root, &child.path(), depth + 1, entries, seen)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(format) = image_format_from_name(&name) else {
+            continue;
+        };
+        let child_path = child.path();
+        let Ok(relative) = child_path.strip_prefix(root) else {
+            continue;
+        };
+        let Some(relative) = relative.to_str() else {
+            continue;
+        };
+        let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
+        if !seen.insert(relative.clone()) {
+            continue;
+        }
+        entries.push(AssetEntry {
+            path: relative,
+            name,
+            hash: String::new(),
+            mime: format.mime().to_string(),
+            bytes: child.metadata()?.len(),
+        });
+    }
+    Ok(())
+}
+
+fn image_format_from_name(name: &str) -> Option<ImageFormat> {
+    let (_, ext) = name.rsplit_once('.')?;
+    ImageFormat::from_ext(ext)
+}
+
 /// 读单张图片，返回 base64 与按内容判定的 MIME。
+/// `media/` 路径保持原有的严格内容寻址校验；其余路径按库内磁盘图片读取。
 pub fn read(vault: &Vault, relative: &str) -> VaultResult<AssetData> {
-    // asset_read 只允许读图库目录，绝不能借它读 .workbench/ 或任意库内文件
+    let probe = relative.strip_prefix("./").unwrap_or(relative);
+    // 名字落在 media/ 下就仍走内容寻址校验，不能借新路径绕过
+    let media_prefix = format!("{MEDIA_DIR}/");
+    if probe == MEDIA_DIR || probe.starts_with(media_prefix.as_str()) {
+        return read_media(vault, probe);
+    }
+    read_disk_image(vault, relative)
+}
+
+fn read_media(vault: &Vault, relative: &str) -> VaultResult<AssetData> {
     let (_, format) =
         asset_parts(relative).ok_or_else(|| VaultError::PathOutside(relative.to_string()))?;
     let (absolute, normalized) = paths::resolve(vault.root(), relative)?;
@@ -228,6 +328,181 @@ pub fn read(vault: &Vault, relative: &str) -> VaultResult<AssetData> {
         data: STANDARD.encode(&bytes),
     })
 }
+
+/// 按磁盘真实布局只读一张图片。安全边界：
+/// 路径必须落在库根内、任一级都不能是符号链接、扩展名白名单、常规文件、≤20 MB、
+/// 内容必须通过图片 magic 判型（防止把 HTML/脚本改名成 .png 读出）。
+fn read_disk_image(vault: &Vault, relative: &str) -> VaultResult<AssetData> {
+    let (absolute, normalized) = paths::resolve(vault.root(), relative)?;
+    if normalized
+        .split('/')
+        .any(|segment| segment.is_empty() || segment.starts_with('.'))
+    {
+        return Err(VaultError::PathOutside(relative.to_string()));
+    }
+    let name = normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or(normalized.as_str());
+    if image_format_from_name(name).is_none() {
+        return Err(VaultError::Encoding(format!(
+            "不是支持的图片扩展名：{relative}"
+        )));
+    }
+    // canonicalize 会解析符号链接；paths::resolve 已拒绝链接，这里再做一次落点复核
+    let canonical_root = vault
+        .root()
+        .canonicalize()
+        .map_err(|error| io_at(error, vault.root()))?;
+    let canonical = match absolute.canonicalize() {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(VaultError::NotFound(relative.to_string()));
+        }
+        Err(error) => return Err(io_at(error, &absolute)),
+    };
+    if !canonical.starts_with(&canonical_root) {
+        return Err(VaultError::PathOutside(relative.to_string()));
+    }
+    let metadata = match fs::metadata(&canonical) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(VaultError::NotFound(relative.to_string()));
+        }
+        Err(error) => return Err(io_at(error, &canonical)),
+    };
+    if !metadata.is_file() {
+        return Err(VaultError::NotFound(relative.to_string()));
+    }
+    if metadata.len() > MAX_ASSET_BYTES {
+        return Err(VaultError::Encoding(format!(
+            "图片超过读入上限 {MAX_ASSET_BYTES} 字节：{relative}"
+        )));
+    }
+    let bytes = fs::read(&canonical).map_err(|error| io_at(error, &canonical))?;
+    let Some(format) = ImageFormat::sniff(&bytes) else {
+        return Err(VaultError::Encoding(format!(
+            "无法识别的图片内容：{relative}"
+        )));
+    };
+    Ok(AssetData {
+        path: normalized,
+        mime: format.mime().to_string(),
+        bytes: bytes.len() as u64,
+        data: STANDARD.encode(&bytes),
+    })
+}
+
+/// 文章图片解析结果：命中带数据，未命中带可读原因；不写盘、不改正文。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum ImageResolution {
+    Found {
+        path: String,
+        mime: String,
+        bytes: u64,
+        data: String,
+    },
+    Missing {
+        reason: &'static str,
+    },
+}
+
+/// B 方案候选链（命中即停）：
+/// 1. `<文章所在目录>/<原始引用>`；2. `<文章所在目录>/images/<原始引用>`；3. `<库根>/<原始引用>`。
+/// 引用只按字面处理，不联网、不解析外链。
+pub fn resolve_reference(
+    vault: &Vault,
+    document_path: &str,
+    reference: &str,
+) -> VaultResult<ImageResolution> {
+    let raw = reference.trim();
+    if raw.is_empty() {
+        return Ok(ImageResolution::Missing { reason: "notFound" });
+    }
+    if has_scheme(raw) {
+        return Ok(ImageResolution::Missing { reason: "external" });
+    }
+    // Obsidian 允许用 `/` 表示库根；统一去掉前导斜杠后再按候选链解析
+    let name = raw.trim_start_matches('/').trim_start_matches("./");
+    if name.is_empty() {
+        return Ok(ImageResolution::Missing { reason: "notFound" });
+    }
+    let bare = name.rsplit('/').next().unwrap_or(name);
+    if image_format_from_name(bare).is_none() {
+        return Ok(ImageResolution::Missing {
+            reason: "unsupportedType",
+        });
+    }
+
+    let mut candidates: Vec<String> = Vec::new();
+    if !document_path.trim().is_empty() {
+        let (_, doc_normalized) = match paths::resolve(vault.root(), document_path) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(ImageResolution::Missing {
+                    reason: "outsideVault",
+                });
+            }
+        };
+        let dir = doc_normalized
+            .rsplit_once('/')
+            .map(|(dir, _)| dir)
+            .unwrap_or("");
+        if dir.is_empty() {
+            candidates.push(format!("images/{name}"));
+        } else {
+            candidates.push(format!("{dir}/{name}"));
+            candidates.push(format!("{dir}/images/{name}"));
+        }
+    }
+    candidates.push(name.to_string());
+
+    let mut reason = "notFound";
+    for candidate in candidates {
+        match read_disk_image(vault, &candidate) {
+            Ok(data) => {
+                return Ok(ImageResolution::Found {
+                    path: data.path,
+                    mime: data.mime,
+                    bytes: data.bytes,
+                    data: data.data,
+                });
+            }
+            Err(VaultError::NotFound(_)) => {}
+            Err(VaultError::PathOutside(_)) => reason = "outsideVault",
+            Err(VaultError::Encoding(message)) => {
+                reason = if message.contains("20 MB") || message.contains("读入上限") {
+                    "tooLarge"
+                } else {
+                    "unsupportedType"
+                };
+            }
+            Err(VaultError::Io(_)) | Err(VaultError::IoAt { .. }) => reason = "unreadable",
+            Err(_) => reason = "unreadable",
+        }
+    }
+    Ok(ImageResolution::Missing { reason })
+}
+
+/// `scheme:` 形式（如 https:/data:/file:）不进入候选链，避免把外链当本地路径猜。
+fn has_scheme(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    for c in chars {
+        if c == ':' {
+            return true;
+        }
+        if !(c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') {
+            return false;
+        }
+    }
+    false
+}
+
 
 /// 删除单张图库图片：与文档删除同一落点——移入系统回收站，绝不直接永久删除。
 /// 路径校验与 read 相同（只接受 `media/<两位分片>/<文件名>`，防目录穿越）；
@@ -283,7 +558,7 @@ pub fn save(vault: &Vault, bytes: &[u8], mime: &str) -> VaultResult<AssetSaved> 
     // 代价是配额存在极小的超限竞态：并发 asset_save 可能都读到 399 再各写一张，
     // 超出量以并发导入数为上限（UI 串行导入时不会发生），属可接受的软配额。
     let mut deduped = absolute.is_file();
-    if !deduped && list(vault)?.len() >= MAX_ASSETS {
+    if !deduped && list_media(vault)?.len() >= MAX_ASSETS {
         return Err(VaultError::Encoding(format!(
             "图库已达 {MAX_ASSETS} 张上限，先删除不用的图片再导入"
         )));
@@ -602,9 +877,10 @@ mod tests {
             read(&vault, ".workbench/settings.json").unwrap_err(),
             VaultError::PathOutside(_)
         ));
+        // 非图片扩展名不会进入磁盘图片读取（B 方案的解析范围只到图片）
         assert!(matches!(
             read(&vault, "notes/readme.md").unwrap_err(),
-            VaultError::PathOutside(_)
+            VaultError::Encoding(_)
         ));
         assert!(matches!(
             read(&vault, "media/zz/whatever.png").unwrap_err(),
@@ -633,5 +909,174 @@ mod tests {
             VaultError::Readonly
         ));
         assert!(!save(&owner, PNG, "image/png").unwrap().deduped);
+    }
+
+    #[test]
+    fn resolve_reference_follows_disk_layout() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        let article = "notes/论文/论文.md";
+        fs::create_dir_all(vault.root().join("notes/论文/images")).unwrap();
+        fs::write(vault.root().join(article), b"# x").unwrap();
+
+        // 第 2 层：文章目录/images/<raw>
+        fs::write(vault.root().join("notes/论文/images/pic.png"), PNG).unwrap();
+        let found = resolve_reference(&vault, article, "pic.png").unwrap();
+        match found {
+            ImageResolution::Found { path, mime, bytes, .. } => {
+                assert_eq!(path, "notes/论文/images/pic.png");
+                assert_eq!(mime, "image/png");
+                assert_eq!(bytes, PNG.len() as u64);
+            }
+            ImageResolution::Missing { reason } => panic!("应命中文章 images 目录，实际 {reason}"),
+        }
+
+        // 第 1 层优先于第 2 层
+        fs::write(vault.root().join("notes/论文/pic.png"), JPEG).unwrap();
+        let first = resolve_reference(&vault, article, "pic.png").unwrap();
+        assert!(matches!(
+            first,
+            ImageResolution::Found { ref path, ref mime, .. }
+                if path == "notes/论文/pic.png" && mime == "image/jpeg"
+        ));
+
+        // 第 3 层：库根
+        fs::write(vault.root().join("cover.jpg"), JPEG).unwrap();
+        let root_hit = resolve_reference(&vault, article, "cover.jpg").unwrap();
+        assert!(matches!(
+            root_hit,
+            ImageResolution::Found { ref path, .. } if path == "cover.jpg"
+        ));
+    }
+
+    #[test]
+    fn resolve_reference_reports_reasons() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        let article = "notes/论文/论文.md";
+        fs::create_dir_all(vault.root().join("notes/论文")).unwrap();
+        fs::write(vault.root().join(article), b"# x").unwrap();
+
+        assert!(matches!(
+            resolve_reference(&vault, article, "missing.png").unwrap(),
+            ImageResolution::Missing { reason: "notFound" }
+        ));
+        assert!(matches!(
+            resolve_reference(&vault, article, "vector.svg").unwrap(),
+            ImageResolution::Missing {
+                reason: "unsupportedType"
+            }
+        ));
+        let external = format!("{}//{}", "https:", "example.com/a.png");
+        assert!(matches!(
+            resolve_reference(&vault, article, &external).unwrap(),
+            ImageResolution::Missing { reason: "external" }
+        ));
+        assert!(matches!(
+            resolve_reference(&vault, article, "../../outside.png").unwrap(),
+            ImageResolution::Missing {
+                reason: "outsideVault"
+            }
+        ));
+    }
+
+    #[test]
+    fn resolve_reference_rejects_symlink_escape() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        let article = "notes/论文/论文.md";
+        fs::create_dir_all(vault.root().join("notes/论文/images")).unwrap();
+        fs::write(vault.root().join(article), b"# x").unwrap();
+
+        let outside = temp.root.join("outside.png");
+        fs::write(&outside, PNG).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, vault.root().join("notes/论文/images/leak.png")).unwrap();
+
+        assert!(matches!(
+            resolve_reference(&vault, article, "leak.png").unwrap(),
+            ImageResolution::Missing {
+                reason: "outsideVault"
+            }
+        ));
+    }
+
+    #[test]
+    fn read_accepts_disk_images_and_checks_content() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        fs::create_dir_all(vault.root().join("notes/论文/images")).unwrap();
+
+        fs::write(vault.root().join("notes/论文/images/pic.png"), PNG).unwrap();
+        let data = read(&vault, "notes/论文/images/pic.png").unwrap();
+        assert_eq!(data.mime, "image/png");
+        assert_eq!(STANDARD.decode(data.data.as_bytes()).unwrap(), PNG);
+
+        fs::write(vault.root().join("notes/论文/fake.png"), b"<html>x</html>").unwrap();
+        assert!(matches!(
+            read(&vault, "notes/论文/fake.png").unwrap_err(),
+            VaultError::Encoding(_)
+        ));
+
+        fs::create_dir_all(vault.root().join(".secret")).unwrap();
+        fs::write(vault.root().join(".secret/pic.png"), PNG).unwrap();
+        assert!(matches!(
+            read(&vault, ".secret/pic.png").unwrap_err(),
+            VaultError::PathOutside(_)
+        ));
+    }
+
+    #[test]
+    fn list_includes_disk_images_but_skips_hidden_and_symlinks() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        let saved = save(&vault, JPEG, "image/jpeg").unwrap();
+
+        fs::create_dir_all(vault.root().join("notes/论文/images")).unwrap();
+        fs::write(vault.root().join("notes/论文/images/pic.png"), PNG).unwrap();
+        fs::write(vault.root().join("notes/论文/readme.md"), b"x").unwrap();
+        fs::create_dir_all(vault.root().join(".hidden")).unwrap();
+        fs::write(vault.root().join(".hidden/pic.png"), PNG).unwrap();
+
+        let outside = temp.root.join("outside.png");
+        fs::write(&outside, PNG).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, vault.root().join("notes/link.png")).unwrap();
+
+        let entries = list(&vault).unwrap();
+        let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+        assert!(paths.contains(&saved.path.as_str()));
+        assert!(paths.contains(&"notes/论文/images/pic.png"));
+        assert!(!paths.contains(&"notes/论文/readme.md"));
+        assert!(!paths.iter().any(|path| path.contains(".hidden")));
+        assert!(!paths.contains(&"notes/link.png"));
+
+        let disk = entries
+            .iter()
+            .find(|entry| entry.path == "notes/论文/images/pic.png")
+            .unwrap();
+        assert_eq!(disk.hash, "");
+        assert_eq!(disk.mime, "image/png");
+    }
+
+    #[test]
+    fn save_quota_counts_only_content_addressed_media() {
+        let temp = TempVault::new();
+        let vault = temp.open();
+        // 直接铺满 media/ 配额（内容不参与 list 校验，只有文件名参与）
+        for index in 0..MAX_ASSETS {
+            let hash = format!("{index:064x}");
+            let shard = vault.root().join(MEDIA_DIR).join(&hash[..2]);
+            fs::create_dir_all(&shard).unwrap();
+            fs::write(shard.join(format!("{hash}.png")), PNG).unwrap();
+        }
+        // 磁盘图片不计入 media 配额
+        fs::create_dir_all(vault.root().join("notes")).unwrap();
+        fs::write(vault.root().join("notes/pic.png"), PNG).unwrap();
+        assert_eq!(list(&vault).unwrap().len(), MAX_ASSETS + 1);
+        assert!(matches!(
+            save(&vault, PNG, "image/png").unwrap_err(),
+            VaultError::Encoding(_)
+        ));
     }
 }
