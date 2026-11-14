@@ -340,10 +340,7 @@ fn read_disk_image(vault: &Vault, relative: &str) -> VaultResult<AssetData> {
     {
         return Err(VaultError::PathOutside(relative.to_string()));
     }
-    let name = normalized
-        .rsplit('/')
-        .next()
-        .unwrap_or(normalized.as_str());
+    let name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
     if image_format_from_name(name).is_none() {
         return Err(VaultError::Encoding(format!(
             "不是支持的图片扩展名：{relative}"
@@ -503,9 +500,8 @@ fn has_scheme(text: &str) -> bool {
     false
 }
 
-
 /// 删除单张图库图片：与文档删除同一落点——移入系统回收站，绝不直接永久删除。
-/// 路径校验与 read 相同（只接受 `media/<两位分片>/<文件名>`，防目录穿越）；
+/// 删除只接受 `media/<两位分片>/<文件名>`（防目录穿越），磁盘图片不归 Ember 管理；
 /// 文件不存在按幂等成功处理（外部先删的场景里，面板「再删一次」不该报错）。
 /// 删除也要过写闸：只读库（另一实例占用）一律拒绝。
 pub fn delete(vault: &Vault, relative: &str) -> VaultResult<&'static str> {
@@ -923,7 +919,9 @@ mod tests {
         fs::write(vault.root().join("notes/论文/images/pic.png"), PNG).unwrap();
         let found = resolve_reference(&vault, article, "pic.png").unwrap();
         match found {
-            ImageResolution::Found { path, mime, bytes, .. } => {
+            ImageResolution::Found {
+                path, mime, bytes, ..
+            } => {
                 assert_eq!(path, "notes/论文/images/pic.png");
                 assert_eq!(mime, "image/png");
                 assert_eq!(bytes, PNG.len() as u64);
@@ -991,7 +989,8 @@ mod tests {
         let outside = temp.root.join("outside.png");
         fs::write(&outside, PNG).unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, vault.root().join("notes/论文/images/leak.png")).unwrap();
+        std::os::unix::fs::symlink(&outside, vault.root().join("notes/论文/images/leak.png"))
+            .unwrap();
 
         assert!(matches!(
             resolve_reference(&vault, article, "leak.png").unwrap(),
