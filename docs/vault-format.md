@@ -216,7 +216,7 @@ anchor     := heading-text | "^" block-id
 4. **别名**：`aliases` 归一化后相等。
 5. **未解析**：登记 `resolver = 'unresolved'`，不猜测、不改写原文。
 
-当某一级出现多个候选且无法用上述规则决胜时，登记 `resolver = 'ambiguous'` 并保存**全部候选 id**。UI 必须让用户选择；选择结果存进 `settings.json` 的 `linkOverrides`（键为 `sourceId + rawTarget`），不改写正文。
+当某一级出现多个候选且无法用上述规则决胜时，登记 `resolver = 'ambiguous'` 并保存**全部候选 id**。UI 必须让用户选择；选择结果存进 `settings.json` 的 `linkOverrides`（键为正文里的原始链接文本 `rawTarget`），不改写正文。
 
 ### 5.3 登记形态
 
@@ -308,7 +308,7 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免�
     "toolGallery": false,
     "theme": "ember-black"
   },
-  "linkOverrides": { "01JB...源文档id::方案": "01JB...目标id" }
+  "linkOverrides": { "方案": "01JB...目标id" }
 }
 ```
 
@@ -325,7 +325,7 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免�
 | `ui.toolPomodoro` | boolean | 左下角番茄钟入口（能力化，默认关）。 |
 | `ui.toolGallery` | boolean | 左下角附件面板入口（能力化，默认关；键名沿用旧图库命名）。 |
 | `ui.theme` | `"ember-black"` | 主题标识；仅纯黑主题。 |
-| `linkOverrides` | map<string, DocId> | 歧义链接的用户裁决，键为 `sourceId::rawTarget`。 |
+| `linkOverrides` | map<string, DocId> | 歧义链接的用户裁决，键为正文里的原始链接文本 `rawTarget`（同一原始链接在全库共用一个裁决）。 |
 
 `[设计选择]` 这些键属于**库状态**而不是机器状态：换一台机器打开同一个库，画布导航与主题行为一致。窗口位置、缩放、AI 面板几何、每画布开关等机器相关状态不走 `settings.json`，见 §8.4。
 
