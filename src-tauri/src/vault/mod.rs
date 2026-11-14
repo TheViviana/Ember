@@ -332,10 +332,20 @@ impl Vault {
         }
     }
 
-    /// 删除文件夹：只进系统回收站，系统回收站不可用即失败（不降级库内、不直接删除）。
-    /// 只删空文件夹——非空目录可能装着整棵文档树，批量入篓超出「删文件夹」的语义。
+    /// 删除文件夹：整个目录（连同文档与子目录）一次性进系统回收站。
+    /// 系统回收站不可用即失败，不降级库内、不拆成逐个文件删除。
     /// 目录本就不存在时视为成功，便于幂等对账。
     pub fn remove_dir(&self, relative: &str) -> VaultResult<()> {
+        self.remove_dir_with(relative, trash::trash_system_only)
+    }
+
+    /// `remove_dir` 的落点注入版本：单测用假回收站验证「整体一次移走」，
+    /// 生产只经由 [`trash::trash_system_only`]。
+    fn remove_dir_with(
+        &self,
+        relative: &str,
+        trash: impl FnOnce(&Path, &Path) -> VaultResult<()>,
+    ) -> VaultResult<()> {
         self.ensure_writable()?;
         let (absolute, normalized) = paths::resolve(&self.root, relative)?;
         paths::ensure_not_reserved(&normalized)?;
@@ -351,15 +361,7 @@ impl Vault {
                 message: "只能删除文件夹（符号链接与普通文件请走文章删除）".to_string(),
             });
         }
-        let mut entries =
-            fs::read_dir(&absolute).map_err(|error| with_path(error.into(), &absolute))?;
-        if entries.next().is_some() {
-            return Err(VaultError::IoAt {
-                path: absolute.display().to_string(),
-                message: "文件夹不为空，请先移走其中的文档".to_string(),
-            });
-        }
-        trash::trash_system_only(&self.root, &absolute)
+        trash(&self.root, &absolute)
     }
 
     /// 全库目录清单（相对 POSIX 路径，字典序）：空目录也会出现，供文档树与「移动到…」使用。
@@ -1445,22 +1447,66 @@ mod tests {
     }
 
     #[test]
-    fn remove_dir_rejects_files_non_empty_dirs_and_reserved_paths() {
+    fn remove_dir_rejects_files_and_reserved_paths() {
         let temp = TempVault::new();
         temp.vault.write("a.md", b"x", "user").unwrap();
         let error = temp.vault.remove_dir("a.md").unwrap_err();
         assert_eq!(error.code(), "io_failed");
         assert!(error.to_string().contains("只能删除文件夹"), "{error}");
 
-        temp.vault.create_dir("notes").unwrap();
-        temp.vault.write("notes/a.md", b"x", "user").unwrap();
-        let error = temp.vault.remove_dir("notes").unwrap_err();
-        assert!(error.to_string().contains("文件夹不为空"), "{error}");
-
         let error = temp.vault.remove_dir(".workbench").unwrap_err();
         assert_eq!(error.code(), "path_outside_vault");
         // 不存在的目录视为已删除，便于幂等对账。
         temp.vault.remove_dir("gone").unwrap();
+    }
+
+    #[test]
+    fn remove_dir_trashes_non_empty_tree_as_one_unit() {
+        let temp = TempVault::new();
+        temp.vault.create_dir("notes").unwrap();
+        temp.vault.create_dir("notes/sub").unwrap();
+        temp.vault.write("notes/a.md", b"a", "user").unwrap();
+        temp.vault.write("notes/sub/b.md", b"b", "user").unwrap();
+
+        let trash_root = temp.root.join("fake-trash");
+        let mut calls = 0;
+        temp.vault
+            .remove_dir_with("notes", |_, absolute| {
+                calls += 1;
+                fs::create_dir_all(&trash_root)?;
+                let target = trash_root.join(absolute.file_name().unwrap());
+                // 模拟系统回收站：整个目录一次 rename，不逐个文件删除。
+                fs::rename(absolute, target)?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(calls, 1, "只应触发一次入篓动作");
+        assert!(!temp.root.join("notes").exists(), "源目录应整体消失");
+        assert!(trash_root.join("notes/a.md").is_file());
+        assert!(trash_root.join("notes/sub/b.md").is_file());
+    }
+
+    #[test]
+    fn remove_dir_failure_keeps_tree_intact() {
+        let temp = TempVault::new();
+        temp.vault.create_dir("notes").unwrap();
+        temp.vault.create_dir("notes/sub").unwrap();
+        temp.vault.write("notes/a.md", b"a", "user").unwrap();
+
+        let error = temp
+            .vault
+            .remove_dir_with("notes", |_, absolute| {
+                Err(VaultError::IoAt {
+                    path: absolute.display().to_string(),
+                    message: "系统回收站不可用".to_string(),
+                })
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("系统回收站不可用"), "{error}");
+        assert!(temp.root.join("notes/a.md").is_file(), "失败时不得留下半删状态");
+        assert!(temp.root.join("notes/sub").is_dir());
     }
 
     #[cfg(unix)]
