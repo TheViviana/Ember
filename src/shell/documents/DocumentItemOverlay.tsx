@@ -8,7 +8,7 @@ import styles from './DocumentListPanel.module.css';
 
 /**
  * 菜单 / 删除确认的锚点：被右键条目的 getBoundingClientRect（视口坐标）。
- * 菜单挂在 document.body 上，所以这里不能存相对面板的偏移。
+ * 菜单挂在 document.body 上，所以这里不能存相对面板的偏移，也不继承行宽。
  */
 export interface ItemOverlay {
   readonly docId: string;
@@ -17,7 +17,6 @@ export interface ItemOverlay {
   readonly left: number;
   readonly top: number;
   readonly bottom: number;
-  readonly w: number;
 }
 
 export interface DocumentItemOverlayProps {
@@ -38,11 +37,13 @@ export interface DocumentItemOverlayProps {
 const MENU_HEIGHT = 212;
 const MOVE_HEIGHT = 260;
 const CONFIRM_HEIGHT = 148;
+/** 删除确认要换行，给一个比菜单更窄的上限 */
+const CONFIRM_MAX_WIDTH = 320;
 
-/** 视口定位：宽度继承条目矩形，靠近四边时翻转或夹住不出界 */
+/** 视口定位：左边贴住条目，宽度按内容自适应，靠近四边时翻转或夹住不出界 */
 const place = (overlay: ItemOverlay, height: number): DocMenuPlacement =>
   placeDocMenu(
-    { left: overlay.left, top: overlay.top, bottom: overlay.bottom, width: overlay.w },
+    { left: overlay.left, top: overlay.top, bottom: overlay.bottom },
     height,
     { width: window.innerWidth, height: window.innerHeight },
   );
@@ -141,7 +142,7 @@ export const DocumentItemOverlay = ({
         style={{
           left: confirmBox.left,
           top: confirmBox.top,
-          width: confirmBox.width,
+          maxWidth: Math.min(confirmBox.maxWidth, CONFIRM_MAX_WIDTH),
         }}
       >
         <p className={styles.deleteText}>
@@ -185,7 +186,7 @@ export const DocumentItemOverlay = ({
         style={{
           left: menuBox.left,
           top: menuBox.top,
-          width: menuBox.width,
+          maxWidth: menuBox.maxWidth,
         }}
         onKeyDown={onMenuKeyDown}
       >
@@ -297,7 +298,7 @@ export const DocumentItemOverlay = ({
                   : '优先移入系统回收站；不可用时落入库内回收目录（30 天后清除）'
               }
               onClick={() => {
-                // 确认条原地替换菜单：位置、宽度都继承条目锚点，视线不跳动
+                // 确认条原地替换菜单：位置继承条目锚点，视线不跳动
                 setConfirm(menu);
                 closeMenu();
               }}

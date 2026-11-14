@@ -263,6 +263,7 @@
   position: fixed;
   z-index: calc(var(--layer-menu) + 2);
   min-width: 160px;
+  max-width: calc(100vw - 16px);
   max-height: calc(100vh - 96px);
   overflow: hidden;
   padding: var(--space-xs);

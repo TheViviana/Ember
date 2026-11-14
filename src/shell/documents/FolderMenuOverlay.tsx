@@ -11,7 +11,6 @@ export interface FolderMenu {
   readonly left: number;
   readonly top: number;
   readonly bottom: number;
-  readonly w: number;
   /** 确认框里展示的代价：该目录下的文章数与子文件夹数 */
   readonly docs: number;
   readonly dirs: number;
@@ -28,11 +27,13 @@ export interface FolderMenuOverlayProps {
 
 const MENU_HEIGHT = 84;
 const CONFIRM_HEIGHT = 208;
+/** 删除确认要换行，给一个比菜单更窄的上限 */
+const CONFIRM_MAX_WIDTH = 320;
 
-/** 视口定位：宽度继承文件夹行，靠近四边时翻转或夹住不出界 */
+/** 视口定位：左边贴住文件夹行，宽度按内容自适应，靠近四边时翻转或夹住不出界 */
 const place = (menu: FolderMenu, height: number): DocMenuPlacement =>
   placeDocMenu(
-    { left: menu.left, top: menu.top, bottom: menu.bottom, width: menu.w },
+    { left: menu.left, top: menu.top, bottom: menu.bottom },
     height,
     { width: window.innerWidth, height: window.innerHeight },
   );
@@ -111,7 +112,7 @@ export const FolderMenuOverlay = ({
         className={styles.deleteConfirm}
         data-doc-menu=""
         data-canvas-overlay="doc-menu"
-        style={{ left: box.left, top: box.top, width: box.width }}
+        style={{ left: box.left, top: box.top, maxWidth: Math.min(box.maxWidth, CONFIRM_MAX_WIDTH) }}
         role="dialog"
         aria-label="删除文件夹确认"
       >
@@ -140,7 +141,7 @@ export const FolderMenuOverlay = ({
       className={styles.contextMenu}
       data-doc-menu=""
       data-canvas-overlay="doc-menu"
-      style={{ left: box.left, top: box.top, width: box.width }}
+      style={{ left: box.left, top: box.top, maxWidth: box.maxWidth }}
       role="menu"
       onKeyDown={onMenuKeyDown}
     >

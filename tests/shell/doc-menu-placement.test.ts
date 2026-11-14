@@ -1,19 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DOC_MENU_INSET, placeDocMenu, type DocMenuAnchor } from '../../src/shell/documents/doc-menu-placement.ts';
+import {
+  DOC_MENU_INSET,
+  DOC_MENU_MIN_WIDTH,
+  placeDocMenu,
+  type DocMenuAnchor,
+} from '../../src/shell/documents/doc-menu-placement.ts';
 
 const VIEWPORT = { width: 1280, height: 820 };
 
-const row = (left: number, top: number, width = 260): DocMenuAnchor => ({
+const row = (left: number, top: number): DocMenuAnchor => ({
   left,
   top,
   bottom: top + 30,
-  width,
 });
 
-void test('常规行：顶边与左边对齐被右键的条目，宽度继承条目', () => {
+void test('常规行：顶边与左边对齐被右键的条目，宽度交给内容', () => {
   const placed = placeDocMenu(row(24, 200), 212, VIEWPORT);
-  assert.deepEqual(placed, { left: 24, top: 200, width: 260 });
+  assert.deepEqual(placed, { left: 24, top: 200, maxWidth: VIEWPORT.width - DOC_MENU_INSET - 24 });
 });
 
 void test('下缘放不下：整体上移，底边对齐条目底边', () => {
@@ -32,19 +36,27 @@ void test('下缘附近但没有翻的余量：底边对齐条目后仍夹在视
 });
 
 void test('左缘：左移出视口时夹到留白处', () => {
-  const placed = placeDocMenu(row(-40, 200, 260), 212, VIEWPORT);
+  const placed = placeDocMenu(row(-40, 200), 212, VIEWPORT);
   assert.equal(placed.left, DOC_MENU_INSET);
+  assert.equal(placed.maxWidth, VIEWPORT.width - DOC_MENU_INSET * 2);
 });
 
-void test('右缘：条目太靠右时整体左移，右缘留在视口内', () => {
-  const placed = placeDocMenu(row(1100, 200, 260), 212, VIEWPORT);
-  assert.equal(placed.left + placed.width, VIEWPORT.width - DOC_MENU_INSET);
+void test('右缘：左边保持条目位置，菜单可以越过面板，只按视口收窄', () => {
+  const placed = placeDocMenu(row(1100, 200), 212, VIEWPORT);
+  assert.equal(placed.left, 1100);
+  assert.equal(placed.maxWidth, VIEWPORT.width - DOC_MENU_INSET - 1100);
 });
 
-void test('视口比条目窄：宽度收缩到视口内，左边贴留白', () => {
-  const placed = placeDocMenu(row(12, 100, 400), 212, { width: 240, height: 600 });
-  assert.equal(placed.width, 240 - DOC_MENU_INSET * 2);
-  assert.equal(placed.left, DOC_MENU_INSET);
+void test('条目贴到视口右缘：只给最小宽度留位置', () => {
+  const placed = placeDocMenu(row(1270, 200), 212, VIEWPORT);
+  assert.equal(placed.left, VIEWPORT.width - DOC_MENU_INSET - DOC_MENU_MIN_WIDTH);
+  assert.equal(placed.maxWidth, DOC_MENU_MIN_WIDTH);
+});
+
+void test('视口只比最小宽度宽一点：左边保持条目位置，可用宽度收到视口内', () => {
+  const placed = placeDocMenu(row(12, 100), 212, { width: 240, height: 600 });
+  assert.equal(placed.left, 12);
+  assert.equal(placed.maxWidth, 240 - DOC_MENU_INSET - 12);
 });
 
 void test('菜单比视口还高：顶边落在留白处，由 CSS 滚动接管溢出', () => {

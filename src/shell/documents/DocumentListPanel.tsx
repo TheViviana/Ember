@@ -223,7 +223,7 @@ export const DocumentListPanel = ({
     (event: React.MouseEvent, doc: DocMeta): void => {
       event.preventDefault();
       event.stopPropagation();
-      // 菜单直接盖在条目上：取条目矩形，宽度与条目一致
+      // 菜单盖在条目上：左边与顶边对齐条目，宽度由内容决定
       const target = event.currentTarget;
       const rect = target instanceof Element ? target.getBoundingClientRect() : null;
       setMenu({
@@ -233,7 +233,6 @@ export const DocumentListPanel = ({
         left: rect?.left ?? event.clientX,
         top: rect?.top ?? event.clientY,
         bottom: rect?.bottom ?? event.clientY,
-        w: rect?.width ?? 220,
       });
     },
     [],
@@ -253,7 +252,6 @@ export const DocumentListPanel = ({
       left: rect?.left ?? event.clientX,
       top: rect?.top ?? event.clientY,
       bottom: rect?.bottom ?? event.clientY,
-      w: rect?.width ?? 220,
       docs: documents.filter((meta) => String(meta.path).startsWith(prefix)).length,
       dirs: folders.filter((dir) => dir.startsWith(prefix)).length,
     });
