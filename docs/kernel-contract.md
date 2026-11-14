@@ -33,9 +33,9 @@
 | **I1** | 所有磁盘写入必须经 `doc-service` 或 `canvas-host`。UI 不得直接调用 `invoke`、`fs`、`fetch` 写文件。 | 绕过冲突检测 / 索引刷新 | `gate:layers`（kernel 禁止 `@tauri-apps`、React）+ code review |
 | **I2** | 每次写入必须携带 `WriteOptions.base`（`rev` + `hash`）；不匹配即落冲突副本，**不存在 force 分支，也不做自动合并**。 | 静默覆盖用户内容 | 类型系统（`base` 必填）+ review |
 | **I3** | 索引是派生数据：只有 `index-service` 写索引；重建必须等价。元数据（标题/标签/别名）即时可搜，正文后台增量。 | 索引变成第二真相源 | 重建测试（tests/kernel/index-service.test.ts） |
-| **I4** | 文档身份 = frontmatter `id`；重命名不改变 `id`，不改变任何链接边。外部改名/移动由目录对账按身份迁移。 | 引用断裂 | `doc-service.refresh` 迁移测试 |
+| **I4** | 文档身份 = 规范化库内相对路径（`DocId` 语义就是路径）。frontmatter `id` 字段**不读不写**，原样留在文件里；应用内改名即换身份，由 `doc-service` 同步改写画布节点 `docId`（逐画布原子写）。外部改名/移动走严格重绑：唯一候选 + 至少一个第二信号（同卷 inode 或 sha256 全等），同名文件一律拒绝，宁可断成占位也不误绑。 | 引用断裂 / 误绑 | `doc-service.refresh` 对账测试 + 重绑测试 |
 | **I5** | 所有用户意图必须注册为 `Command` 并经 `command-bus` 执行。 | 行为不可发现、不可测试 | `CommandBus.list()` 是 UI 唯一行为来源 |
-| **I6** | 画布节点引用文档身份（`docId`），不引用路径。 | 外部搬动文件断链 | 画布节点类型固定 `docId: DocId \| null` |
+| **I6** | 画布节点用 `docId` 引用文档，`docId` 语义为规范化相对路径。文档在应用内改名后由 `doc-service` 的 rename hook 触发 `canvas-host.rewriteDocRefs` 逐画布改写。 | 改名后画布断链 | 画布节点类型固定 `docId: DocId \| null` |
 | **I7** | 画布只存摆放：节点、连线、视口、书签、Portal 指向；不承载正文。 | 画布变成第二真相源 | `CanvasDocument` 无正文字段 |
 | **I8** | 文件被外部删除后，画布节点保留失效占位（不自动消失），右键可清理；从回收站放回后自动恢复可用。 | 误删布局 | 外部对账 + 失效占位测试 |
 | **I9** | 用户删除一律不永久删除：`vault_remove` 优先系统回收站，不可用时降级 Finder 与库内回收目录（细节见 vault-format §8.3）；`vault_purge` 仅供内核回滚（文章创建后画布写失败）与画布历史轮转，不注册为用户命令。 | 不可恢复的删除 | media/trash 测试 |
@@ -51,7 +51,7 @@
 
 ```ts
 // packages/doc-model/src/ids.ts
-export type DocId = Brand<string, 'DocId'>;          // ULID
+export type DocId = Brand<string, 'DocId'>;          // 规范化库内相对路径，如 notes/方案.md
 export type VaultId = Brand<string, 'VaultId'>;      // ULID
 export type CanvasId = Brand<string, 'CanvasId'>;    // ULID
 export type CommandId = Brand<string, 'CommandId'>;  // 必须形如 <namespace>.<verb>
@@ -77,8 +77,6 @@ export interface DocService {
   restoreHistory(id: DocId, versionId: string, opts: WriteOptions): Promise<WriteOutcome>;
   adoptCopy(copyId: DocId, opts: AdoptConflictOptions): Promise<AdoptConflictResult>;
   detachCopy(copyId: DocId, opts: WriteOptions): Promise<DocSnapshot>;
-  /** 为缺少 id 的既有 `.md` 文件补写身份；不改正文，不记历史 */
-  adopt(path: VaultPath, expectedHash: ContentHash): Promise<DocSnapshot>;
   flush(): Promise<void>;
   watch(listener: (change: DocChange) => void): Disposable;
 }
@@ -97,25 +95,36 @@ export interface AdoptConflictResult {
 export interface DocServiceInternal extends DocService {
   refresh(): Promise<void>;               // watcher 触发的目录对账
   purge(id: DocId, opts: WriteOptions): Promise<void>; // 仅供 createArticle 回滚
+  setRenameHook(hook: ((from: DocId, to: DocId) => Promise<void>) | null): void; // 改名后同步画布引用
+}
+
+/** 文档变更事件；`renamed` 携带旧身份，供索引/外壳跟随 */
+export interface DocChange {
+  readonly id: DocId;
+  readonly from?: DocId;
+  readonly path: VaultPath;
+  readonly kind: 'created' | 'updated' | 'renamed' | 'removed' | 'external';
+  readonly revision: DocRevision;
 }
 ```
 
 细节不变量（v2 修订后）：
 
-- **D1** `update` 唯一写管线：读盘 → `base.hash` 与磁盘比对 → 一致则直接写（快路径）；不一致则**保留磁盘版本**并把本地改动写入冲突副本（`<stem> (conflict <UTC戳>-<4字符>).md`，新 ULID + `ember.conflictOf`），emit `doc:conflict`。**没有 diff3/merge3**。
-- **D2** `create` 命中已有路径抛 `path_exists`；同 id 重复抛 `duplicate_id`。
-- **D3** `rename` 保持 `id`、`created` 与所有链接不变；目标存在抛 `path_exists`；基线过期抛 `stale_revision`。
+- **D1** `update` 唯一写管线：读盘 → `base.hash` 与磁盘比对 → 一致则直接写（快路径）；不一致则**保留磁盘版本**并把本地改动写入冲突副本（`<stem> (conflict <UTC戳>-<4字符>).md`，`ember.conflictOf` 记原文路径身份），emit `doc:conflict`。**没有 diff3/merge3**。
+- **D1a（D8 严格）** 保存只替换正文：`update` 不传 `patch.frontmatter` 时，frontmatter 区（含键序、引号、未知键、BOM）**逐字节原样保留**，只在正文区按原文件行尾写入；显式传 frontmatter 补丁时也只在原位改那几个顶层键，从不新增 `created` / `updated`，旧 `id` 原样留在原位。禁止退回「整份重排只保留值」。
+- **D2** `create` 命中已有路径抛 `path_exists`；身份即路径，不存在 `duplicate_id`。新建文件只写用户显式提供的展示元数据，不写 `id` / `created` / `updated`。
+- **D3** `rename` 改的是身份：校验目标路径合法且不存在（否则 `path_exists`）、基线过期抛 `stale_revision`；改名成功后旧键整体移除、新路径登记并迁移历史，再经 rename hook 同步画布节点（逐画布原子写，单张失败只记录不回滚改名），emit `renamed`（带 `from`）。frontmatter 一字节不动。
 - **D4** `remove` → `vault_remove` → OS 回收站（非 macOS 明确失败，不回退永久删除）；`purge` 只服务回滚。
 - **D5** `read` 返回的 `DocMeta.rev` 可直接作为后续写 `base`（read 不写盘，只同步缓存）。
 - **D6** 外部变更事件只由 watcher → refresh 链广播（`doc:changed` kind `external`）；read 不是事件源。
-- **D7** 外部改名/移动：refresh 发现同 id 出现在新路径时迁移目录条目（`kind: 'renamed'` 或 `external`），画布节点不断链。
+- **D7** 外部改名/移动：身份即路径，对账表现为旧路径 `removed` + 新路径登记（`renamed` / `external`）。严格重绑（唯一候选 + 同卷 inode 或 sha256 全等至少一个第二信号；同名文件拒绝，宁断占位也不误绑）由迁移/对账层实现，未重绑成功前画布节点按 I8 转失效占位，**不按名字猜测绑定**。
 - **D8** 文件消失：refresh 广播 `removed`；画布节点转失效占位（I8）。
 - **D9** per-docId 串行写队列仍然保留：读-改-写整体入队，防止进程内并发丢更新。`previousCommitted` 快照与 merge3 已删除。
 - **D10** `update` 快路径在提交主文前先把当前磁盘**原始字节**记入文档历史（`.workbench/history/documents/<docId>/`，每篇最多 20 版 / 64 MiB，最旧先淘汰）；历史写失败直接抛出且不提交主文。`create` / `rename` / 冲突副本创建 / `remove` / `purge` 不记录历史。
 - **D11** `restoreHistory` 在串行队列内重新读盘并校验 `opts.base.hash`：一致则先把当前版入历史再写回目标版原始字节（后续历史不删除，可用恢复前的版本再恢复）；失配时不改主文、不新增历史，把目标版内容写成冲突副本并返回 `merged: false`。目标版本 id 非法、文件缺失、非 UTF-8 或 sha256 与索引不符分别抛 `invalid_payload` / `doc_not_found`，且全程不写盘。
-- **D12** `DocMeta.conflictOf` 由 frontmatter `ember.conflictOf` 解析：合法 ULID 归还原文 id，缺失/非法一律 `null`。冲突副本仍留在普通列表与搜索结果中，外壳据 `conflictOf !== null` 显示冲突标识；不做自动合并、不自动清理。
-- **D13** `adoptCopy` 在**原文** docId 队列内执行：重新读盘并分别校验副本与原文的 sha256（任一失配抛 `stale_revision`，零写入、且不制造新副本），把副本正文与 `title/summary/tags/aliases` 写回原文，保留原 id、`created`、`ember` 与其余 extra；提交前 `recordHistory` 原文原始字节。第二步删除副本：复核 hash 后 `vault_remove`（系统回收站）并 emit `removed`；删除失败或副本已变化不撤销原文写入，只返回 `copyRemoved: false` 并告警。原文缺失时抛 `doc_not_found`（孤儿冲突只能另存或删除副本）。`detachCopy` 清除副本的 `ember.conflictOf` 并保留 id/路径/正文，同样先记历史；非冲突副本、非 UTF-8 抛 `invalid_payload`，只读抛 `vault_locked`。
-- **D14** `adopt` 只为缺少 id 的 `.md` 文件补写身份：仅当路径未入目录、文件为合法 UTF-8 且磁盘 sha256 等于 `expectedHash` 时写入；失配抛 `stale_revision` 且零写入。frontmatter YAML 损坏或已存在 id（含非法 id）抛 `invalid_payload`，不改写。写入保留正文、未知键与 BOM/行尾风格，补 `id`、缺失的 `created` 并刷新 `updated`；不记历史，成功后 emit `doc:changed`（`created`）。
+- **D12** `DocMeta.conflictOf` 由 frontmatter `ember.conflictOf` 解析：值是原文的路径身份（`asDocId` 校验通过才归还），缺失/非法一律 `null`。冲突副本仍留在普通列表与搜索结果中，外壳据 `conflictOf !== null` 显示冲突标识；不做自动合并、不自动清理。
+- **D13** `adoptCopy` 在**原文** docId 队列内执行：重新读盘并分别校验副本与原文的 sha256（任一失配抛 `stale_revision`，零写入、且不制造新副本），把副本正文与 `title/summary/tags/aliases` 写回原文（`patchFrontmatterRegion` 只改这几个键，其余 frontmatter 字节不动），提交前 `recordHistory` 原文原始字节。第二步删除副本：复核 hash 后 `vault_remove`（系统回收站）并 emit `removed`；删除失败或副本已变化不撤销原文写入，只返回 `copyRemoved: false` 并告警。原文缺失时抛 `doc_not_found`（孤儿冲突只能另存或删除副本）。`detachCopy` 清除副本的 `ember.conflictOf` 并保留路径/正文，同样先记历史；非冲突副本、非 UTF-8 抛 `invalid_payload`，只读抛 `vault_locked`。
+- **D14** 缺 id 的既有 `.md` 文件不需要任何「采纳」写入：目录对账直接以路径登记身份，frontmatter `id` 不读不写、原样保留。adoption 流程及其健康项已删除。
 
 ---
 
@@ -124,19 +133,17 @@ export interface DocServiceInternal extends DocService {
 ```ts
 export interface HealthService {
   scan(): Promise<HealthReport>;
-  adopt(path: VaultPath, expectedHash: ContentHash): Promise<DocSnapshot>;
   renameMarkdown(path: VaultPath, expectedHash: ContentHash): Promise<VaultPath>;
 }
 
 export interface HealthIssue {
-  kind: HealthIssueKind; // broken_frontmatter | missing_id | invalid_id | duplicate_id |
-                         // non_utf8 | oversize | markdown_extension | broken_asset |
-                         // broken_canvas | broken_history | symlink
+  kind: HealthIssueKind; // broken_frontmatter | non_utf8 | oversize | markdown_extension |
+                         // broken_asset | broken_canvas | broken_history | symlink
   path: VaultPath;
   target: VaultPath | null;
   detail: string;
   hash: ContentHash | null;
-  fix: 'adopt' | 'rename-markdown' | null;
+  fix: 'rename-markdown' | null;
 }
 
 export interface HealthReport {
@@ -148,9 +155,9 @@ export interface HealthReport {
 
 - **H1** `scan` 只经 `VaultPort.scan` / `read` / `stat`：以文件系统清单为入口，**不依赖 `docs.list()`**（否则漏掉坏 frontmatter 文档），扫描期间零写入。
 - **H2** 超过 32 MiB 的文件只报 `oversize`，不读取；符号链接只报 `symlink`，不跟随、不读取目标。
-- **H3** 只开放两类修复：缺失 id 的 `adopt`（委托 D14）与 `.markdown` → `.md` 改名；坏 YAML、非 UTF-8、非法/重复 id、失效资产、坏画布/历史、符号链接只报告。
+- **H3** 只开放一类修复：`.markdown` → `.md` 改名；坏 YAML、非 UTF-8、失效资产、坏画布/历史、符号链接只报告。身份即路径后不再有缺 id / 非法 id / 重复 id 三类问题。
 - **H4** 修复前复核 path + 字节 sha256：失配抛 `stale_revision` 且零写入；改名目标已存在抛 `path_exists`，不覆盖；只读抛 `vault_locked`。
-- **H5** `renameMarkdown` 只改文件名、不改内容；成功后 `docs.refresh()`，有合法 id 的文档随即进入目录，仍缺 id 的下次扫描继续报 `missing_id`。
+- **H5** `renameMarkdown` 只改文件名、不改内容；成功后 `docs.refresh()`，新路径随即进入目录。
 
 ---
 
@@ -268,6 +275,8 @@ export interface KernelContext {
 
 `KERNEL_VERSION = '2.5.0'`：2.4.0 → 2.5.0 为 minor，`KernelContext` 新增 `folders`（`FolderService`，见 §3.2），`VaultPort` 新增 `createDir` / `trashDir` / `listDirs`；既有方法签名与错误码不变。2.3.0 → 2.4.0 为 minor，`DocService` 新增 `guard` / `rescan`，`KernelEventMap` 新增 `vault:guarded` / `vault:sync`，`VaultPort` 新增可选 `setRuntimeReadonly`；既有方法签名与错误码不变。2.2.0 → 2.3.0 为 minor，`DocService` 新增 `adopt`，`KernelContext` 新增 `health`，`VaultPort` 新增只读 `scan`；既有方法签名与错误码不变。2.1.0 → 2.2.0 为 minor，`DocService` 新增 `adoptCopy` / `detachCopy` 两个方法，`DocMeta` 新增 `conflictOf`。2.0.0 → 2.1.0 为 minor，`DocService` 新增 `listHistory` / `readHistory` / `restoreHistory` 三个方法。相对 1.2.0 的 2.0.0 是 major：删除了 `articles` / `editor` / `capabilities` 三个服务与 `withOwner`，IndexService 语义变更。
 
+P1b（尚未发版，随下一版内核落地）：`DocId` 语义改为规范化相对路径，`DocService` 删除 `adopt`，`DocFlags` 与 `HealthIssueKind` 的三类 id 问题删除，`DocChange` 新增 `from`。
+
 ---
 
 ## 8. 错误模型
@@ -289,7 +298,7 @@ export interface KernelContext {
 | `stale_revision` | TS | 写入携带的 `base.hash` 与磁盘不一致 |
 | `invalid_frontmatter` | TS | frontmatter 超限或类型非法（不阻断读取） |
 | `invalid_payload` | Rust / TS | 编码非法、序列化失败、写入载荷类型非法 |
-| `duplicate_id` | TS | 同一库内 id 冲突 |
+| `duplicate_id` | —（契约保留） | 身份即路径后不再有产生路径；为保持错误码稳定暂留 |
 | `vault_locked` | Rust / TS | 库未获得写锁或以只读模式打开，写操作被拒绝 |
 | `vault_uninitialized` | Rust | 库尚未初始化 |
 | `index_unavailable` | TS（契约保留） | 索引不可用；当前内存索引实现没有该错误的产生路径 |
