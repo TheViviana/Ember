@@ -179,7 +179,10 @@ export const DocumentListPanel = ({
     const onPointerDown = (event: PointerEvent): void => {
       // 拖拽期间源面板不能消失：否则拖到画布时 dragend 丢失、落点也找不到
       if (isDocDragActive()) return;
-      if (rootRef.current !== null && !rootRef.current.contains(event.target as Node)) {
+      // 右键菜单 portal 在 body 上：点菜单不能连带关掉面板，否则菜单动作永远点不到
+      const target = event.target;
+      if (target instanceof Element && target.closest('[data-doc-menu]') !== null) return;
+      if (rootRef.current !== null && !rootRef.current.contains(target as Node)) {
         onClose();
       }
     };

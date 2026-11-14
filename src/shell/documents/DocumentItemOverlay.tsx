@@ -1,10 +1,15 @@
-import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
+import { createPortal } from 'react-dom';
 import { useEscLayer, isEscTop } from '../esc-arbiter.ts';
 import { readonlyText } from '../components/readonly-text.ts';
 import { parentDirOf } from './doc-tree.ts';
+import { placeDocMenu, type DocMenuPlacement } from './doc-menu-placement.ts';
 import styles from './DocumentListPanel.module.css';
 
-/** 菜单 / 删除确认的锚点：直接盖在条目矩形上，宽度与条目一致 */
+/**
+ * 菜单 / 删除确认的锚点：被右键条目的 getBoundingClientRect（视口坐标）。
+ * 菜单挂在 document.body 上，所以这里不能存相对面板的偏移。
+ */
 export interface ItemOverlay {
   readonly docId: string;
   readonly path: string;
@@ -33,15 +38,14 @@ export interface DocumentItemOverlayProps {
 const MENU_HEIGHT = 212;
 const MOVE_HEIGHT = 260;
 const CONFIRM_HEIGHT = 148;
-const EFFECTIVE_BOTTOM_MARGIN = 72;
 
-/** 纵向定位：默认顶边对齐条目顶边；下方放不下时向上翻并夹在可视区内 */
-const anchorY = (overlay: ItemOverlay, height: number): number => {
-  const effectiveBottom = window.innerHeight - EFFECTIVE_BOTTOM_MARGIN;
-  if (overlay.top + height <= effectiveBottom) return overlay.top;
-  const flipped = overlay.bottom - height;
-  return Math.max(60, Math.min(flipped, effectiveBottom - height));
-};
+/** 视口定位：宽度继承条目矩形，靠近四边时翻转或夹住不出界 */
+const place = (overlay: ItemOverlay, height: number): DocMenuPlacement =>
+  placeDocMenu(
+    { left: overlay.left, top: overlay.top, bottom: overlay.bottom, width: overlay.w },
+    height,
+    { width: window.innerWidth, height: window.innerHeight },
+  );
 
 /** 菜单内上下键移动焦点（两个视图共用；按钮本身保持 Tab 可达） */
 const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
@@ -57,6 +61,8 @@ const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
 
 /**
  * 文档条的右键操作菜单与删除确认。
+ * 面板自带 overflow 裁剪与 backdrop-filter（后者会成为 fixed 后代的包含块），
+ * 所以浮层 portal 到 body 上按视口定位，只跟随被右键的那一行。
  * 「移动到…」在本组件内切换为目录列表；删除确认原地替换菜单，锚点与宽度不变。
  */
 export const DocumentItemOverlay = ({
@@ -80,41 +86,62 @@ export const DocumentItemOverlay = ({
     setMode('actions');
   }, [menu]);
 
+  const closeAll = useCallback((): void => {
+    setConfirm(null);
+    onCloseMenu();
+  }, [onCloseMenu]);
+
   useEscLayer('doc-list-menu', menu !== null || confirm !== null);
+
   useEffect(() => {
-    if (menu === null) return undefined;
+    if (menu === null && confirm === null) return undefined;
+    // 浮层内的滚动（「移动到…」目录列表）不算外部滚动
+    const insideMenu = (target: EventTarget | null): boolean =>
+      target instanceof Element && target.closest('[data-doc-menu]') !== null;
     const onPointerDown = (event: PointerEvent): void => {
-      const target = event.target;
-      if (target instanceof Element && target.closest('[data-doc-menu]') !== null) return;
-      onCloseMenu();
+      if (insideMenu(event.target)) return;
+      closeAll();
+    };
+    const onScroll = (event: Event): void => {
+      if (insideMenu(event.target)) return;
+      closeAll();
     };
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || !isEscTop('doc-list-menu')) return;
       event.preventDefault();
-      onCloseMenu();
+      closeAll();
     };
     window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('scroll', onScroll, true);
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [menu, onCloseMenu]);
+  }, [menu, confirm, closeAll]);
 
   const closeMenu = (): void => {
     onCloseMenu();
   };
 
+  if (menu === null && confirm === null) return null;
+
+  const confirmBox = confirm === null ? null : place(confirm, CONFIRM_HEIGHT);
+  const menuBox = menu === null ? null : place(menu, mode === 'move' ? MOVE_HEIGHT : MENU_HEIGHT);
+
   const confirmNode =
-    confirm === null ? null : (
+    confirm === null || confirmBox === null ? null : (
       <div
         className={styles.deleteConfirm}
+        data-doc-menu=""
+        data-canvas-overlay="doc-menu"
         role="alertdialog"
         aria-label="确认删除文档"
         style={{
-          left: confirm.left,
-          top: anchorY(confirm, CONFIRM_HEIGHT),
-          width: confirm.w,
+          left: confirmBox.left,
+          top: confirmBox.top,
+          width: confirmBox.width,
         }}
       >
         <p className={styles.deleteText}>
@@ -147,20 +174,18 @@ export const DocumentItemOverlay = ({
       </div>
     );
 
-  if (menu === null) return confirmNode;
-
-  return (
-    <>
-      {confirmNode}
+  const menuNode =
+    menu === null || menuBox === null ? null : (
       <div
         className={styles.contextMenu}
         data-doc-menu=""
+        data-canvas-overlay="doc-menu"
         role="menu"
         aria-label={`文档操作：${menu.title}`}
         style={{
-          left: menu.left,
-          top: anchorY(menu, mode === 'move' ? MOVE_HEIGHT : MENU_HEIGHT),
-          width: menu.w,
+          left: menuBox.left,
+          top: menuBox.top,
+          width: menuBox.width,
         }}
         onKeyDown={onMenuKeyDown}
       >
@@ -282,6 +307,13 @@ export const DocumentItemOverlay = ({
           </>
         )}
       </div>
-    </>
+    );
+
+  return createPortal(
+    <>
+      {confirmNode}
+      {menuNode}
+    </>,
+    document.body,
   );
 };
