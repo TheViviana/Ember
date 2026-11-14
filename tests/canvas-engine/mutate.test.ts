@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyMutations } from '../../packages/canvas-engine/src/mutate.ts';
 import type { CanvasEdge, CanvasNode, CanvasScene } from '../../packages/canvas-engine/src/types.ts';
+import { validateScene } from '../../packages/canvas-engine/src/validate.ts';
 import { asCanvasId, unsafeDocId } from '../../packages/doc-model/src/ids.ts';
 
 const node = (id: string, overrides: Partial<CanvasNode> = {}): CanvasNode => ({
@@ -56,6 +57,37 @@ void test('removeNodes 级联：删节点连带删边，删组解散成员', () 
   assert.deepEqual(result.scene.nodes.map((item) => item.id), ['n2', 'm1']);
   assert.deepEqual(result.scene.edges, []);
   assert.equal(result.scene.nodes.find((item) => item.id === 'm1')?.groupId, null);
+});
+
+void test('updateNode 可把文档节点转为普通 note：kind/docId 同步变更，其它字段与连线不动', () => {
+  const docNode = node('d1', { kind: 'doc', docId: unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V6'), text: null });
+  const base: CanvasScene = {
+    ...scene(),
+    nodes: [docNode, node('n2')],
+    edges: [edge('e1', 'd1', 'n2')],
+  };
+  const result = applyMutations(base, [
+    { type: 'updateNode', id: 'd1', patch: { kind: 'note', docId: null, text: '已删除的文章' } },
+  ]);
+  assert.equal(result.ok, true);
+  const converted = result.scene.nodes.find((item) => item.id === 'd1');
+  assert.equal(converted?.kind, 'note');
+  assert.equal(converted?.docId, null);
+  assert.equal(converted?.text, '已删除的文章');
+  assert.deepEqual(converted?.rect, docNode.rect, '位置尺寸不变');
+  assert.deepEqual(result.scene.edges, base.edges, '连线不受影响');
+  assert.deepEqual(validateScene(result.scene), [], '转换后的整场景必须通过 validate');
+});
+
+void test('只改 kind 不改 docId 会被整场景校验拒绝（§8.2）', () => {
+  const base: CanvasScene = {
+    ...scene(),
+    nodes: [node('d1', { kind: 'doc', docId: unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V6'), text: null })],
+    edges: [],
+  };
+  const result = applyMutations(base, [{ type: 'updateNode', id: 'd1', patch: { kind: 'note' } }]);
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((issue) => issue.code === 'invalid_node_doc'));
 });
 
 void test('addNode 重复 id 被整场景校验拒绝', () => {

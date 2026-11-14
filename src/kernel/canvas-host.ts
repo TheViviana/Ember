@@ -125,6 +125,14 @@ export interface CanvasHost {
   createArticle(input: CreateArticleInput): Promise<CreateArticleResult>;
   /** 在画布中定位：文档 → 承载它的画布节点 */
   locateDoc(docId: DocId): Promise<readonly CanvasDocLocation[]>;
+  /**
+   * 文章被删除后，把所有画布里引用该文档的节点转为普通 note 节点。
+   * 逐画布独立写入（走正常 apply 路径，历史槽位照常轮转），单张失败不影响其它。
+   */
+  detachDoc(
+    docId: DocId,
+    text: string,
+  ): Promise<{ readonly converted: number; readonly failed: number }>;
   /** 在画布中定位：资产 → 引用它的图片节点 */
   locateAsset(assetPath: string): Promise<readonly CanvasAssetLocation[]>;
   /** 全库书签清单：统一搜索直达观察角度 */
@@ -180,6 +188,8 @@ const PORTAL_STEP_Y = 300;
 /** 新文章统一落在 notes/ 下（vault-format 的用户文档目录） */
 const ARTICLE_DIR = 'notes';
 const UNTITLED = '未命名文章';
+/** 删文后画布节点转普通节点：拿不到删除前标题时的兜底文本 */
+const DELETED_DOC_TEXT = '已删除的文章';
 const MAX_NAME_ATTEMPTS = 50;
 const NAME_MAX = 80;
 
@@ -996,6 +1006,44 @@ export const createCanvasHost = (options: CanvasHostOptions): CanvasHost => {
         }
       }
       return locations;
+    },
+
+    detachDoc: async (docId, text) => {
+      const fallback = text.trim().length > 0 ? text.trim() : DELETED_DOC_TEXT;
+      const key = String(docId);
+      const all = await list();
+      let converted = 0;
+      let failed = 0;
+      for (const summary of all) {
+        try {
+          const document = await readDocument(summary.id);
+          if (document === null) continue;
+          const targets = document.scene.nodes.filter(
+            (node) => node.kind === 'doc' && node.docId !== null && String(node.docId) === key,
+          );
+          if (targets.length === 0) continue;
+          // 逐画布一次原子写：kind 与 docId 同步变更（docId 显式写 null），
+          // 走 updateNode 正常路径；applyMutations 会整场景跑 validate，不通过即抛错，
+          // 该画布内存与磁盘都不动（历史槽位照常轮转）
+          await applyImpl(
+            summary.id,
+            targets.map((node): CanvasMutation => ({
+              type: 'updateNode',
+              id: node.id,
+              patch: { kind: 'note', docId: null, text: fallback },
+            })),
+          );
+          converted += targets.length;
+        } catch (error) {
+          failed += 1;
+          log.error('画布节点转普通节点失败', {
+            canvasId: String(summary.id),
+            docId: key,
+            error: String(error),
+          });
+        }
+      }
+      return { converted, failed };
     },
 
     locateAsset: async (assetPath) => {

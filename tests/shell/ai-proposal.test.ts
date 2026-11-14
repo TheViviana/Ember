@@ -87,7 +87,7 @@ const makeDocs = (options: FakeOptions): { docs: ProposalDocs; calls: FakeCalls 
     },
     remove: (id) => {
       calls.remove.push(id);
-      return Promise.resolve();
+      return Promise.resolve('system' as const);
     },
   };
   return { docs, calls };
@@ -183,7 +183,7 @@ void test('撤销替换：正文已被人工改过时拒绝静默覆盖', async 
       return Promise.resolve({ snapshot: current, merged: true, conflict: null });
     },
     create: (input) => Promise.resolve(input.id === undefined ? current : current),
-    remove: () => Promise.resolve(),
+    remove: () => Promise.resolve('system' as const),
   };
 
   const applied = await applyProposalDoc(docs, paths, {

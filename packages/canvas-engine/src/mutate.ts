@@ -3,14 +3,18 @@ import type {
   CanvasEdge,
   CanvasGrid,
   CanvasNode,
+  CanvasNodeKind,
   CanvasScene,
   Viewport,
 } from './types.ts';
 import { validateScene, type CanvasIssue } from './validate.ts';
 
 export interface CanvasNodePatch {
+  readonly kind?: CanvasNodeKind;
   readonly rect?: CanvasNode['rect'];
   readonly z?: number;
+  /** 显式 null 表示解除文档引用（kind 与 docId 必须同步改，见 vault-format §8.2） */
+  readonly docId?: CanvasNode['docId'];
   readonly text?: string | null;
   readonly groupId?: string | null;
   readonly meta?: Readonly<Record<string, unknown>>;
@@ -85,8 +89,10 @@ export const applyMutations = (
         const patch = op.patch;
         const next: CanvasNode = {
           ...current,
+          ...(patch.kind === undefined ? {} : { kind: patch.kind }),
           ...(patch.rect === undefined ? {} : { rect: patch.rect }),
           ...(patch.z === undefined ? {} : { z: patch.z }),
+          ...(patch.docId === undefined ? {} : { docId: patch.docId }),
           ...(patch.text === undefined ? {} : { text: patch.text }),
           ...(patch.groupId === undefined ? {} : { groupId: patch.groupId }),
           ...(patch.meta === undefined ? {} : { meta: { ...current.meta, ...patch.meta } }),

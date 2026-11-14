@@ -24,8 +24,8 @@ const CANVAS_DIR: &str = ".workbench/canvas";
 /// 孤儿临时文件保留期：正常一次原子写远不到 1 小时，超龄的 `.ember-tmp-`
 /// 必然是崩溃遗留的孤儿（索引与画布都是派生数据，残留清扫即可恢复）。
 const ORPHAN_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
-/// 旧版软删除副本（`.workbench/trash/<ULID>/`）保留期。
-/// v1 起删除直接进系统回收站，库内不再产生新副本；这里只为历史库做惰性回收。
+/// 库内回收目录（`.workbench/trash/<ULID>/`）保留期：删除降级到库内时
+/// 由启动清扫按 mtime 回收，见 `trash::TrashDestination::Internal`。
 const TRASH_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
 
 /// IPC 可接受的写入意图（kernel types.ts 的 WriteIntent）：仅校验来源合法性，不落盘。

@@ -75,7 +75,7 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
       files.delete(String(path));
       mtimes.delete(String(path));
       sizeOverrides.delete(String(path));
-      return Promise.resolve();
+      return Promise.resolve('system' as const);
     },
     purge: (path) => {
       assertWritable();

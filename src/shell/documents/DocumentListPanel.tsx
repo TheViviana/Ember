@@ -216,9 +216,28 @@ export const DocumentListPanel = ({
     void (async () => {
       try {
         const snapshot = await kernel.docs.read(unsafeDocId(item.docId));
-        await kernel.docs.remove(unsafeDocId(item.docId), { base: snapshot.meta.rev, intent: 'user' });
+        const destination = await kernel.docs.remove(unsafeDocId(item.docId), {
+          base: snapshot.meta.rev,
+          intent: 'user',
+        });
+        // 删除成功后把各画布里引用该文章的节点转为普通 note，单个画布失败不影响其它
+        let canvasNote = '';
+        try {
+          const detached = await kernel.canvas.detachDoc(unsafeDocId(item.docId), item.title);
+          if (detached.failed > 0) {
+            canvasNote = `；另有 ${detached.failed} 张画布转换失败，节点仍显示为缺失文档`;
+          }
+        } catch (cause) {
+          canvasNote = `；画布节点转换失败（文章已删除）：${toErrorText(cause)}`;
+        }
         void queryClient.invalidateQueries({ queryKey: ['docs', 'list'] });
-        setNotice({ tone: 'ok', text: `已删除《${item.title}》文件（移入系统回收站）` });
+        const where =
+          destination === 'internal'
+            ? '库内回收目录 .workbench/trash，30 天后自动清除，系统废纸篓中没有'
+            : destination === 'system'
+              ? '系统回收站'
+              : '文件本就不存在';
+        setNotice({ tone: 'ok', text: `已删除《${item.title}》文件（${where}）${canvasNote}` });
       } catch (cause) {
         if (isEmberError(cause) && cause.code === 'stale_revision') {
           setNotice({ tone: 'error', text: `《${item.title}》刚被修改过，请刷新列表后重试` });
@@ -373,7 +392,8 @@ export const DocumentListPanel = ({
           }}
         >
           <p className={styles.deleteText}>
-            删除《{confirmDelete.title}》？文件将移入系统回收站，可在回收站找回。
+            删除《{confirmDelete.title}》？文件优先移入系统回收站；系统回收站不可用时落入库内回收目录
+            （.workbench/trash），30 天后自动清除。
           </p>
           <div className={styles.deleteActions}>
             <button
@@ -467,7 +487,11 @@ export const DocumentListPanel = ({
             className={`${styles.menuItem} ${styles.menuDanger}`}
             role="menuitem"
             disabled={kernel.env.readonlyMode}
-            title={kernel.env.readonlyMode ? readonlyText(kernel.env.readonlyReason) : '移入系统回收站，可找回'}
+            title={
+              kernel.env.readonlyMode
+                ? readonlyText(kernel.env.readonlyReason)
+                : '优先移入系统回收站；不可用时落入库内回收目录（30 天后清除）'
+            }
             onClick={() => {
               // 确认条原地替换菜单：位置、宽度都继承条目锚点，视线不跳动
               setConfirmDelete(menu);

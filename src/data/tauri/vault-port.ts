@@ -61,7 +61,10 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
     },
 
     remove: async (path) => {
-      await invoke('vault_remove', { path: String(path) });
+      const destination = await invoke<'system' | 'internal' | null>('vault_remove', {
+        path: String(path),
+      });
+      return destination;
     },
 
     // 仅供文章回滚与画布历史轮转；不注册为内核用户命令

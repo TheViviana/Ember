@@ -1,6 +1,9 @@
 import type { VaultPath } from '#doc-model';
 import type { Disposable, WriteIntent } from './types.ts';
 
+/** 用户删除的实际落点：系统回收站，或降级后的库内回收目录（vault-format §8.3） */
+export type TrashDestination = 'system' | 'internal';
+
 export interface VaultFileEvent {
   readonly kind: 'created' | 'changed' | 'removed' | 'renamed';
   readonly path: VaultPath;
@@ -27,8 +30,8 @@ export interface VaultPort {
   /** 不存在返回 null */
   read(path: VaultPath): Promise<Uint8Array | null>;
   write(path: VaultPath, bytes: Uint8Array, intent: WriteIntent): Promise<void>;
-  /** 用户删除：移入操作系统回收站（非 macOS 明确失败，不回退为永久删除） */
-  remove(path: VaultPath): Promise<void>;
+  /** 用户删除：优先系统回收站，不可用降级库内回收目录；返回实际落点，文件不存在为 null */
+  remove(path: VaultPath): Promise<TrashDestination | null>;
   /** 永久删除：仅供内核回滚内部使用，不是用户删除入口 */
   purge(path: VaultPath): Promise<void>;
   rename(from: VaultPath, to: VaultPath): Promise<void>;

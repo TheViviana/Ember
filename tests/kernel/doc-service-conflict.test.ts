@@ -53,7 +53,7 @@ const createByteVault = (
     remove: (path) => {
       if (options.failRemove === true) return Promise.reject(new Error(`注入删除失败：${String(path)}`));
       files.delete(String(path));
-      return Promise.resolve();
+      return Promise.resolve('system' as const);
     },
     purge: (path) => {
       files.delete(String(path));

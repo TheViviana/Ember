@@ -44,7 +44,7 @@ const createByteVault = (
     },
     remove: (path) => {
       files.delete(String(path));
-      return Promise.resolve();
+      return Promise.resolve('system' as const);
     },
     purge: (path) => {
       files.delete(String(path));

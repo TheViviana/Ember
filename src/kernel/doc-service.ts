@@ -15,7 +15,7 @@ import { canonicalText, hashBytes, isUtf8, parseDocText, utcNow } from './doc-te
 import type { EventBus } from './events.ts';
 import { EmberError } from './errors.ts';
 import type { PathTools } from './paths.ts';
-import type { VaultPort } from './ports.ts';
+import type { TrashDestination, VaultPort } from './ports.ts';
 import type {
   AdoptConflictOptions,
   AdoptConflictResult,
@@ -43,8 +43,8 @@ export interface DocService {
   create(input: CreateDocInput): Promise<DocSnapshot>;
   update(id: DocId, patch: DocPatch, opts: WriteOptions): Promise<WriteOutcome>;
   rename(id: DocId, next: VaultPath, opts: WriteOptions): Promise<WriteOutcome>;
-  /** 用户删除：移入系统回收站，库内不保留副本 */
-  remove(id: DocId, opts: WriteOptions): Promise<void>;
+  /** 用户删除：优先系统回收站，不可用降级库内回收目录；返回实际落点 */
+  remove(id: DocId, opts: WriteOptions): Promise<TrashDestination | null>;
 
   /** 列出该文档历史版本（新→旧）；索引缺失/损坏返回空数组并告警，不抛错 */
   listHistory(id: DocId): Promise<readonly DocHistoryEntry[]>;
@@ -842,8 +842,9 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
             id: String(id),
           });
         }
+        let destination: TrashDestination | null;
         try {
-          await port.remove(entry.path);
+          destination = await port.remove(entry.path);
         } catch (error) {
           if (error instanceof EmberError) throw error;
           throw new EmberError('io_failed', '删除失败，文档保持原样（文件未被移入回收站）', {
@@ -855,6 +856,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         versions.delete(String(id));
         byPath.delete(String(entry.path));
         emitChange({ id, path: entry.path, kind: 'removed', revision: { rev: entry.rev + 1, hash } });
+        return destination;
       });
     },
 

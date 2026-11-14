@@ -112,9 +112,13 @@ pub async fn vault_write(
 }
 
 /// 用户删除：优先系统回收站，不可用时降级 Finder 与库内回收目录（vault-format §8.3）。
+/// 返回实际落点 `system` / `internal`；文件本就不存在时返回 `null`。
 #[tauri::command]
-pub async fn vault_remove(vault: State<'_, Vault>, path: String) -> VaultResult<()> {
-    vault.remove(&path)
+pub async fn vault_remove(
+    vault: State<'_, Vault>,
+    path: String,
+) -> VaultResult<Option<&'static str>> {
+    Ok(vault.remove(&path)?.map(crate::vault::trash::TrashDestination::as_str))
 }
 
 /// 永久删除：仅供内核回滚内部使用，不是用户命令（`core.doc.purge` 仍为 v1 未实现）。

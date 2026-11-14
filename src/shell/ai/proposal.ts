@@ -1,5 +1,6 @@
 import { safeFileName, splitFrontmatter, type DocId } from '#doc-model';
 import { EmberError, isEmberError } from '../../kernel/errors.ts';
+import type { TrashDestination } from '../../kernel/ports.ts';
 import type { CreateDocInput, DocPatch, DocRevision, DocSnapshot, WriteOptions, WriteOutcome } from '../../kernel/types.ts';
 import type { PathTools } from '../../kernel/paths.ts';
 
@@ -11,7 +12,7 @@ export interface ProposalDocs {
   read(id: DocId): Promise<DocSnapshot>;
   update(id: DocId, patch: DocPatch, opts: WriteOptions): Promise<WriteOutcome>;
   create(input: CreateDocInput): Promise<DocSnapshot>;
-  remove(id: DocId, opts: WriteOptions): Promise<void>;
+  remove(id: DocId, opts: WriteOptions): Promise<TrashDestination | null>;
 }
 
 export type Proposal =
