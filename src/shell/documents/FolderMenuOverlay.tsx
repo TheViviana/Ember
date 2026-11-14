@@ -1,9 +1,11 @@
-import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
+import { createPortal } from 'react-dom';
 import { readonlyText } from '../components/readonly-text.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
+import { placeDocMenu, type DocMenuPlacement } from './doc-menu-placement.ts';
 import styles from './DocumentListPanel.module.css';
 
-/** 文件夹右键菜单锚点：盖在文件夹行上，宽度与行一致 */
+/** 文件夹右键菜单锚点：被右键文件夹行的 getBoundingClientRect（视口坐标） */
 export interface FolderMenu {
   readonly path: string;
   readonly left: number;
@@ -26,14 +28,14 @@ export interface FolderMenuOverlayProps {
 
 const MENU_HEIGHT = 84;
 const CONFIRM_HEIGHT = 208;
-const EFFECTIVE_BOTTOM_MARGIN = 72;
 
-/** 纵向定位：默认顶边对齐条目顶边；下方放不下时向上翻并夹在可视区内 */
-const anchorY = (menu: FolderMenu, height: number): number => {
-  const effectiveBottom = window.innerHeight - EFFECTIVE_BOTTOM_MARGIN;
-  if (menu.top + height <= effectiveBottom) return menu.top;
-  return Math.max(60, Math.min(menu.bottom - height, effectiveBottom - height));
-};
+/** 视口定位：宽度继承文件夹行，靠近四边时翻转或夹住不出界 */
+const place = (menu: FolderMenu, height: number): DocMenuPlacement =>
+  placeDocMenu(
+    { left: menu.left, top: menu.top, bottom: menu.bottom, width: menu.w },
+    height,
+    { width: window.innerWidth, height: window.innerHeight },
+  );
 
 const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
@@ -45,7 +47,11 @@ const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
   buttons[(index + delta + buttons.length) % buttons.length]?.focus();
 };
 
-/** 文件夹右键菜单：新建子文件夹 / 删除空文件夹（删除前原地二次确认） */
+/**
+ * 文件夹右键菜单：新建子文件夹 / 删除空文件夹（删除前原地二次确认）。
+ * 与文章菜单同源：面板的 overflow 与 backdrop-filter 会裁掉内部 fixed 浮层，
+ * 所以 portal 到 body 上按视口定位，只跟随被右键的那一行。
+ */
 export const FolderMenuOverlay = ({
   menu,
   onClose,
@@ -60,36 +66,52 @@ export const FolderMenuOverlay = ({
     setConfirm(false);
   }, [menu]);
 
+  const closeAll = useCallback((): void => {
+    setConfirm(false);
+    onClose();
+  }, [onClose]);
+
   useEscLayer('folder-menu', menu !== null);
+
   useEffect(() => {
     if (menu === null) return undefined;
+    const insideMenu = (target: EventTarget | null): boolean =>
+      target instanceof Element && target.closest('[data-doc-menu]') !== null;
     const onPointerDown = (event: PointerEvent): void => {
-      const target = event.target;
-      if (target instanceof Element && target.closest('[data-folder-menu]') !== null) return;
-      onClose();
+      if (insideMenu(event.target)) return;
+      closeAll();
+    };
+    // 列表滚动时浮层会脱离所在行，直接收起
+    const onScroll = (event: Event): void => {
+      if (insideMenu(event.target)) return;
+      closeAll();
     };
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || !isEscTop('folder-menu')) return;
       event.preventDefault();
-      onClose();
+      closeAll();
     };
     window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('scroll', onScroll, true);
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [menu, onClose]);
+  }, [menu, closeAll]);
 
   if (menu === null) return null;
   const name = menu.path.slice(menu.path.lastIndexOf('/') + 1);
+  const box = place(menu, confirm ? CONFIRM_HEIGHT : MENU_HEIGHT);
 
   if (confirm) {
-    return (
+    return createPortal(
       <div
         className={styles.deleteConfirm}
-        data-folder-menu
-        style={{ left: menu.left, top: anchorY(menu, CONFIRM_HEIGHT), width: menu.w }}
+        data-doc-menu=""
+        data-canvas-overlay="doc-menu"
+        style={{ left: box.left, top: box.top, width: box.width }}
         role="dialog"
         aria-label="删除文件夹确认"
       >
@@ -108,15 +130,17 @@ export const FolderMenuOverlay = ({
             取消
           </button>
         </div>
-      </div>
+      </div>,
+      document.body,
     );
   }
 
-  return (
+  return createPortal(
     <div
       className={styles.contextMenu}
-      data-folder-menu
-      style={{ left: menu.left, top: anchorY(menu, MENU_HEIGHT), width: menu.w }}
+      data-doc-menu=""
+      data-canvas-overlay="doc-menu"
+      style={{ left: box.left, top: box.top, width: box.width }}
       role="menu"
       onKeyDown={onMenuKeyDown}
     >
@@ -139,6 +163,7 @@ export const FolderMenuOverlay = ({
         删除文件夹…
       </button>
       {readonlyMode ? <p className={styles.menuHint}>{readonlyText(readonlyReason)}</p> : null}
-    </div>
+    </div>,
+    document.body,
   );
 };
