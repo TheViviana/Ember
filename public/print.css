@@ -34,3 +34,17 @@ hr { border: none; border-top: 1px solid #d5d9de; margin: 1.6em 0; }
 .math { font-family: Georgia, serif; font-style: italic; }
 .wiki { color: #0969da; }
 .missing-image { color: #a40e26; font-size: 0.9em; }
+
+/* 打印容器：平时不参与渲染，打印时替换掉应用外壳 */
+#ember-print-root {
+  display: none;
+}
+
+@media print {
+  body > #root {
+    display: none !important;
+  }
+  #ember-print-root {
+    display: block;
+  }
+}

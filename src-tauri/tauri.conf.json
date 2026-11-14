@@ -46,7 +46,9 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
     }
   }
 }

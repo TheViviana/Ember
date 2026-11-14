@@ -123,29 +123,72 @@ const blocksToHtml = async (blocks: readonly ReadBlock[], images: ImageResolver)
   return parts.join('\n');
 };
 
-/** 打印用 HTML：样式走应用内 /print.css（生产 CSP 禁止内联 <style>） */
-const printHtml = (title: string, bodyHtml: string): void => {
-  const frame = document.createElement('iframe');
-  frame.setAttribute('aria-hidden', 'true');
-  frame.style.position = 'fixed';
-  frame.style.right = '0';
-  frame.style.bottom = '0';
-  frame.style.width = '0';
-  frame.style.height = '0';
-  frame.style.border = '0';
-  frame.srcdoc =
-    `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
-    `<link rel="stylesheet" href="/print.css"></head><body>${bodyHtml}</body></html>`;
-  frame.onload = () => {
-    window.setTimeout(() => {
-      frame.contentWindow?.focus();
-      frame.contentWindow?.print();
-      window.setTimeout(() => {
-        frame.remove();
-      }, 30_000);
-    }, 150);
+const PRINT_ROOT_ID = 'ember-print-root';
+const PRINT_STYLE_HREF = '/print.css';
+/** 打印结束的兜底清理：afterprint 不触发时也不能把注入节点永久留在 DOM 里 */
+const PRINT_CLEANUP_MS = 300_000;
+
+/** 打印样式只在打印期间挂载，避免 body 等全局规则污染应用界面 */
+const mountPrintStyle = (): HTMLLinkElement => {
+  document.querySelectorAll<HTMLLinkElement>('link[data-ember-print-style]').forEach((link) => {
+    link.remove();
+  });
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = PRINT_STYLE_HREF;
+  link.dataset.emberPrintStyle = '';
+  document.head.appendChild(link);
+  return link;
+};
+
+/** 等图片解码完再弹打印，否则图还没画出来就进了预览 */
+const waitForImages = async (root: HTMLElement, timeoutMs: number): Promise<void> => {
+  const images = [...root.querySelectorAll('img')];
+  if (images.length === 0) return;
+  const settled = Promise.all(images.map((image) => image.decode().catch(() => undefined)));
+  await Promise.race([settled, new Promise<void>((resolve) => window.setTimeout(resolve, timeoutMs))]);
+};
+
+/**
+ * 打印用 HTML：渲染进主文档的隐藏容器，靠 /print.css 的 @media print
+ * 隐藏应用外壳、只显示这个容器，然后直接调主窗口的 window.print()。
+ * 不能走 iframe：WKWebView 下子 frame 的 print() 是空操作。
+ */
+const printHtml = async (title: string, bodyHtml: string): Promise<void> => {
+  document.querySelectorAll(`#${PRINT_ROOT_ID}`).forEach((node) => {
+    node.remove();
+  });
+  const style = mountPrintStyle();
+
+  const root = document.createElement('div');
+  root.id = PRINT_ROOT_ID;
+  root.setAttribute('aria-hidden', 'true');
+  root.innerHTML = `<h1>${escapeHtml(title)}</h1>${bodyHtml}`;
+  document.body.appendChild(root);
+
+  let cleaned = false;
+  let fallback = 0;
+  const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    window.clearTimeout(fallback);
+    window.removeEventListener('afterprint', cleanup);
+    root.remove();
+    style.remove();
   };
-  document.body.appendChild(frame);
+  window.addEventListener('afterprint', cleanup);
+  fallback = window.setTimeout(cleanup, PRINT_CLEANUP_MS);
+
+  try {
+    await waitForImages(root, 5_000);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    const printed = window.print() as unknown;
+    // Tauri 覆写的 window.print 返回 invoke 的 Promise：失败要冒泡给调用方
+    if (printed instanceof Promise) await printed;
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 };
 
 export const PRINT_EXPORT_TITLE = 'ember.doc.export-pdf';
@@ -157,5 +200,5 @@ export const exportDocPdf = async (kernel: KernelContext, docId: DocId, title: s
   const blocks = readingBlocks(body);
   const bodyHtml = await blocksToHtml(blocks, makeImageResolver(kernel.log));
   const displayTitle = title.trim().length === 0 ? '未命名文档' : title.trim();
-  printHtml(displayTitle, `<h1>${escapeHtml(displayTitle)}</h1>${bodyHtml}`);
+  await printHtml(displayTitle, bodyHtml);
 };
