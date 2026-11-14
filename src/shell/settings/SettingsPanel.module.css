@@ -178,6 +178,16 @@
   font-size: var(--text-xs);
 }
 
+.warning {
+  margin: 0 0 var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--ember-warning-border);
+  border-radius: var(--radius-md);
+  background: var(--ember-warning-tint);
+  color: var(--ember-warning);
+  font-size: var(--text-xs);
+}
+
 .options {
   display: flex;
   flex-wrap: wrap;

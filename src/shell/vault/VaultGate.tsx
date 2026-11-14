@@ -60,15 +60,16 @@ export const VaultGate = ({ children }: VaultGateProps): ReactElement => {
   }, []);
 
   /**
-   * 用户显式选目录：面板按 `picker` 决定是否允许新建文件夹，
-   * 打开一律用 `create`（允许初始化）——显式选择即授权在该文件夹落库元数据。
+   * 用户显式选目录：面板是否允许新建文件夹与打开方式取同一个值。
+   * `existing` 只接受已有库（缺库身份会报「还不是 Ember 库」），
+   * `create` 才允许在所选/新建的文件夹里初始化库元数据。
    */
   const pickAndOpen = useCallback(
     async (picker: VaultOpenMode): Promise<void> => {
       setError(null);
       try {
         const path = await chooseVaultDirectory(picker);
-        if (path !== null) await openAt(path, 'create');
+        if (path !== null) await openAt(path, picker);
       } catch (cause: unknown) {
         setError(describeIpcError(cause));
       }
@@ -138,7 +139,7 @@ export const VaultGate = ({ children }: VaultGateProps): ReactElement => {
                       void pickAndOpen('existing');
                     }}
                   >
-                    选择其他文件夹
+                    打开其他库
                   </button>
                 </div>
               </>
@@ -152,7 +153,7 @@ export const VaultGate = ({ children }: VaultGateProps): ReactElement => {
                     void pickAndOpen('existing');
                   }}
                 >
-                  选择文件夹
+                  打开已有库
                 </button>
                 <button
                   type="button"
@@ -162,7 +163,7 @@ export const VaultGate = ({ children }: VaultGateProps): ReactElement => {
                     void pickAndOpen('create');
                   }}
                 >
-                  新建文件夹
+                  新建库…
                 </button>
               </div>
             )}
@@ -213,7 +214,7 @@ export const VaultGate = ({ children }: VaultGateProps): ReactElement => {
                 void pickAndOpen('existing');
               }}
             >
-              选择其他文件夹
+              打开其他库
             </button>
           </div>
         ) : null}

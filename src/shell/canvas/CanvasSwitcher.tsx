@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { CanvasId } from '#doc-model';
 import { useEscLayer, isEscTop } from '../esc-arbiter.ts';
+import { readonlyText } from '../components/readonly-text.ts';
 import type { CanvasLibrary } from './use-canvas-library.ts';
 import styles from './CanvasSwitcher.module.css';
 
 export interface CanvasSwitcherProps {
   readonly library: CanvasLibrary;
+  /** 只读会话：新建画布会失败，入口直接禁用并给出原因 */
+  readonly readonlyMode: boolean;
+  readonly readonlyReason: string | null;
 }
 
 /** 当前画布标题 */
@@ -17,7 +21,11 @@ const titleOf = (library: CanvasLibrary): string => {
 };
 
 /** 顶栏当前画布胶囊 + 画布列表浮层 + 面包屑 */
-export const CanvasSwitcher = ({ library }: CanvasSwitcherProps): ReactElement => {
+export const CanvasSwitcher = ({
+  library,
+  readonlyMode,
+  readonlyReason,
+}: CanvasSwitcherProps): ReactElement => {
   const [open, setOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [renaming, setRenaming] = useState<CanvasId | null>(null);
@@ -170,7 +178,9 @@ export const CanvasSwitcher = ({ library }: CanvasSwitcherProps): ReactElement =
 
           <p className={styles.groupLabel}>全部画布</p>
           {library.canvases.length === 0 ? (
-            <p className={styles.empty}>还没有画布，先新建一张</p>
+            <p className={styles.empty}>
+              {readonlyMode ? `${readonlyText(readonlyReason)}，不能新建画布` : '还没有画布，先新建一张'}
+            </p>
           ) : (
             library.canvases.map((canvas) => (
               <Row
@@ -210,8 +220,9 @@ export const CanvasSwitcher = ({ library }: CanvasSwitcherProps): ReactElement =
           <div className={styles.newRow}>
             <input
               className={styles.newInput}
-              placeholder="新画布名称…"
+              placeholder={readonlyMode ? '只读模式，不能新建画布' : '新画布名称…'}
               value={newTitle}
+              disabled={readonlyMode}
               onChange={(event) => {
                 setNewTitle(event.target.value);
               }}
@@ -222,7 +233,13 @@ export const CanvasSwitcher = ({ library }: CanvasSwitcherProps): ReactElement =
                 }
               }}
             />
-            <button type="button" className={styles.newButton} onClick={submitNew}>
+            <button
+              type="button"
+              className={styles.newButton}
+              disabled={readonlyMode}
+              title={readonlyMode ? readonlyText(readonlyReason) : '新建画布'}
+              onClick={submitNew}
+            >
               新建
             </button>
           </div>

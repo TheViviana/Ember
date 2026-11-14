@@ -43,6 +43,8 @@ export type VaultOpenMode = 'existing' | 'create';
 export interface VaultInfo {
   readonly root: string;
   readonly recents: readonly VaultRecent[];
+  /** 打开成功但需要提示的降级信息（配置写失败、监视未启动、旧配置已备份） */
+  readonly warning?: string;
 }
 
 export const readVaultStartup = (): Promise<VaultStartupView> =>

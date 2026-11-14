@@ -87,7 +87,11 @@ export const Topbar = ({
           exportDisabled={exportDisabled}
         />
 
-        <CanvasSwitcher library={library} />
+        <CanvasSwitcher
+          library={library}
+          readonlyMode={readonlyMode}
+          readonlyReason={readonlyReason}
+        />
       </div>
 
       <div className={`${styles.group} ${styles.right}`}>
