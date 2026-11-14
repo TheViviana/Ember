@@ -77,6 +77,7 @@ export const stopNoise = (): void => {
       }
     }, FADE_SECONDS * 1000);
   } catch {
+    // 淡出参数设置失败（上下文已关闭等）：直接停掉节点，避免白噪音残留
     try {
       node.stop();
     } catch {
@@ -123,6 +124,7 @@ export const syncNoise = (desired: NoiseKind | null, nextVolume: number): void =
     gain = nodeGain;
     playing = desired;
   } catch {
+    // 建节点失败（上下文已关闭等）：回滚到停止态，下一次 tick 会重试
     stopNoise();
   }
 };

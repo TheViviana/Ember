@@ -17,7 +17,7 @@ export default defineConfig({
     strictPort: true,
   },
   build: {
-    target: 'safari18',
-    sourcemap: true,
+    target: 'safari16',
+    sourcemap: false,
   },
 });

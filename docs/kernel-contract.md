@@ -257,7 +257,7 @@ export interface KernelContext {
 
 `code` 是稳定契约，UI 只分支 code，不解析 message。v2 代码表：
 
-`not_implemented` `doc_not_found` `path_exists` `path_outside_vault` `stale_revision` `invalid_frontmatter` `invalid_payload` `duplicate_id` `vault_locked` `vault_uninitialized` `index_unavailable` `command_not_found` `command_reentrant` `duplicate_command` `invalid_command_id` `duplicate_extension` `canvas_invalid` `io_failed` `startup_failed`
+`not_implemented` `doc_not_found` `path_exists` `path_outside_vault` `stale_revision` `invalid_frontmatter` `invalid_payload` `duplicate_id` `vault_locked` `vault_uninitialized` `index_unavailable` `command_not_found` `command_reentrant` `duplicate_command` `invalid_command_id` `duplicate_extension` `canvas_invalid` `io_failed` `permission_denied` `startup_failed`
 
 （`duplicate_capability` `capability_failed` `duplicate_slot` 已随能力体系与装饰槽删除。）
 
@@ -283,6 +283,7 @@ export interface KernelContext {
 | `duplicate_extension` | TS | 扩展槽重复注册 |
 | `canvas_invalid` | TS | 画布场景/变更非法或总览画布缺失 |
 | `io_failed` | Rust | 磁盘 IO 失败（含带绝对路径的 `IoAt`） |
+| `permission_denied` | Rust | 库根或文稿目录未获 macOS TCC 授权，或被系统拒绝访问 |
 | `startup_failed` | Rust | 启动期无法建立可用库（身份损坏/版本不支持） |
 
 ### 8.1 错误码已知限制
@@ -327,3 +328,66 @@ export interface KernelContext {
 约束：导出不经过 `DocService` 队列，因此外壳必须先 `flushFloatEditors()` → `docs.flush()` → `canvas.flush()` →
 `settings.flush()` 再发命令；命令本身仍会复核每个源文件的 hash，导出期间的外部改动会让整次导出失败而不是产出半新半旧的包。
 导出包格式与目录映射见 `docs/vault-format.md` §11。
+
+---
+
+## 12. AI 面板行为（shell 层）
+
+AI 助手是主内容区右下角的浮动面板（默认位于 HUD 与左下角横排上方），属于 shell 层能力，内核只提供 `docs.*` 读写入口（内核不负责提示词）。它不占文章浮窗名额，浮窗胶囊计数不含它。本节记录它的配置、存储与验证方式。
+
+**v2 变更**：面板不再常驻——由命令 `ember.ai.chat`、顶栏「AI」按钮或 ⌘K 唤起，关闭即收起（会话内容是组件内存态）；位置与尺寸仍按机器本地记忆。回答可一键「落为画布节点」（自由文本节点，落在当前镜头中心）或「存为新文章」。
+
+### 12.1 配置
+
+设置页 →「AI」：
+
+| 项 | 说明 |
+| --- | --- |
+| provider | `ollama`（默认 `http://127.0.0.1:11434`）或 `openai-compatible` |
+| base URL | 用户自填；不内置任何外域地址 |
+| model | 必填，空模型时聊天与六种操作会直接提示 |
+| API Key | `type="password"`，保存后只显示「已保存」，不回显明文；Ollama 可不填 |
+
+密钥落点：
+
+- 优先系统钥匙串，账户名 `provider:v1:<origin>`（不含密钥、不含模型）。
+- 钥匙串不可用时降级为进程内存，8 小时 TTL，进程退出即回收；界面会提示「仅本次运行有效」。
+
+### 12.2 入口与交互
+
+- 六种文章操作（润色 / 总结 / 解释 / 延伸 / 定义 / 研究）不再常驻面板；在文章浮窗里选中非空文本后，于选区附近浮出菜单。
+- 菜单复用画布子菜单的 `placeSubmenu`：贴选区、右侧放不下向左翻、下方放不下上翻、始终留在浮窗内。
+- 取消选择、点击空白、按 Esc、滚动正文都会收起菜单；右键菜单优先，选区菜单先让位。
+- 只读库下六项禁用并给出原因，不静默失败。
+- 面板标题栏可拖动，右下角可同时改宽高；松手才写 `ui.json`，窗口缩放只重新夹取显示位置、不落盘。
+
+### 12.3 存储归属
+
+- 配置写机器本地 `ui.json`：`ai: { provider, baseUrl, model }`、`translationChannel`、`panels.ai: { x, y, width, height }`。
+- 缺 `x` / `y` / `width` / `height` 时按右下默认位与 360×480 补齐；位置、尺寸在渲染时夹进当前主内容区，底部预留 52px 避开 HUD 与左下角横排。
+- 序列化时未知顶层键与 `panels.ai` 之外的 `panels.*` 子键原样保留（例如旧版 `recall`、`sidebarWidth`），不做整体重写；`pomodoro` 是已知键，见 vault-format §8.4。
+- 对话、写回提案、撤销栈只存在内存，不写 `ui.json`，也不使用 `localStorage`。
+
+### 12.4 网络边界
+
+- 运行时除用户显式配置的 AI 端点外零外联；默认只有回环地址。
+- 端点解析后逐 IP 校验并固定解析结果，防 DNS 重绑定；HTTP 仅允许回环（除非将来显式放开）。
+- 门禁：`pnpm check:offline`、`pnpm check:runtime`；人工核对用 `scripts/manual/net-sample.sh`。
+- CSP：`style-src-elem` 里的 `nonce-RW1iZXJFZGl0b3JTdHlsZU5vbmNl` 是**编译期写死的白名单令牌**，不是每次加载随机生成的 nonce；它只用于放行 style-mod 注入的 `<style>`，固定且可从产物中读出，**不提供抗注入能力**。不要把它当 XSS 防线，也不要为「更像 nonce」而改成随机值：style-mod 在注入时无法拿到运行期随机值，改了会直接让 CodeMirror 样式被整段拦掉。
+
+### 12.5 写回与撤销
+
+- 生成阶段只读；回复下方的「替换正文…」「存为新文章…」「删除…」只生成内存提案，点「应用」才经 `kernel.docs.update/create/remove` 写入，且必带 `base` 与 `intent: 'user'`。
+- 应用前复核 `base.hash`，不一致即作废提案（stale）。
+- 三方合并冲突时保留磁盘版本、报告冲突副本路径，不生成撤销条。
+- 撤销仅在本次运行内有效：替换恢复旧正文；新建移入回收站；删除按原 id / 路径 / 正文 / frontmatter 重建（`created`/`updated` 会刷新为恢复时刻）。
+
+### 12.6 验证
+
+```bash
+pnpm typecheck
+pnpm test                 # 含 tests/shell/ai-proposal.test.ts、tests/shell/machine-store-ai.test.ts
+pnpm ai:test              # Rust 侧 AI 传输与端点校验
+pnpm gate
+pnpm check:network        # build + offline + runtime-network
+```

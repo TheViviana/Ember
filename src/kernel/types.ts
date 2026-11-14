@@ -268,7 +268,7 @@ export interface VaultSettings {
     /** 总览画布 id：固定的一张特殊画布 */
     readonly overviewCanvasId?: string;
     readonly canvasGrid: CanvasGrid;
-    /** 文档浮窗上限（多文档浮窗：默认 8，可在设置调整） */
+    /** 文档浮窗上限（可在设置调整） */
     readonly floatLimit?: number;
     /** 最近访问的画布 id（新在前，最多 10 条；画布切换器「最近访问」分组） */
     readonly recentCanvasIds?: readonly string[];

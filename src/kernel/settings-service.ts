@@ -123,7 +123,10 @@ const mergePatch = (current: VaultSettings, patch: SettingsPatch): VaultSettings
   const mergedUi: Record<string, unknown> = { ...current.ui, ...uiPatch };
   // 可空键的 null = 删除该键（不是把 null 存进 JSON）
   for (const key of NULLABLE_UI_KEYS) {
-    if (Object.hasOwn(uiPatch, key) && (uiPatch as Record<string, unknown>)[key] === null) {
+    if (
+      Object.prototype.hasOwnProperty.call(uiPatch, key) &&
+      (uiPatch as Record<string, unknown>)[key] === null
+    ) {
       delete mergedUi[key];
     }
   }

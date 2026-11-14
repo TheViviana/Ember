@@ -203,6 +203,7 @@ export const AttachmentPanel = ({ library, onClose }: AttachmentPanelProps): Rea
         saved += 1;
         if (result.deduped) deduped += 1;
       } catch {
+        // 单张失败只计数：汇总提示会显示失败张数，逐张记日志没有增量信息
         failed += 1;
       }
     }

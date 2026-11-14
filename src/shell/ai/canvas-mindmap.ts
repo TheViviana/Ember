@@ -62,7 +62,12 @@ export const parseMindMap = (text: string): MindMapNode | null => {
   let raw: unknown;
   try {
     raw = JSON.parse(stripped.slice(start, end));
-  } catch {
+  } catch (error) {
+    // 模型偶尔会输出非 JSON 片段：保留「解析失败」以便排查，但仍按无导图处理
+    console.error(
+      '思维导图 JSON 解析失败，本次不生成导图：',
+      error instanceof Error ? error.message : String(error),
+    );
     return null;
   }
   return normalizeNode(raw, 0);

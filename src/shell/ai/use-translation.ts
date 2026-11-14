@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createUlid } from '#doc-model';
 import { useMachineStore } from '../../data/stores/machine-store.ts';
 import {
   aiKeySaved,
@@ -135,7 +136,7 @@ export const useTranslation = () => {
           let firstError: string | null = null;
           for (const block of blocks) {
             if (runIdRef.current !== id) return;
-            const requestId = crypto.randomUUID();
+            const requestId = createUlid();
             publicRequestRef.current = requestId;
             try {
               const outcome = await translatePublicBlock(block.text, requestId);

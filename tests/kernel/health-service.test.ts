@@ -27,7 +27,7 @@ const setup = (options: MemoryVaultOptions = {}) => {
   const paths = createPathTools();
   const events = createEventBus();
   const docs = createDocService({ port: vault.port, paths, events, log: silentLog, now: NOW });
-  const health = createHealthService({ port: vault.port, paths, docs, now: NOW });
+  const health = createHealthService({ port: vault.port, paths, docs, log: silentLog, now: NOW });
   return { vault, docs, health };
 };
 

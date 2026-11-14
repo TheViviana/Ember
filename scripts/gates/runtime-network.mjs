@@ -17,7 +17,14 @@ import { DEFAULT_ROOT } from './lib.mjs';
 
 const PREVIEW_PORT = 4173;
 const DEBUG_PORT = 9333;
-const AUDIT_URL = `http://127.0.0.1:${PREVIEW_PORT}/`;
+/**
+ * 必须与 `vite preview` 自己的绑定方式一致：vite 默认按主机名 `localhost` 监听，
+ * 只绑到解析结果里的第一个地址（本机是 `[::1]`）。此处若写死 `127.0.0.1`，
+ * 探测会连不上真实服务，并在 20s 后误判成「vite preview 启动超时」。
+ * 端口预检也必须用同一个主机名，否则「预检认为空闲、实际已有服务占用」会分裂。
+ */
+const PREVIEW_HOST = 'localhost';
+const AUDIT_URL = `http://${PREVIEW_HOST}:${PREVIEW_PORT}/`;
 const WAIT_AFTER_LOAD_MS = 2500;
 /** 每个无外部信号的等待点都必须有上限：超时判失败，绝不靠「反正不会卡」 */
 const WS_OPEN_TIMEOUT_MS = 10000;
@@ -38,13 +45,31 @@ const LOOPBACK_HOST = /^(localhost|127\.0\.0\.1|\[::1\]|::1)$/;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * 永久性失败：重试没有意义。DNS 解析失败若被当成「服务还没就绪」吞掉，
+ * 21s 后只会得到一句「vite preview 启动超时」，把人送去查一个不存在的构建问题。
+ */
+class FatalProbeError extends Error {}
+
+const causeCodeOf = (error) => {
+  const cause = error instanceof Error && 'cause' in error ? error.cause : null;
+  if (!(cause instanceof Error) || !('code' in cause)) return null;
+  return typeof cause.code === 'string' ? cause.code : null;
+};
+
+const isPermanentResolveError = (error) => {
+  const code = causeCodeOf(error);
+  return code === 'ENOTFOUND' || code === 'EAI_NONAME' || code === 'ERR_INVALID_URL';
+};
+
 async function waitFor(label, predicate, timeoutMs = 20000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
       const value = await predicate();
       if (value !== null && value !== undefined) return value;
-    } catch {
+    } catch (error) {
+      if (error instanceof FatalProbeError) throw error;
       // 服务还没就绪，继续等
     }
     await sleep(200);
@@ -85,7 +110,7 @@ export function classifyStartupFailure({ stage, code = null, signal = null }) {
 /** 端口已被占用时继续跑，会连到别人的服务；必须在 spawn 之前拦住 */
 const portInUse = (port) =>
   new Promise((resolveProbe) => {
-    const probe = connect({ port, host: '127.0.0.1' });
+    const probe = connect({ port, host: PREVIEW_HOST });
     const finish = (value) => {
       probe.destroy();
       resolveProbe(value);
@@ -220,7 +245,15 @@ async function main() {
   try {
     await Promise.race([
       waitFor('vite preview', async () => {
-        const response = await fetch(AUDIT_URL, { signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+        let response;
+        try {
+          response = await fetch(AUDIT_URL, { signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+        } catch (error) {
+          if (isPermanentResolveError(error)) {
+            throw new FatalProbeError(`审计地址的主机名无法解析：${PREVIEW_HOST}`);
+          }
+          throw error;
+        }
         return response.ok ? true : null;
       }),
       previewGuard.promise,
@@ -252,6 +285,11 @@ async function main() {
 
     browserGuard = guardChildExit(browser, 'chromium');
 
+    /**
+     * 调试端点刻意保留 `127.0.0.1` 字面量：Chromium 的 --remote-debugging-port
+     * 固定只监听 IPv4 回环，不按主机名解析，这里换成 `localhost` 反而可能先试 `::1`。
+     * 与 vite 的「按主机名绑定」不是同一类服务，不要为了表面统一而改。
+     */
     await Promise.race([
       waitFor('Chromium 调试端口', async () => {
         const response = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/version`, {

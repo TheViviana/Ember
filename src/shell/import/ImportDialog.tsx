@@ -13,6 +13,7 @@ import {
 } from './markdown-import.ts';
 import { useImportStore } from './import-store.ts';
 import { readonlyText } from '../components/readonly-text.ts';
+import { useFocusTrap } from '../use-focus-trap.ts';
 import styles from './ImportDialog.module.css';
 
 type Stage = 'pick' | 'reading' | 'preview' | 'writing' | 'done';
@@ -48,6 +49,7 @@ export const ImportDialog = (): ReactElement | null => {
   const runRef = useRef(0);
   const filesRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
 
   const documents = useQuery({
     queryKey: ['docs', 'list'],
@@ -69,6 +71,9 @@ export const ImportDialog = (): ReactElement | null => {
     setResult(null);
     setProgress({ done: 0, total: 0 });
   }, [mode]);
+
+  // 对话框常驻挂载：mode 为空时根节点不渲染，trap 只在可见期间介入
+  useFocusTrap(dialogRef, mode !== null);
 
   if (mode === null) return null;
 
@@ -150,7 +155,13 @@ export const ImportDialog = (): ReactElement | null => {
 
   return (
     <div className={styles.scrim} role="presentation">
-      <section className={styles.dialog} role="dialog" aria-modal="true" aria-label="导入 Markdown">
+      <section
+        ref={dialogRef}
+        className={styles.dialog}
+        role="dialog"
+        aria-modal="true"
+        aria-label="导入 Markdown"
+      >
         <header className={styles.head}>
           <h2 className={styles.title}>{mode === 'folder' ? '导入 Markdown 文件夹' : '导入 Markdown 文件'}</h2>
           <button type="button" className={styles.close} aria-label="关闭导入" onClick={close}>

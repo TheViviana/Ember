@@ -377,7 +377,8 @@ export const createCanvasHost = (options: CanvasHostOptions): CanvasHost => {
         hash,
         readable: true,
       };
-    } catch {
+    } catch (error) {
+      log.error('画布历史版本解析失败，按不可读返回', { id: key, slot, error: String(error) });
       return { slot, updatedAt: '', nodeCount: 0, hash, readable: false };
     }
   };

@@ -20,6 +20,7 @@ import {
 } from '../../data/tauri/ai.ts';
 import type { CanvasGrid, SettingsPatch, VaultSettings } from '../../kernel/types.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
+import { useFocusTrap } from '../use-focus-trap.ts';
 import {
   PUBLIC_TRANSLATION_PRIVACY,
   TRANSLATION_CHANNEL_OPTIONS,
@@ -306,10 +307,17 @@ export const SettingsPanel = ({
   }, [ai]);
 
   useEscLayer('settings', true);
+  // 内联确认框可见期间成为栈顶：Esc 只关确认框，再按一次才落到设置面板
+  useEscLayer('settings-public-confirm', publicConfirmOpen);
+  useFocusTrap(panelRef);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return;
+      if (isEscTop('settings-public-confirm')) {
+        setPublicConfirmOpen(false);
+        return;
+      }
       // 统一仲裁：更晚打开的浮层（如命令面板）持有 Esc，本层让位
       if (!isEscTop('settings')) return;
       onClose();
@@ -476,7 +484,7 @@ export const SettingsPanel = ({
   const floatLimit = settings?.ui.floatLimit ?? DEFAULT_FLOAT_LIMIT;
   const editorLineNumbers = settings?.ui.editorLineNumbers !== false;
   const toolPomodoro = settings?.ui.toolPomodoro === true;
-  const toolGallery = settings?.ui.toolGallery !== false;
+  const toolGallery = settings?.ui.toolGallery === true;
 
   return (
     <div className={styles.scrim} role="presentation" onClick={onClose}>

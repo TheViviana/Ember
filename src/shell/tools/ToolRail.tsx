@@ -32,11 +32,11 @@ export const ToolRail = ({
 }: ToolRailProps): ReactElement => {
   const [panel, setPanel] = useState<ToolPanelKey | null>(null);
 
-  // 命令总线的「打开某面板」与横排按钮共用同一份开关状态
+  // 命令总线的「打开某面板」与横排按钮共用同一份开关状态：关闭时连命令也不注册
   const openPanel = useCallback((key: ToolPanelKey): void => {
     setPanel(key);
   }, []);
-  useToolCommands(openPanel);
+  useToolCommands(openPanel, entries.pomodoro);
 
   // Esc 关闭当前面板：统一仲裁，更晚打开的浮层（设置/命令面板/专注浮窗）优先
   useEscLayer('tool-panel', panel !== null);

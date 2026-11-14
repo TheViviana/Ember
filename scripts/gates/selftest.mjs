@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkCsp } from './csp.mjs';
 import { scanBans } from './bans.mjs';
@@ -14,7 +14,7 @@ import { classifyStartupFailure, withTimeout } from './runtime-network.mjs';
 import { checkSize, SIZE_LIMIT } from './size.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const SCRIPTS = { layers: 'layers.mjs', cycles: 'cycles.mjs', bans: 'bans.mjs' };
+const SCRIPTS = { layers: 'layers.mjs', cycles: 'cycles.mjs', bans: 'bans.mjs', compat: 'compat.mjs' };
 
 const runGate = (script, root) => {
   try {
@@ -844,19 +844,56 @@ if (realSize.length === 0) {
 }
 
 {
-  // 第三处同名映射 vite.config.ts 不参与门禁解析，这里只做键名存在性断言（不比对路径）
+  // 第三处同名映射 vite.config.ts 不参与门禁解析：这里只按
+  // `'#key': alias('相对路径')` 这一种字面形式抽出目标，与另外两处比对绝对路径是否一致。
+  // 不解析 vite 配置结构，也不处理 alias() 之外的写法（遇到即报「未找到」）。
   const root = join(here, '..', '..');
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-  const keys = Object.keys(pkg.imports ?? {});
+  const tsconfig = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf8'));
   const viteText = readFileSync(join(root, 'vite.config.ts'), 'utf8');
-  const missing = keys.filter(
-    (key) => !viteText.includes(`'${key}'`) && !viteText.includes(`"${key}"`),
-  );
-  if (keys.length > 0 && missing.length === 0) {
-    process.stdout.write(`✓ selftest:vite imports 的 ${keys.length} 个键名均出现在 vite.config.ts\n`);
+  const imports = typeof pkg.imports === 'object' && pkg.imports !== null ? pkg.imports : {};
+  const paths =
+    typeof tsconfig.compilerOptions?.paths === 'object' && tsconfig.compilerOptions.paths !== null
+      ? tsconfig.compilerOptions.paths
+      : {};
+
+  const viteAliases = new Map();
+  const vitePattern = /(['"])(#[^'"]+)\1\s*:\s*alias\(\s*(['"])([^'"]+)\3\s*\)/g;
+  for (const match of viteText.matchAll(vitePattern)) {
+    viteAliases.set(match[2], resolve(root, match[4]));
+  }
+
+  const show = (abs) => relative(root, abs).split('\\').join('/');
+  const problems = [];
+  for (const [key, target] of Object.entries(imports)) {
+    if (typeof target !== 'string') continue;
+    const expected = resolve(root, target);
+    const candidates = Array.isArray(paths[key])
+      ? paths[key].filter((value) => typeof value === 'string').map((value) => resolve(root, value))
+      : [];
+    if (!candidates.includes(expected)) {
+      problems.push(
+        `${key}：tsconfig paths ${candidates.length === 0 ? '缺失' : candidates.map(show).join(' | ')}，期望 ${show(expected)}`,
+      );
+    }
+    const viteTarget = viteAliases.get(key);
+    if (viteTarget === undefined) problems.push(`${key}：vite.config.ts 未找到 alias`);
+    else if (viteTarget !== expected) problems.push(`${key}：vite.config.ts 指向 ${show(viteTarget)}，期望 ${show(expected)}`);
+  }
+  for (const key of viteAliases.keys()) {
+    if (!(key in imports)) problems.push(`${key}：只出现在 vite.config.ts`);
+  }
+  for (const key of Object.keys(paths)) {
+    if (!(key in imports)) problems.push(`${key}：只出现在 tsconfig paths`);
+  }
+
+  if (Object.keys(imports).length > 0 && problems.length === 0) {
+    process.stdout.write(
+      `✓ selftest:alias ${Object.keys(imports).length} 个别名在 imports / tsconfig paths / vite alias 三处一致\n`,
+    );
   } else {
     failures += 1;
-    process.stdout.write(`✗ selftest:vite 未在 vite.config.ts 找到别名键：${JSON.stringify(missing)}\n`);
+    process.stdout.write(`✗ selftest:alias 三处不一致：\n  ${problems.join('\n  ')}\n`);
   }
 }
 

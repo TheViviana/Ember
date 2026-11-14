@@ -303,7 +303,7 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免�
     "overviewCanvasId": "01JB8ZQ3K4M5N6P7Q8R9S0T1V7",
     "recentCanvasIds": ["01JB8ZQ3K4M5N6P7Q8R9S0T1V5"],
     "canvasGrid": { "size": 8, "snap": true },
-    "floatLimit": 8,
+    "floatLimit": 5,
     "toolPomodoro": false,
     "toolGallery": false,
     "theme": "ember-black"
@@ -320,7 +320,8 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免�
 | `ui.overviewCanvasId` | ULID 或缺失 | 总览画布（卡片即 Portal，内核自动对账）。缺失时 `ensureOverview` 重建。 |
 | `ui.recentCanvasIds` | string[] 或缺失 | 最近访问的画布 id，新在前，最多 10 条。 |
 | `ui.canvasGrid` | `{ size: 8\|16\|32, snap: boolean }` | 画布网格尺寸与吸附。缺失时默认 `{ size: 8, snap: true }`。 |
-| `ui.floatLimit` | number | 文档浮窗上限，1–12，默认 8；满额静默挤掉最久未激活的一扇。 |
+| `ui.floatLimit` | number | 文档浮窗上限，1–12，默认 5；满额时不自动关闭任何窗口，先提示用户，用户显式确认后再挤掉最久未激活的一扇。 |
+| `ui.editorLineNumbers` | boolean | 文稿编辑器行号；缺失时默认开启（`!== false`）。 |
 | `ui.toolPomodoro` | boolean | 左下角番茄钟入口（能力化，默认关）。 |
 | `ui.toolGallery` | boolean | 左下角附件面板入口（能力化，默认关；键名沿用旧图库命名）。 |
 | `ui.theme` | `"ember-black"` | 主题标识；仅纯黑主题。 |
@@ -444,10 +445,10 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免�
 ### 8.4 machines/<machineId>/ui.json（机器本地，不在库内）
 
 ```json
-{ "schemaVersion": 1, "floatSizes": {}, "floatPositions": {}, "pomodoro": {}, "ai": { "provider": "ollama", "baseUrl": "http://127.0.0.1:11434", "model": "" }, "panels": { "ai": { "x": 0, "y": 0, "width": 360, "height": 480 } }, "canvasFlags": { "01J...": { "recentEdits": true } } }
+{ "schemaVersion": 1, "floatSizes": {}, "floatPositions": {}, "pomodoro": {}, "ai": { "provider": "ollama", "baseUrl": "http://127.0.0.1:11434", "model": "" }, "translationChannel": "model", "panels": { "ai": { "x": 0, "y": 0, "width": 360, "height": 480 } }, "canvasFlags": { "01J...": { "recentEdits": true } } }
 ```
 
-- 已知键：`floatSizes`、`floatPositions`、`pomodoro`、`ai`、`panels.ai`（仅 x/y/width/height，AI 面板已改为命令唤起）、`canvasFlags`（每画布 UI 开关，如最近编辑层）。
+- 已知键：`floatSizes`、`floatPositions`、`pomodoro`、`ai`、`panels.ai`（仅 x/y/width/height，AI 面板已改为命令唤起）、`canvasFlags`（每画布 UI 开关，如最近编辑层）、`translationChannel`（`model` | `public`；缺省或非法值回落 `model`）。
 - **AI 会话持久化（阶段 7）**：`machines/<machineId>/ai/<vaultId>.json` 存最近一次对话 turns、未应用 proposal、崩溃恢复中的 applying 状态；schemaVersion 当前 1，文件不存在或损坏时水合为空态；不持久化 UndoAction（跨重启撤销本期不做）、不持久化 API Key（钥匙串里）；备份不扫此目录、不进知识库索引。
 - 历史遗留键（旧版 `recall`、`sidebarWidth`、`panels.ai.open`）不再是已知键，作为未知键原样保留。
 - 序列化时未知顶层键与 `panels.*` 的他人子键**原样保留**，不做整体重写；对话与提案只存内存，不落盘。

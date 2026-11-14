@@ -20,6 +20,7 @@ export const isUtf8 = (bytes: Uint8Array): boolean => {
     strictDecoder.decode(bytes);
     return true;
   } catch {
+    // 探测分支：解码失败就是「非 UTF-8」这一正常判断结果，不是异常，不应记日志
     return false;
   }
 };
@@ -59,7 +60,11 @@ export const parseDocText = (text: string): ParsedDocText => {
   let parsed: unknown;
   try {
     parsed = parseYaml(split.raw);
-  } catch {
+  } catch (error) {
+    console.error(
+      'frontmatter YAML 解析失败，按无 frontmatter 降级保留原文：',
+      error instanceof Error ? error.message : String(error),
+    );
     return {
       frontmatter: normalizeFrontmatter({}).frontmatter,
       body: text,

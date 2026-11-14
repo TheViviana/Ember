@@ -120,7 +120,8 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
         try {
           const snap = await kernel.docs.read(id);
           return { meta: { rev: snap.meta.rev } };
-        } catch {
+        } catch (error) {
+          kernel.log.error('AI 会话回填时读取文档失败，跳过该轮', { error: toErrorText(error) });
           return null;
         }
       },
@@ -299,7 +300,8 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
           content:
             `当前文章《${title}》的正文如下，回答时优先依据它；正文之外的信息以用户输入为准：\n\n${body}`,
         });
-      } catch {
+      } catch (error) {
+        kernel.log.error('读取当前文章失败，本次对话未附带正文', { error: toErrorText(error) });
         setError('读取当前文章失败，本次对话未附带正文。');
       }
     }

@@ -58,7 +58,7 @@ Forward-looking design with tech-inspired typography, modern layouts, and a slee
 
 - 窗口底色：`--ember-bg-base` = `#0a0a0a`，无边框窗口启动无白闪（index.html 首屏同色）。
 - 画布底色：`--ember-canvas-bg` 黑色径向渐变，终点为纯黑。
-- 所有颜色、尺寸、层级只允许通过 token 引用；组件 CSS Module 里禁止裸色值、裸 `z-index`、内联 `style`。
+- 所有颜色、尺寸、层级优先通过 token 引用；组件 CSS Module 中禁止新增裸色值（`var(--token, fallback)` 的回落值除外），禁止新增跨组件裸 `z-index`（局部层叠上下文内的相对层序可用 1/2，但跨组件层级必须使用 `--layer-*`）；内联 `style` 仅允许窗口几何与画布 CSS 变量（`--node-*` / `--viewport-*` 等）。
 - 字体仅本地 `@font-face`（Geist / Roboto / Anonymous Pro），禁止任何远程字体或图标库。
 
 ## 窗口边框
@@ -72,7 +72,7 @@ Forward-looking design with tech-inspired typography, modern layouts, and a slee
 ## 无限画布
 
 - 绘制层级：网格 → 连线 → 节点（组在节点层内部排序沉底）→ 框选 → 画布工具条（过滤/书签/最近编辑）→ 引线菜单/右键菜单 → 浮窗层 → 图片大图浮层 → 窗口 chrome（用 `--layer-*`）。
-- 节点默认 320 × 200，最小 160 × 100；圆角 10px，1px 边框 `--ember-node-border`，选中 `--ember-node-border-active`，阴影 `--ember-node-shadow`。
+- 节点默认 320 × 200，最小 160 × 100；圆角 `--ember-node-radius`（12px），1px 边框 `--ember-node-border`，选中 `--ember-node-border-active`，阴影 `--ember-node-shadow`。
 - 文章节点内容：标题单行省略、标签 chips 最多 3 个（多余显示 `+n`）、简介 2 行省略；简介为空显示「暂无简介」。
 - 自由文本节点：正文就地编辑，底色 `--ember-node-bg-note`。
 - 连线：1.5px 贝塞尔曲线，默认 `--ember-edge`，激活 `--ember-edge-active`；关系标签以胶囊渲染。

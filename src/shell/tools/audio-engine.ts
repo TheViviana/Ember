@@ -17,6 +17,7 @@ const createContext = (): AudioContext | null => {
   try {
     return new Ctor();
   } catch {
+    // 构造失败（平台不支持或被自动播放策略拒绝）：静默降级，计时与界面不受影响
     return null;
   }
 };
@@ -35,6 +36,7 @@ export const unlockAudio = async (): Promise<void> => {
   try {
     if (ctx.state === 'suspended') await ctx.resume();
   } catch {
+    // 解锁失败（非用户手势或上下文已关闭）：保持静默，等下一次手势重试
     return;
   }
   if (ctx.state !== 'running') return;

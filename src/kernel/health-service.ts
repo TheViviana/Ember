@@ -1,11 +1,11 @@
 import { asDocId, type ContentHash, type VaultPath } from '#doc-model';
 import { parseCanvasDocument } from '#canvas-engine';
 import { hashBytes, isUtf8, parseDocText, utcNow } from './doc-text.ts';
-import { EmberError } from './errors.ts';
+import { EmberError, toErrorText } from './errors.ts';
 import type { DocServiceInternal } from './doc-service.ts';
 import type { PathTools } from './paths.ts';
 import type { VaultPort, VaultScanEntry } from './ports.ts';
-import type { DocSnapshot, HealthIssue, HealthReport } from './types.ts';
+import type { DocSnapshot, HealthIssue, HealthReport, Logger } from './types.ts';
 
 export interface HealthService {
   /** 只读扫描；全程不写盘 */
@@ -20,6 +20,7 @@ export interface HealthServiceOptions {
   readonly port: VaultPort;
   readonly paths: PathTools;
   readonly docs: DocServiceInternal;
+  readonly log: Logger;
   readonly now?: () => Date;
 }
 
@@ -36,7 +37,7 @@ const isMarkdownDoc = (path: VaultPath | string): boolean =>
   String(path).toLowerCase().endsWith('.md');
 
 export const createHealthService = (options: HealthServiceOptions): HealthService => {
-  const { port, paths, docs } = options;
+  const { port, paths, docs, log } = options;
   const now = options.now ?? ((): Date => new Date());
 
   const issue = (
@@ -219,7 +220,8 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
     }
     try {
       return paths.normalize(value);
-    } catch {
+    } catch (error) {
+      log.error('健康检查：媒体路径归一化失败，跳过该引用', { path: raw, error: toErrorText(error) });
       return null;
     }
   };

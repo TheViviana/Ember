@@ -4,6 +4,7 @@ import type { CanvasBookmark } from '#canvas-engine';
 import type { CanvasId, DocId, VaultPath } from '#doc-model';
 import type { CommandDescriptor } from '../../kernel/types.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
+import { useFocusTrap } from '../use-focus-trap.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import { requestCanvasView } from '../canvas/canvas-view-signal.ts';
 import type { CanvasLibrary } from '../canvas/use-canvas-library.ts';
@@ -90,8 +91,11 @@ export const CommandPalette = ({
   const [recency, setRecency] = useState<RecencyId>('all');
   const inputRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+  const dialogRef = useRef<HTMLDivElement | null>(null);
 
   useEscLayer('palette', true);
+  // 必须在下面聚焦输入框之前调用：trap 要在焦点被移走前记住打开前的焦点元素
+  useFocusTrap(dialogRef);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -375,7 +379,13 @@ export const CommandPalette = ({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className={styles.palette} role="dialog" aria-modal="true" aria-label="统一搜索">
+      <div
+        ref={dialogRef}
+        className={styles.palette}
+        role="dialog"
+        aria-modal="true"
+        aria-label="统一搜索"
+      >
         <input
           ref={inputRef}
           className={styles.input}

@@ -1,11 +1,12 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useId, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { DocId } from '#doc-model';
 import { toErrorText } from '../../kernel/errors.ts';
 import type { DocMeta } from '../../kernel/types.ts';
 import { readonlyText } from '../components/readonly-text.ts';
 import { flushFloatEditors } from '../editor/float-flush.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
+import { useFocusTrap } from '../use-focus-trap.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import styles from './ConflictPanel.module.css';
 
@@ -95,7 +96,9 @@ export const ConflictPanel = ({
   const readonly = kernel.env.readonlyMode;
 
   const layerId = `conflict-center${escLayerId}`;
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   useEscLayer(layerId, true);
+  useFocusTrap(dialogRef);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || !isEscTop(layerId)) return;
@@ -156,7 +159,7 @@ export const ConflictPanel = ({
   );
 
   return (
-    <div className={styles.root} role="dialog" aria-modal="true" aria-label="冲突处理中心">
+    <div ref={dialogRef} className={styles.root} role="dialog" aria-modal="true" aria-label="冲突处理中心">
       <header className={styles.header}>
         <span className={styles.headerIcon}>⚠</span>
         <span className={styles.headerTitle}>冲突处理</span>

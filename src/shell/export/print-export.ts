@@ -3,6 +3,7 @@ import { readAsset } from '../../data/tauri/asset-port.ts';
 import { localAssetPath } from '../editor/reading-asset.ts';
 import { readingBlocks, type ReadBlock, type ReadInline } from '../canvas/read-markdown.ts';
 import type { KernelContext } from '../../kernel/context.ts';
+import { toErrorText } from '../../kernel/errors.ts';
 
 /**
  * 导出当前文档 PDF：正文走内核唯一的 Markdown 解析管线（readingBlocks），
@@ -20,7 +21,7 @@ const escapeHtml = (text: string): string =>
 
 type ImageResolver = (src: string) => Promise<string | null>;
 
-const resolveImage: ImageResolver = async (src) => {
+const makeImageResolver = (log: KernelContext['log']): ImageResolver => async (src) => {
   const trimmed = src.trim();
   if (trimmed.startsWith('data:')) return trimmed;
   const assetPath = localAssetPath(trimmed);
@@ -28,7 +29,9 @@ const resolveImage: ImageResolver = async (src) => {
   try {
     const asset = await readAsset(assetPath);
     return `data:${asset.mime};base64,${asset.data}`;
-  } catch {
+  } catch (error) {
+    // 导出时跳过读不出的图片，但要留下线索：否则导出件里少图没有任何原因可查
+    log.error('导出 PDF：图片资产读取失败，已跳过该图', { path: assetPath, error: toErrorText(error) });
     return null;
   }
 };
@@ -191,7 +194,7 @@ export const exportDocPdf = async (kernel: KernelContext, docId: DocId, title: s
   const snapshot = await kernel.docs.read(docId);
   const body = splitFrontmatter(snapshot.text).body;
   const blocks = readingBlocks(body);
-  const bodyHtml = await blocksToHtml(blocks, resolveImage);
+  const bodyHtml = await blocksToHtml(blocks, makeImageResolver(kernel.log));
   const displayTitle = title.trim().length === 0 ? '未命名文档' : title.trim();
   printHtml(displayTitle, `<h1>${escapeHtml(displayTitle)}</h1>${bodyHtml}`);
 };

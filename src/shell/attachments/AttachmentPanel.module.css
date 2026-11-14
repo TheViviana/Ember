@@ -213,6 +213,12 @@
   min-width: 0;
 }
 
+/* 键盘焦点：内嵌 1px ring（与其它输入框同一视觉语言） */
+.select:focus-visible,
+.search:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--ember-border-focus);
+}
+
 .search {
   flex: 1;
 }

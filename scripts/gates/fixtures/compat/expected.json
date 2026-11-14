@@ -1,0 +1,12 @@
+{
+  "gate": "compat",
+  "rows": [
+    { "rule": "api-to-sorted", "file": "src/bad.ts" },
+    { "rule": "api-group-by", "file": "src/bad.ts" },
+    { "rule": "api-promise-with-resolvers", "file": "src/bad.ts" },
+    { "rule": "api-array-with", "file": "src/bad.ts" },
+    { "rule": "api-abort-signal-any", "file": "src/bad.ts" },
+    { "rule": "api-url-parse", "file": "src/bad.ts" },
+    { "rule": "api-scheduler-yield", "file": "src/bad.ts" }
+  ]
+}

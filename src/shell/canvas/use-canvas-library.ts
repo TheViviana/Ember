@@ -87,8 +87,9 @@ export const useCanvasLibrary = (): CanvasLibrary => {
           const next = [String(id), ...current.filter((item) => item !== String(id))].slice(0, RECENT_LIMIT);
           if (next.join('|') === current.join('|')) return;
           await kernel.settings.patch({ ui: { recentCanvasIds: next } });
-        } catch {
-          // 只读库等场景静默忽略：最近访问是纯便利数据
+        } catch (error) {
+          // 只读库等场景不打断操作：最近访问是纯便利数据，失败不影响当前操作
+          kernel.log.error('记录画布最近访问失败', { error: toErrorText(error) });
         }
       })();
     },

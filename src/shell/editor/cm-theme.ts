@@ -4,10 +4,14 @@ import { tags } from '@lezer/highlight';
 import { colors, fonts, fontSize, overlay, radius, space } from '../theme/tokens.ts';
 
 /**
- * 生产 CSP 只放行带此 nonce 的运行时 <style>（与 tauri.conf.json、scripts/gates/csp.mjs 同步）。
- * CodeMirror 的基础样式与主题都由 style-mod 在运行时注入 <style>，没有 nonce 会被 CSP
- * 整段拦掉：.cm-scroller 失去 flex/overflow，正文不显示也滚不动。
- * index.html 的首帧兜底样式仍走 sha256，不使用 nonce。
+ * 生产 CSP `style-src-elem` 的白名单令牌（与 tauri.conf.json、scripts/gates/csp.mjs 同步）。
+ *
+ * 这是**编译期写死的常量**，不是每次加载随机生成的 nonce：
+ * - 它唯一的作用是放行 style-mod 在运行时注入的 <style>（style-mod 不支持哈希）；
+ *   去掉它，.cm-scroller 会失去 flex/overflow，正文不显示也滚不动。
+ * - 它固定且可从产物中读出，**不提供任何抗注入能力**，不要把它当 XSS 防线。
+ *   真实的边界是「不引入不可信的样式来源」：新增运行时样式注入前必须单独评审。
+ * index.html 的首帧兜底样式仍走 sha256，不使用该令牌。
  */
 export const CSP_STYLE_NONCE = 'RW1iZXJFZGl0b3JTdHlsZU5vbmNl';
 

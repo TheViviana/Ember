@@ -310,7 +310,7 @@ export const App = (): ReactElement => {
     : null;
   const toolEntries = {
     pomodoro: settings.data?.ui.toolPomodoro === true,
-    gallery: settings.data?.ui.toolGallery !== false,
+    gallery: settings.data?.ui.toolGallery === true,
   };
   // 今日回顾层（原左下工具入口）：与画布视图菜单共用同一份机器本地开关
   const currentCanvasId = library.currentId;

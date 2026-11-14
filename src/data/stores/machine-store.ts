@@ -352,7 +352,11 @@ export const parseMachineUi = (
       panels: { ai: parseAiPanel(panels.ai, area) },
       canvasFlags,
     };
-  } catch {
+  } catch (error) {
+    console.error(
+      '机器配置解析失败，回落内存默认态：',
+      error instanceof Error ? error.message : String(error),
+    );
     return null;
   }
 };
@@ -399,7 +403,11 @@ const readPreservedKeys = (text: string): Readonly<Record<string, unknown>> => {
   try {
     const raw: unknown = JSON.parse(text);
     return isRecord(raw) ? raw : {};
-  } catch {
+  } catch (error) {
+    console.error(
+      '读取 ui.json 的未知键失败，本会话将丢弃这些键：',
+      error instanceof Error ? error.message : String(error),
+    );
     return {};
   }
 };
@@ -497,8 +505,12 @@ export const hydrateMachineUi = (): Promise<void> => {
         futureDocument = true;
         console.warn('ui.json 来自更新版本的应用，本次会话只读不回写');
       }
-    } catch {
+    } catch (error) {
       // 连 JSON 都不是：保持原有行为（内存默认态，后续写入覆盖损坏文件）
+      console.error(
+        '机器本地 ui.json 不是合法 JSON，将按默认态重写：',
+        error instanceof Error ? error.message : String(error),
+      );
     }
     } catch (error) {
       console.warn(

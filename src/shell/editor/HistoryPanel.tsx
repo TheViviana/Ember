@@ -1,8 +1,9 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useId, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactElement } from 'react';
 import type { DocId } from '#doc-model';
 import { toErrorText } from '../../kernel/errors.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
+import { useFocusTrap } from '../use-focus-trap.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import { readonlyText } from '../components/readonly-text.ts';
 import { ReadingView } from './ReadingView.tsx';
@@ -65,7 +66,9 @@ export const HistoryPanel = ({
 
   // Esc：只关面板；更晚挂载的浮层（设置/命令面板）持有栈顶时让位
   const layerId = `float-history${escLayerId}`;
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   useEscLayer(layerId, true);
+  useFocusTrap(dialogRef);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || !isEscTop(layerId)) return;
@@ -123,7 +126,7 @@ export const HistoryPanel = ({
   const previewError = preview.error;
 
   return (
-    <div className={styles.overlay} role="dialog" aria-modal="true" aria-label="文档历史">
+    <div ref={dialogRef} className={styles.overlay} role="dialog" aria-modal="true" aria-label="文档历史">
       <div className={styles.panel}>
         <header className={styles.head}>
           <span className={styles.title}>历史版本</span>

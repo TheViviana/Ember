@@ -5,6 +5,7 @@ import { saveAsset } from '../../data/tauri/asset-port.ts';
 import { toErrorText } from '../../kernel/errors.ts';
 import { readonlyText } from '../components/readonly-text.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
+import { useFocusTrap } from '../use-focus-trap.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import styles from './InboxPanel.module.css';
 
@@ -110,11 +111,13 @@ export const InboxPanel = ({ onClose }: InboxPanelProps): ReactElement => {
   const kernel = useKernel();
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const [draft, setDraft] = useState<DraftState>({ title: '', body: '', tags: '', images: [] });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const layerId = `shell-inbox-${Math.random().toString(36).slice(2, 10)}`;
   useEscLayer(layerId, true);
+  useFocusTrap(dialogRef);
 
   const readonly = kernel.env.readonlyMode;
 
@@ -293,6 +296,7 @@ export const InboxPanel = ({ onClose }: InboxPanelProps): ReactElement => {
 
   return (
     <div
+      ref={dialogRef}
       className={styles.root}
       role="dialog"
       aria-modal="true"

@@ -94,6 +94,7 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
     port: options.ports.vault,
     paths,
     docs,
+    log,
     ...(options.now ? { now: options.now } : {}),
   });
   const canvas = createCanvasHost({

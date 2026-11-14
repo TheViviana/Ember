@@ -3,6 +3,7 @@ import { scanBans } from './bans.mjs';
 import { findCycles } from './cycles.mjs';
 import { checkLayers } from './layers.mjs';
 import { checkCsp } from './csp.mjs';
+import { checkSafariCompat } from './compat.mjs';
 import { checkSize } from './size.mjs';
 
 const root = process.argv.includes('--root')
@@ -13,6 +14,7 @@ const results = [
   { name: 'cycles', violations: findCycles(root) },
   { name: 'layers', violations: checkLayers(root) },
   { name: 'bans', violations: scanBans(root) },
+  { name: 'compat', violations: checkSafariCompat(root) },
   { name: 'size', violations: checkSize(root) },
   { name: 'csp', violations: checkCsp(root) },
   {
@@ -36,5 +38,5 @@ for (const result of results) {
 }
 
 process.stdout.write(failed === 0 ? 'gate 全部通过\n' : `gate 失败：${failed} 项未通过\n`);
-process.stdout.write('注：vite.config.ts 的 alias 未参与校验，别名变更需人工同步\n');
+process.stdout.write('注：vite.config.ts 的 alias 目标由 pnpm gate:selftest 做三处一致性断言，本门禁不解析构建配置\n');
 process.exit(failed === 0 ? 0 : 1);

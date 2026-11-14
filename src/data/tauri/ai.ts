@@ -1,4 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
+import { createUlid } from '#doc-model';
 import type { AiSettings } from '../stores/machine-store.ts';
 
 /**
@@ -105,7 +106,7 @@ export const startChat = (
   messages: readonly ChatTurnInput[],
   handlers: ChatHandlers,
 ): ChatSession => {
-  const requestId = crypto.randomUUID();
+  const requestId = createUlid();
   const channel = new Channel<AiStreamEvent>();
   let settled = false;
   const settle = (action: () => void): void => {

@@ -99,7 +99,7 @@ impl<B: SecretBackend> KeyStore<B> {
     }
 
     pub fn read(&self, account: &str) -> AiResult<ResolvedSecret> {
-        // 钥匙串失败不阻断会话回退（ai-panel.md 的降级设计），但记住原因：
+        // 钥匙串失败不阻断会话回退，但记住原因：
         // 会话也没有时，把真实原因（钥匙串被拒/不可用）而不是「缺少 API Key」抛给界面
         let keychain_failed = match self.backend.read(account) {
             Ok(Some(secret)) => {

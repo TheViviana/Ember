@@ -75,6 +75,13 @@
   color: var(--ember-text-muted);
 }
 
+/* 新建标签输入框是 .tagList 的直接子元素；编辑标签的输入框在 .editor 内，
+   后者已有常态胶囊边框，不能再叠一条同色内线 */
+.tagList > .tagInput:focus-visible {
+  border-radius: var(--radius-full);
+  box-shadow: inset 0 0 0 1px var(--ember-border-focus);
+}
+
 .remove {
   flex: 0 0 auto;
   width: 16px;

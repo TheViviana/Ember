@@ -19,6 +19,7 @@ export const GATE_FLOORS = Object.freeze({
   'layer:pkg:doc-model': 6,
   'layer:pkg:canvas-engine': 2,
   bansFiles: 140,
+  compatFiles: 100,
 });
 
 /** 结构断言：必须存在、是目录、且至少含 1 个 .ts/.tsx */
@@ -211,10 +212,83 @@ const IMPORT_PATTERNS = [
 ];
 
 /** 去掉整行注释与块注释，避免把注释掉的 import 当依赖 */
-function stripComments(source) {
+export function stripComments(source) {
   return source
     .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
     .replace(/^[ \t]*\/\/.*$/gm, (m) => m.replace(/[^\n]/g, ' '));
+}
+
+/**
+ * 把字符串与模板字面量的内容替换成空格，长度与换行保持不变，便于按行定位。
+ * 与 stripComments 配合使用（先剥注释、再抹字面量），用于「按代码内容判定」的门禁：
+ * 注释里或提示文案里出现某个 API 名字，不应算作真的用了它。
+ * 模板字面量里的 `${...}` 是真实代码，原样保留，否则会漏报。
+ */
+export function maskLiterals(source) {
+  const blank = (ch) => (ch === '\n' ? '\n' : ' ');
+  let out = '';
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "'" || ch === '"') {
+      out += ' ';
+      i += 1;
+      while (i < source.length) {
+        const c = source[i];
+        if (c === '\\') {
+          out += '  ';
+          i += 2;
+          continue;
+        }
+        // 单双引号字符串不跨行：遇到换行就收手，避免一个撇号抹掉后面的真实代码
+        if (c === '\n') break;
+        if (c === ch) {
+          out += ' ';
+          i += 1;
+          break;
+        }
+        out += ' ';
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === '`') {
+      out += ' ';
+      i += 1;
+      while (i < source.length) {
+        const c = source[i];
+        if (c === '\\') {
+          out += '  ';
+          i += 2;
+          continue;
+        }
+        if (c === '`') {
+          out += ' ';
+          i += 1;
+          break;
+        }
+        if (c === '$' && source[i + 1] === '{') {
+          let depth = 1;
+          out += '${';
+          i += 2;
+          while (i < source.length && depth > 0) {
+            const d = source[i] ?? '';
+            if (d === '{') depth += 1;
+            else if (d === '}') depth -= 1;
+            out += d;
+            i += 1;
+          }
+          continue;
+        }
+        out += blank(c);
+        i += 1;
+      }
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
 }
 
 /** 判断一条 import/export 语句是否纯类型（编译后被完全擦除，不产生运行期依赖） */
@@ -298,8 +372,8 @@ const readJsonFile = (file) => {
  * 支持精确键与 `#foo/*` 最长前缀通配；目标统一解析为绝对路径。
  *
  * 注意：别名还有第三处同名映射 vite.config.ts#resolve.alias（仅 Vite 使用）。
- * 门禁不解析构建配置，因此不校验该文件；增删改别名时必须人工同步三处。
- * gate:selftest 只断言 imports 的键名出现在 vite.config.ts 中，不比对目标路径。
+ * 门禁不解析构建配置，因此不校验该文件；增删改别名必须人工同步三处。
+ * gate:selftest 只按 `'#key': alias('路径')` 这一种字面形式比对三处目标是否一致。
  */
 export function loadAliasConfig(root) {
   const base = resolve(root);
