@@ -182,6 +182,34 @@ const relativeSegments = (path: string, stripRoot: boolean): readonly string[] |
   return kept;
 };
 
+/** 只看路径与字节数就能判定的拒绝原因；导入计划与读取前预筛共用这一套规则 */
+const segmentsRejection = (
+  segments: readonly string[],
+  sourcePath: string,
+  bytes: number,
+): string | null => {
+  const skipped = segments.find((segment) => SKIP_SEGMENTS.has(segment.toLowerCase()));
+  if (skipped !== undefined) return `位于 ${skipped}/，不导入`;
+  if (segments.some((segment) => segment.startsWith('.'))) return '隐藏文件或隐藏目录，不导入';
+  if (!MARKDOWN_EXTENSIONS.has(extensionOf(sourcePath))) return '不是 .md / .markdown 文件';
+  if (bytes > MAX_IMPORT_BYTES) return `超过单篇 ${String(MAX_IMPORT_MB)} MB 上限`;
+  return null;
+};
+
+/**
+ * 读取内容前的预筛：只依据 File.name / File.size 就能给出的拒绝原因，
+ * 避免把扩展名不符或超限的大文件整个读进内存。返回 null 表示需要读内容。
+ */
+export const preReadRejection = (
+  sourcePath: string,
+  bytes: number,
+  stripRoot: boolean,
+): string | null => {
+  const segments = relativeSegments(sourcePath, stripRoot);
+  if (segments === null) return '相对路径不合法（含 .. 或空路径）';
+  return segmentsRejection(segments, sourcePath, bytes);
+};
+
 const withSuffix = (path: string, suffix: number): string => {
   const slash = path.lastIndexOf('/');
   const dir = slash >= 0 ? path.slice(0, slash + 1) : '';
@@ -219,21 +247,9 @@ export const buildImportPlan = (
       rejected.push({ sourcePath, reason: '相对路径不合法（含 .. 或空路径）' });
       continue;
     }
-    if (segments.some((segment) => SKIP_SEGMENTS.has(segment.toLowerCase()))) {
-      const skipped = segments.find((segment) => SKIP_SEGMENTS.has(segment.toLowerCase())) ?? '';
-      rejected.push({ sourcePath, reason: `位于 ${skipped}/，不导入` });
-      continue;
-    }
-    if (segments.some((segment) => segment.startsWith('.'))) {
-      rejected.push({ sourcePath, reason: '隐藏文件或隐藏目录，不导入' });
-      continue;
-    }
-    if (!MARKDOWN_EXTENSIONS.has(extensionOf(sourcePath))) {
-      rejected.push({ sourcePath, reason: '不是 .md / .markdown 文件' });
-      continue;
-    }
-    if (candidate.bytes > MAX_IMPORT_BYTES) {
-      rejected.push({ sourcePath, reason: `超过单篇 ${String(MAX_IMPORT_MB)} MB 上限` });
+    const staticRejection = segmentsRejection(segments, sourcePath, candidate.bytes);
+    if (staticRejection !== null) {
+      rejected.push({ sourcePath, reason: staticRejection });
       continue;
     }
     if (entries.length >= MAX_IMPORT_FILES) {

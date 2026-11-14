@@ -7,6 +7,7 @@ import {
   IMPORT_ROOT,
   MAX_IMPORT_FILES,
   MAX_IMPORT_MB,
+  preReadRejection,
   type ImportCandidate,
   type ImportPlan,
   type ImportRejection,
@@ -14,6 +15,7 @@ import {
 import { useImportStore } from './import-store.ts';
 import { readonlyText } from '../components/readonly-text.ts';
 import { useFocusTrap } from '../use-focus-trap.ts';
+import { describeIpcError } from '../../data/tauri/ipc-error.ts';
 import styles from './ImportDialog.module.css';
 
 type Stage = 'pick' | 'reading' | 'preview' | 'writing' | 'done';
@@ -22,8 +24,6 @@ interface ImportResult {
   readonly saved: number;
   readonly failures: readonly { readonly path: string; readonly reason: string }[];
 }
-
-const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
  * 目录选择的两个属性不在 React 的 input 类型里，用展开而不是 setAttribute：
@@ -84,20 +84,37 @@ export const ImportDialog = (): ReactElement | null => {
     const runId = runRef.current;
     const stale = (): boolean => runRef.current !== runId;
     setStage('reading');
+    setProgress({ done: 0, total: files.length });
     const candidates: ImportCandidate[] = [];
     const readErrors: ImportRejection[] = [];
+    const seen = new Set<string>();
+    let handled = 0;
     for (const file of files) {
-      try {
-        const text = await file.text();
-        if (stale()) return;
-        candidates.push({
-          relativePath: stripRoot ? file.webkitRelativePath || file.name : file.name,
-          text,
-          bytes: file.size,
-        });
-      } catch (error) {
-        readErrors.push({ sourcePath: file.name, reason: `读取失败：${errorText(error)}` });
+      const rawPath = stripRoot ? file.webkitRelativePath || file.name : file.name;
+      const sourcePath = rawPath.replace(/\\/g, '/');
+      if (seen.has(sourcePath)) {
+        readErrors.push({ sourcePath, reason: '同一文件被重复选择' });
+      } else {
+        seen.add(sourcePath);
+        // 扩展名、大小、跳过目录、路径合法性都在读内容之前判定，大目录不再一次性读空
+        const rejection = preReadRejection(sourcePath, file.size, stripRoot);
+        if (rejection !== null) {
+          readErrors.push({ sourcePath, reason: rejection });
+        } else if (candidates.length >= MAX_IMPORT_FILES) {
+          readErrors.push({ sourcePath, reason: `超过单次 ${String(MAX_IMPORT_FILES)} 篇上限` });
+        } else {
+          try {
+            const text = await file.text();
+            if (stale()) return;
+            candidates.push({ relativePath: rawPath, text, bytes: file.size });
+          } catch (error) {
+            readErrors.push({ sourcePath, reason: `读取失败：${describeIpcError(error)}` });
+          }
+        }
       }
+      handled += 1;
+      setProgress({ done: handled, total: files.length });
+      if (stale()) return;
     }
     if (stale()) return;
     const existing = (documents.data ?? []).map((doc) => String(doc.path));
@@ -133,7 +150,7 @@ export const ImportDialog = (): ReactElement | null => {
         });
         saved += 1;
       } catch (error) {
-        failures.push({ path: entry.targetPath, reason: errorText(error) });
+        failures.push({ path: entry.targetPath, reason: describeIpcError(error) });
       }
       // 中途关闭对话框：停止后续写入（正在写的一篇会完成），保持重置后的 pick 状态
       if (stale()) return;
@@ -199,7 +216,11 @@ export const ImportDialog = (): ReactElement | null => {
           </div>
         ) : null}
 
-        {stage === 'reading' ? <p className={styles.note}>正在读取所选文件…</p> : null}
+        {stage === 'reading' ? (
+          <p className={styles.note}>
+            正在筛选并读取所选文件…（已处理 {progress.done}/{progress.total}）
+          </p>
+        ) : null}
 
         {stage === 'preview' && plan !== null ? (
           <>
