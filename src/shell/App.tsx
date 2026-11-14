@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { CanvasId, DocId } from '#doc-model';
 import { isPermissionDenied, toErrorText } from '../kernel/errors.ts';
-import type { CommandDescriptor, SettingsPatch } from '../kernel/types.ts';
+import type { CommandDescriptor, SettingsPatch, VaultGuardState } from '../kernel/types.ts';
 import { runCloseFlow } from './close-flow.ts';
 import { useKernel, useKernelShutdown, useWindowPort } from './kernel-provider.tsx';
 import { AiPanel } from './ai/AiPanel.tsx';
@@ -32,6 +32,7 @@ import { AttachmentPanel } from './attachments/AttachmentPanel.tsx';
 import { SplashOverlay } from './components/SplashOverlay.tsx';
 import { StatusBar } from './components/StatusBar.tsx';
 import { Topbar } from './components/Topbar.tsx';
+import { VaultGuardDialog } from './components/VaultGuardDialog.tsx';
 import { GlobalReplacePanel } from './replace/GlobalReplacePanel.tsx';
 import { exportDocPdf } from './export/print-export.ts';
 import { ToolRail } from './tools/ToolRail.tsx';
@@ -67,9 +68,16 @@ export const App = (): ReactElement => {
   const [commands, setCommands] = useState<readonly CommandDescriptor[]>(() =>
     kernel.commands.list(),
   );
-  // 独占创建 + pid 存活模型下只读只在启动时确定（被另一实例占用），运行期不变
+  // 独占创建 + pid 存活模型下只读只在启动时确定（被另一实例占用），运行期不变；
+  // 库守护熔断是运行期额外的只读状态，二者合并后交给顶栏/状态栏展示。
   const readonlyMode = kernel.env.readonlyMode;
   const readonlyReason = kernel.env.readonlyReason;
+  const [vaultGuard, setVaultGuard] = useState<VaultGuardState | null>(() => kernel.docs.guard());
+  const [guardBusy, setGuardBusy] = useState(false);
+  const [guardError, setGuardError] = useState<string | null>(null);
+  const [syncTotal, setSyncTotal] = useState<number | null>(null);
+  const effectiveReadonly = readonlyMode || vaultGuard !== null;
+  const effectiveReadonlyReason = vaultGuard !== null ? 'vaultGuard' : readonlyReason;
   // 关窗落盘失败：阻止本次关闭并在状态栏提示；同一会话内第二次关闭直接放行
   const [closeFailures, setCloseFailures] = useState<readonly string[] | null>(null);
   const closeBlockedRef = useRef(false);
@@ -89,6 +97,46 @@ export const App = (): ReactElement => {
     return meta === undefined ? null : String(meta.path);
   }, [activeDocId, documents.data]);
   const settings = useQuery({ queryKey: ['settings'], queryFn: () => kernel.settings.read() });
+
+  // 库守护熔断与全量对账进度：熔断后弹确认框，全量对账期间状态栏显示要同步的文件数
+  useEffect(() => {
+    const guarded = kernel.events.on('vault:guarded', (state) => {
+      setVaultGuard(state);
+      setGuardError(null);
+    });
+    const syncing = kernel.events.on('vault:sync', ({ total, active }) => {
+      setSyncTotal(active ? total : null);
+    });
+    return () => {
+      guarded.dispose();
+      syncing.dispose();
+    };
+  }, [kernel]);
+
+  // 熔断弹窗的两个出口：确认当前目录就是目标库则重扫，否则退出
+  const rescanVault = useCallback((): void => {
+    if (guardBusy) return;
+    setGuardBusy(true);
+    setGuardError(null);
+    void kernel.docs
+      .rescan()
+      .then(() => {
+        setVaultGuard(null);
+        void queryClient.invalidateQueries();
+      })
+      .catch((error: unknown) => {
+        setGuardError(toErrorText(error));
+      })
+      .finally(() => {
+        setGuardBusy(false);
+      });
+  }, [guardBusy, kernel, queryClient]);
+
+  const exitVault = useCallback((): void => {
+    // 熔断只读下所有写入都会被拒：直接走「二次关闭」路径，避免被落盘失败困在弹窗里
+    closeBlockedRef.current = true;
+    void windowPort.close().catch(() => undefined);
+  }, [windowPort]);
 
   // 外部新增/删除/改动文档时刷新列表（冲突副本也经此进入文档列表）
   useEffect(() => {
@@ -330,8 +378,8 @@ export const App = (): ReactElement => {
       <div className={`${styles.root} ${splashRevealed ? styles.revealed : styles.booting} ${focusActive ? styles.focusMode : ''}`}>
       <Topbar
         kernelVersion={kernel.env.kernelVersion}
-        readonlyMode={readonlyMode}
-        readonlyReason={readonlyReason}
+        readonlyMode={effectiveReadonly}
+        readonlyReason={effectiveReadonlyReason}
         library={library}
         onOpenDocuments={() => {
           setDocListOpen((value) => !value);
@@ -446,14 +494,30 @@ export const App = (): ReactElement => {
       </div>
 
       <StatusBar
-        readonlyMode={readonlyMode}
-        readonlyReason={readonlyReason}
+        readonlyMode={effectiveReadonly}
+        readonlyReason={effectiveReadonlyReason}
         kernelVersion={kernel.env.kernelVersion}
         documentCount={documents.data?.length ?? 0}
         commandCount={commands.length}
-        notice={closeFailures === null ? null : '保存失败，已阻止关闭；再次关闭将丢弃改动'}
+        notice={
+          closeFailures !== null
+            ? '保存失败，已阻止关闭；再次关闭将丢弃改动'
+            : syncTotal !== null
+              ? `正在同步 ${syncTotal} 个文件`
+              : null
+        }
         docPath={activeDocPath}
       />
+
+      {vaultGuard === null ? null : (
+        <VaultGuardDialog
+          state={vaultGuard}
+          busy={guardBusy}
+          error={guardError}
+          onRescan={rescanVault}
+          onExit={exitVault}
+        />
+      )}
 
       {replaceOpen ? (
         <GlobalReplacePanel

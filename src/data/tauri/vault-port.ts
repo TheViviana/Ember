@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { unsafeVaultPath } from '#doc-model';
-import type { VaultFileEvent, VaultPort } from '../../kernel/ports.ts';
+import type { VaultPort } from '../../kernel/ports.ts';
 import type { Disposable, WriteIntent } from '../../kernel/types.ts';
 
 interface RawStat {
@@ -38,18 +38,36 @@ export interface TauriVaultPortOptions {
   readonly readonlyReason?: string | null;
 }
 
+interface RawVaultEvent {
+  readonly kind: 'created' | 'changed' | 'removed' | 'renamed' | 'overflow';
+  readonly path?: string;
+  readonly from?: string;
+  readonly mtime?: number;
+  readonly size?: number;
+  readonly count?: number;
+}
+
 /**
  * Rust vault 的 IPC 适配层：原子写、库锁、watcher 全在 Rust 侧，
  * 这里只做字节编码与命令名映射。
  */
 export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort => {
-  // 独占创建 + pid 存活模型下，只读只在启动时确定（被另一实例占用），运行期不变
-  const readonly = options.readonlyMode;
-  const readonlyReason = options.readonlyReason ?? null;
+  // 启动只读（被另一实例占用）与运行期熔断只读分开记录：
+  // 解除熔断时不能误清启动只读。
+  const startupReadonly = options.readonlyMode;
+  const startupReason = options.readonlyReason ?? null;
+  let runtimeReason: string | null = null;
 
   return {
-    readonlyMode: readonly,
-    readonlyReason,
+    get readonlyMode() {
+      return startupReadonly || runtimeReason !== null;
+    },
+    get readonlyReason() {
+      return runtimeReason ?? startupReason;
+    },
+    setRuntimeReadonly(reason: string | null) {
+      runtimeReason = reason;
+    },
 
     read: async (path) => {
       const payload = await invoke<string | null>('vault_read', { path: String(path) });
@@ -103,18 +121,21 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
     watch: (listener) => {
       let disposed = false;
       let unlisten: (() => void) | null = null;
-      void listen<{ kind: VaultFileEvent['kind']; path: string; from?: string }>(
-        'vault://changed',
-        (event) => {
-          listener({
-            kind: event.payload.kind,
-            path: unsafeVaultPath(event.payload.path),
-            ...(event.payload.from === undefined
-              ? {}
-              : { from: unsafeVaultPath(event.payload.from) }),
-          });
-        },
-      )
+      void listen<RawVaultEvent>('vault://changed', (event) => {
+        const payload = event.payload;
+        if (payload.kind === 'overflow') {
+          listener({ kind: 'overflow', count: payload.count ?? 0 });
+          return;
+        }
+        if (payload.path === undefined) return;
+        listener({
+          kind: payload.kind,
+          path: unsafeVaultPath(payload.path),
+          ...(payload.from === undefined ? {} : { from: unsafeVaultPath(payload.from) }),
+          ...(payload.mtime === undefined ? {} : { mtimeMs: payload.mtime }),
+          ...(payload.size === undefined ? {} : { size: payload.size }),
+        });
+      })
         .then((fn) => {
           if (disposed) {
             fn();

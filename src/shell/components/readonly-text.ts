@@ -9,6 +9,8 @@ export const readonlyText = (reason: string | null): string => {
       return '只读：另一实例已打开';
     case 'lockLost':
       return '只读：库锁已丢失';
+    case 'vaultGuard':
+      return '只读：库可能被整体替换或移走';
     default:
       return '只读模式';
   }

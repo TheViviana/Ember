@@ -8,11 +8,11 @@ import { toErrorText } from './errors.ts';
 import { createHealthService } from './health-service.ts';
 import { createIndexService } from './index-service.ts';
 import { createPathTools } from './paths.ts';
-import type { VaultPort } from './ports.ts';
+import type { VaultFileEvent, VaultPort } from './ports.ts';
 import { createSettingsService } from './settings-service.ts';
 import type { KernelEnv, Logger } from './types.ts';
 
-export const KERNEL_VERSION = '2.3.0';
+export const KERNEL_VERSION = '2.4.0';
 
 export interface BootPorts {
   readonly vault: VaultPort;
@@ -124,39 +124,56 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
   await docs.flush();
 
   /**
-   * 第 8 步：watcher → 目录对账。
-   * 一次扫描期间产生的后续事件只记一个「待补扫」标记：结束时再跑一次就够，
-   * 否则批量导入时每个文件事件都排队一次全库重读。
+   * 第 8 步：watcher → 对账。
+   * 一个 tick 的事件先攒一小段时间再处理：
+   * - 普通变更走增量（只读事件指向的文件），不再全库重读；
+   * - 批次里只要出现 overflow，就只做一次全量对账。
+   * 所有对账共用一条串行链，避免增量与全量互相覆盖目录。
    */
-  let refreshRunning: Promise<void> | null = null;
-  let refreshQueued = false;
-  const runRefresh = (): void => {
-    if (refreshRunning !== null) {
-      refreshQueued = true;
-      return;
-    }
-    refreshRunning = (async () => {
-      try {
+  const EVENT_BATCH_MS = 20;
+  let pendingEvents: VaultFileEvent[] = [];
+  let batchTimer: ReturnType<typeof setTimeout> | null = null;
+  let work: Promise<void> = Promise.resolve();
+
+  const enqueueWork = (unit: () => Promise<void>): void => {
+    work = work.then(unit).catch((error: unknown) => {
+      log.error('目录对账失败', { error: toErrorText(error) });
+    });
+  };
+
+  const flushEvents = (): void => {
+    batchTimer = null;
+    const batch = pendingEvents;
+    pendingEvents = [];
+    if (batch.length === 0) return;
+    const hasOverflow = batch.some((event) => event.kind === 'overflow');
+    enqueueWork(async () => {
+      if (hasOverflow) {
         await docs.refresh();
-      } catch (error: unknown) {
-        log.error('目录对账失败', { error: toErrorText(error) });
-      } finally {
-        refreshRunning = null;
-        if (refreshQueued) {
-          refreshQueued = false;
-          runRefresh();
-        }
+        return;
       }
-    })();
+      await docs.applyFileEvents(batch);
+    });
   };
+
+  const onVaultEvent = (event: VaultFileEvent): void => {
+    pendingEvents.push(event);
+    if (batchTimer === null) batchTimer = setTimeout(flushEvents, EVENT_BATCH_MS);
+  };
+
   const drainRefresh = async (): Promise<void> => {
-    let current = refreshRunning;
-    while (current !== null) {
+    if (batchTimer !== null) {
+      clearTimeout(batchTimer);
+      flushEvents();
+    }
+    let current: Promise<void> = work;
+    for (;;) {
       await current;
-      current = refreshRunning;
+      if (current === work) return;
+      current = work;
     }
   };
-  const watcher = options.ports.vault.watch(runRefresh);
+  const watcher = options.ports.vault.watch(onVaultEvent);
 
   // 单飞：关窗收尾与 KernelProvider 卸载可能同时触发，拆解只能执行一次。
   // 失败时清空缓存以允许重试（调用方据此判断是否还能继续使用内核）。

@@ -1,5 +1,5 @@
 import type { CanvasId, CommandId, DocId, VaultPath } from '#doc-model';
-import type { Disposable, DocChange, DocRevision, VaultSettings } from './types.ts';
+import type { Disposable, DocChange, DocRevision, VaultGuardState, VaultSettings } from './types.ts';
 
 /** 内核事件总线的事件表（kernel-contract §7） */
 export interface KernelEventMap {
@@ -9,6 +9,10 @@ export interface KernelEventMap {
   'command:executed': { id: CommandId; ok: boolean };
   'settings:changed': { settings: VaultSettings };
   'canvas:changed': { canvasId: CanvasId; rev: number };
+  /** 库守护熔断：目录停止清理并进入只读，等待用户重新扫描或退出 */
+  'vault:guarded': VaultGuardState;
+  /** 全量对账进度：active 为 true 时 total 是本次要同步的文件数 */
+  'vault:sync': { readonly total: number; readonly active: boolean };
 }
 
 export interface EventBus {

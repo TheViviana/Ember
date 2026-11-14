@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { asCommandId, asVaultId, unsafeVaultPath } from '#doc-model';
+import type { DocId } from '#doc-model';
 import { bootKernel, type Kernel } from '../../src/kernel/boot.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
-import type { VaultPort } from '../../src/kernel/ports.ts';
-import type { Logger } from '../../src/kernel/types.ts';
+import type { DocRevision, Logger } from '../../src/kernel/types.ts';
 import { createMemoryVault, type MemoryVault } from './fakes.ts';
 
 const VAULT_ID = asVaultId('01JB8ZQ3K4M5N6P7Q8R9S0T1V2');
@@ -25,42 +25,107 @@ const boot = async (vault: MemoryVault): Promise<Kernel> =>
     log: silentLogger,
   });
 
-void test('watcher 连续事件合并：扫描中只补扫一次，不会每个事件各排一次全库重读', async () => {
+void test('watcher 增量：普通事件只重读变化的文件，不再全量重扫', async () => {
   const vault = createMemoryVault();
-  let listCalls = 0;
-  let releaseFirst = (): void => undefined;
-  const port: VaultPort = {
-    ...vault.port,
-    list: () => {
-      listCalls += 1;
-      if (listCalls === 1) {
-        return new Promise((resolve) => {
-          releaseFirst = () => {
-            resolve([]);
-          };
-        });
-      }
-      return Promise.resolve([]);
-    },
-  };
-  const kernel = await bootKernel({
-    vaultId: VAULT_ID,
-    ports: { vault: port },
-    log: silentLogger,
-  });
+  const kernel = await boot(vault);
 
-  vault.emitExternal('notes/a.md', 'created');
-  vault.emitExternal('notes/b.md', 'created');
-  vault.emitExternal('notes/c.md', 'created');
-  await delay(0);
-  assert.equal(listCalls, 1, '事件到达时只应有一次扫描在跑');
+  await kernel.context.docs.create({ path: unsafeVaultPath('notes/a.md'), text: 'one', intent: 'user' });
+  await kernel.context.docs.create({ path: unsafeVaultPath('notes/b.md'), text: 'two', intent: 'user' });
+  const listCallsAfterCreate = vault.listCalls;
+  const readsAfterCreate = vault.reads.length;
 
-  releaseFirst();
-  await delay(10);
+  const onDisk = vault.dump()['notes/a.md'] ?? '';
+  vault.writeRaw('notes/a.md', onDisk.replace('one', 'ONE'));
+  vault.emitExternal('notes/a.md', 'changed');
+  await delay(60);
 
-  assert.equal(listCalls, 2, '进行中收到的事件合并成结束后的一次补扫');
+  assert.equal(vault.listCalls, listCallsAfterCreate, '增量事件不应触发全量 list');
+  assert.deepEqual(
+    [...new Set(vault.reads.slice(readsAfterCreate))],
+    ['notes/a.md'],
+    '只应重读发生变化的那一个文件（索引更新可能再读一次同一文件）',
+  );
+  const updated = await kernel.context.docs.readByPath(unsafeVaultPath('notes/a.md'));
+  assert.match(updated?.text ?? '', /ONE/);
+
   await kernel.shutdown();
-  assert.equal(listCalls, 2);
+});
+
+void test('watcher removed 事件按路径反查直接摘除，不触发全扫', async () => {
+  const vault = createMemoryVault();
+  const kernel = await boot(vault);
+  await kernel.context.docs.create({ path: unsafeVaultPath('notes/gone.md'), text: 'x', intent: 'user' });
+  const listCallsBefore = vault.listCalls;
+  const readsBefore = vault.reads.length;
+
+  vault.removeRaw('notes/gone.md');
+  vault.emitExternal('notes/gone.md', 'removed');
+  await delay(60);
+
+  assert.equal(vault.listCalls, listCallsBefore, '删除事件不应触发全量 list');
+  assert.equal(vault.reads.length, readsBefore, '删除事件不应重读任何文件');
+  assert.equal((await kernel.context.docs.list()).length, 0);
+
+  await kernel.shutdown();
+});
+
+void test('watcher 事件溢出：同一批事件只触发一次全量对账', async () => {
+  const vault = createMemoryVault();
+  const kernel = await boot(vault);
+  await kernel.context.docs.list();
+  const listCallsBefore = vault.listCalls;
+
+  vault.emitOverflow(3000);
+  vault.emitOverflow(2800);
+  vault.emitOverflow(2600);
+  await delay(80);
+
+  assert.equal(vault.listCalls, listCallsBefore + 1, '溢出标记应合并成一次全量对账');
+  await kernel.shutdown();
+  assert.equal(vault.listCalls, listCallsBefore + 1);
+});
+
+void test('大量删除触发库守护：不清理目录、进入只读，重新扫描后恢复', async () => {
+  const vault = createMemoryVault();
+  const kernel = await boot(vault);
+  const ids: DocId[] = [];
+  const revs: DocRevision[] = [];
+  for (let index = 0; index < 6; index += 1) {
+    const snapshot = await kernel.context.docs.create({
+      path: unsafeVaultPath(`notes/${index}.md`),
+      text: `body ${index}`,
+      intent: 'user',
+    });
+    ids.push(snapshot.meta.id);
+    revs.push(snapshot.meta.rev);
+  }
+
+  for (let index = 0; index < 6; index += 1) vault.removeRaw(`notes/${index}.md`);
+  // 整库被移走时 watcher 会判定事件溢出，走一次全量对账
+  vault.emitOverflow(6);
+  await delay(80);
+
+  const guard = kernel.context.docs.guard();
+  assert.ok(guard !== null, '消失占比 100% 应触发熔断');
+  assert.equal(guard.known, 6);
+  assert.equal(guard.missing, 6);
+  assert.equal(kernel.context.env.readonlyMode, true, '熔断后端口应切到只读');
+  assert.equal((await kernel.context.docs.list()).length, 6, '熔断时不能清理目录记录');
+  const target = ids[0];
+  const base = revs[0];
+  assert.ok(target !== undefined);
+  assert.ok(base !== undefined);
+  await assert.rejects(
+    () => kernel.context.docs.update(target, { body: 'x' }, { base, intent: 'user' }),
+    (error: unknown) => error instanceof EmberError && error.code === 'vault_locked',
+  );
+
+  await kernel.context.docs.rescan();
+  assert.equal(kernel.context.docs.guard(), null, '重新扫描后解除熔断');
+  assert.equal(kernel.context.env.readonlyMode, false);
+  assert.equal((await kernel.context.docs.list()).length, 0, '重新扫描按磁盘现状重建');
+
+  await kernel.shutdown();
 });
 
 void test('启动后命令可注册与执行，注销后消失', async () => {

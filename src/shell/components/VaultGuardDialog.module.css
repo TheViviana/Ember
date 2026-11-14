@@ -1,0 +1,81 @@
+/* 库守护熔断弹窗：阻断式确认，覆盖整个窗口 */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--layer-menu) + 10);
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--ember-bg-deep) 72%, transparent);
+}
+
+.dialog {
+  width: min(480px, calc(100vw - var(--space-lg) * 2));
+  padding: var(--space-lg);
+  border: 1px solid var(--ember-border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--ember-bg-menu);
+  box-shadow: var(--shadow-lg);
+}
+
+.title {
+  margin: 0 0 var(--space-md);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  color: var(--ember-text-primary);
+}
+
+.body {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--ember-text-secondary);
+}
+
+.body strong {
+  color: var(--ember-warning);
+}
+
+.hint {
+  margin: 0 0 var(--space-md);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--ember-text-muted);
+}
+
+.error {
+  margin: 0 0 var(--space-md);
+  font-size: var(--text-sm);
+  color: var(--ember-danger);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+.primary,
+.secondary {
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.primary {
+  border: 1px solid var(--ember-primary);
+  background: var(--ember-primary);
+  color: var(--ember-bg-deep);
+}
+
+.secondary {
+  border: 1px solid var(--ember-border-subtle);
+  background: transparent;
+  color: var(--ember-text-secondary);
+}
+
+.primary:disabled,
+.secondary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

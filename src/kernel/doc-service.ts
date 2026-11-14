@@ -15,7 +15,7 @@ import { canonicalText, hashBytes, isUtf8, parseDocText, utcNow } from './doc-te
 import type { EventBus } from './events.ts';
 import { EmberError } from './errors.ts';
 import type { PathTools } from './paths.ts';
-import type { TrashDestination, VaultPort } from './ports.ts';
+import type { TrashDestination, VaultPort, VaultFileChange, VaultFileEvent } from './ports.ts';
 import type {
   AdoptConflictOptions,
   AdoptConflictResult,
@@ -30,6 +30,7 @@ import type {
   DocPatch,
   DocSnapshot,
   Logger,
+  VaultGuardState,
   WriteOptions,
   WriteOutcome,
 } from './types.ts';
@@ -70,12 +71,22 @@ export interface DocService {
 
   flush(): Promise<void>;
   watch(listener: (change: DocChange) => void): Disposable;
+
+  /** 库守护熔断状态；触发后非 null，此时全部写入被拒，直到 rescan 或重启 */
+  guard(): VaultGuardState | null;
+  /** 用户确认库未被整体替换：清空目录并按磁盘重建，同时解除熔断只读 */
+  rescan(): Promise<void>;
 }
 
 /** 内核内部扩展：watcher 触发目录对账、文章回滚用，不暴露给能力（G1） */
 export interface DocServiceInternal extends DocService {
   /** 全量对账：文件 → 目录；只收录已具备合法且唯一 id 的文档 */
   refresh(): Promise<void>;
+  /**
+   * 增量对账：按 watcher 事件只重读发生变化的文件；`removed` 用路径反查 id 直接摘除。
+   * `overflow` 事件应交给 `refresh()`（由 boot 统一分流）。
+   */
+  applyFileEvents(events: readonly VaultFileEvent[]): Promise<void>;
   /**
    * 永久删除：**仅供内核回滚内部使用**（文章创建后画布写入失败），不是用户删除入口；
    * 不注册为命令——`core.doc.purge` 在契约里仍是「v1 未实现」。
@@ -94,6 +105,9 @@ interface CatalogEntry {
   style: FileStyle;
   /** 严格 UTF-8 解码是否成功；false 时拒绝一切会重编码的写入 */
   utf8Valid: boolean;
+  /** watcher 事件携带的元数据：与事件一致时增量对账可跳过读盘 */
+  mtimeMs: number | null;
+  size: number | null;
 }
 
 export interface DocServiceOptions {
@@ -114,6 +128,24 @@ const HISTORY_KEEP = 20;
 /** 每篇文档历史版本的字节预算 */
 const HISTORY_BUDGET = 64 * 1024 * 1024;
 const HISTORY_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * 库守护熔断阈值（保守默认值）：
+ * - 消失数低于 5 篇从不熔断：小库或正常整理时删几篇很常见；
+ * - 消失占比 ≥ 50%（且至少 5 篇）：整库被替换/移走最典型的表现；
+ * - 绝对数 ≥ 200 篇：超大库即使占比不到一半，一次消失这么多也远超正常操作。
+ * 两者取「或」：任一成立即停止清理并进入只读，宁可让用户多点一次「重新扫描」，
+ * 也不把目录里剩下的文档记录当成已删除清掉。
+ */
+const GUARD_MIN_MISSING_DOCS = 5;
+const GUARD_MISSING_RATIO = 0.5;
+const GUARD_MISSING_ABSOLUTE = 200;
+
+const shouldGuard = (missing: number, known: number): boolean => {
+  if (missing < GUARD_MIN_MISSING_DOCS) return false;
+  if (missing >= GUARD_MISSING_ABSOLUTE) return true;
+  return known > 0 && missing / known >= GUARD_MISSING_RATIO;
+};
 
 /**
  * 磁盘文件的字节风格。目录里的 `text` 一律是 canonical（LF、无 BOM），
@@ -204,6 +236,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
   const listeners = new Set<(change: DocChange) => void>();
   const pending = new Set<Promise<unknown>>();
   let scanned = false;
+  /** 库守护熔断状态；非 null 时拒绝一切写入，直到用户 rescan */
+  let guard: VaultGuardState | null = null;
 
   /**
    * per-docId 串行链：读盘 → base 校验 → 写盘 → 目录更新必须整体入队，
@@ -248,6 +282,13 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
   };
 
   const assertWritable = (): void => {
+    if (guard !== null) {
+      throw new EmberError(
+        'vault_locked',
+        '这个库看起来被整体替换或移走了，已进入只读；请重新扫描或退出',
+        { reason: 'vaultGuard' },
+      );
+    }
     if (port.readonlyMode) {
       throw new EmberError('vault_locked', '库为只读，写操作被拒绝（原因见状态栏）', {
         reason: port.readonlyReason,
@@ -411,6 +452,17 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
 
   const runRefresh = async (): Promise<void> => {
     const pathsInVault = await port.list();
+    // 仅在目录已建立后广播进度：启动首次扫描是必经步骤，不必打扰用户
+    const announce = scanned && pathsInVault.length > 0;
+    if (announce) events.emit('vault:sync', { total: pathsInVault.length, active: true });
+    try {
+      await applyScan(pathsInVault);
+    } finally {
+      if (announce) events.emit('vault:sync', { total: pathsInVault.length, active: false });
+    }
+  };
+
+  const applyScan = async (pathsInVault: readonly VaultPath[]): Promise<void> => {
     const present = new Set(pathsInVault.map((item) => String(item)));
     const seen = new Set<string>();
     const duplicateIds = new Set<string>();
@@ -476,6 +528,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         existing.text = text;
         existing.style = style;
         existing.utf8Valid = utf8Valid;
+        existing.mtimeMs = null;
+        existing.size = null;
         byPath.delete(String(oldPath));
         byPath.set(String(path), id);
         bumpVersion(String(id));
@@ -491,7 +545,17 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         continue;
       }
       const rev = existing === undefined ? 1 : existing.hash === hash ? existing.rev : existing.rev + 1;
-      entries.set(String(id), { id, path, rev, hash, text, style, utf8Valid });
+      entries.set(String(id), {
+        id,
+        path,
+        rev,
+        hash,
+        text,
+        style,
+        utf8Valid,
+        mtimeMs: null,
+        size: null,
+      });
       byPath.set(String(path), id);
       bumpVersion(String(id));
       versionSnapshot.set(String(id), versions.get(String(id)) ?? 0);
@@ -503,6 +567,30 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       } else if (existing.hash !== hash) {
         emitChange({ id, path, kind: 'external', revision: { rev, hash } });
       }
+    }
+
+    // 库守护：大量文档同时消失时先不动目录（可能是整库被替换/移走），
+    // 否则这里会把本应保留的文档记录全部清掉，用户再换回原路径也找不回。
+    const missing = [...entries].filter(
+      ([key]) => !seen.has(key) && !queues.has(key),
+    );
+    if (shouldGuard(missing.length, entries.size)) {
+      if (guard === null) {
+        guard = {
+          known: entries.size,
+          missing: missing.length,
+          ratio: entries.size === 0 ? 0 : missing.length / entries.size,
+        };
+        port.setRuntimeReadonly?.('vaultGuard');
+        events.emit('vault:guarded', guard);
+        log.error('单次对账中有大量文档消失，已停止目录清理并进入只读', {
+          known: guard.known,
+          missing: guard.missing,
+          ratio: guard.ratio,
+        });
+      }
+      scanned = true;
+      return;
     }
 
     for (const [key, entry] of [...entries]) {
@@ -530,6 +618,191 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
 
   const ensureScanned = async (): Promise<void> => {
     if (!scanned) await refresh();
+  };
+
+  /**
+   * 单文件增量：只读事件指向的文件，不再全库 list + 逐文件读全文。
+   * 事件自带 mtime/size，与目录里的元数据一致时连这一次读盘也省掉。
+   */
+  const applyFileChange = async (event: VaultFileChange): Promise<void> => {
+    if (event.kind === 'removed') {
+      const id = byPath.get(String(event.path));
+      if (id === undefined) return;
+      const key = String(id);
+      // 队列正在处理该 id：删除/改名由队列自身完成，增量对账不能抢先摘除
+      if (isBusy(id) || queues.has(key)) return;
+      const entry = entries.get(key);
+      if (entry === undefined || String(entry.path) !== String(event.path)) return;
+      entries.delete(key);
+      versions.delete(key);
+      byPath.delete(String(event.path));
+      emitChange({
+        id,
+        path: entry.path,
+        kind: 'removed',
+        revision: { rev: entry.rev + 1, hash: entry.hash },
+      });
+      return;
+    }
+
+    let existing: CatalogEntry | undefined;
+    if (event.kind === 'renamed' && event.from !== undefined) {
+      const movedId = byPath.get(String(event.from));
+      if (movedId !== undefined) existing = entries.get(String(movedId));
+    } else {
+      const mapped = byPath.get(String(event.path));
+      if (mapped !== undefined) existing = entries.get(String(mapped));
+    }
+    if (existing !== undefined) {
+      const key = String(existing.id);
+      if (isBusy(existing.id) || queues.has(key)) return;
+      if (
+        event.mtimeMs !== undefined &&
+        event.size !== undefined &&
+        existing.mtimeMs === event.mtimeMs &&
+        existing.size === event.size
+      ) {
+        return;
+      }
+    }
+
+    const bytes = await readBytes(event.path);
+    if (bytes === null) return;
+    const rawText = decoder.decode(bytes);
+    const parsed = parseDocText(rawText);
+    const id = parsed.frontmatter.id === null ? null : asDocId(parsed.frontmatter.id);
+
+    if (id === null) {
+      // 文件还在但已没有合法 id：把它从目录里摘掉，等 adoption 流程处理
+      if (existing === undefined) return;
+      const key = String(existing.id);
+      if (isBusy(existing.id) || queues.has(key)) return;
+      entries.delete(key);
+      versions.delete(key);
+      byPath.delete(String(existing.path));
+      emitChange({
+        id: existing.id,
+        path: existing.path,
+        kind: 'removed',
+        revision: { rev: existing.rev + 1, hash: existing.hash },
+      });
+      return;
+    }
+
+    const target = entries.get(String(id));
+    if (target !== undefined && String(target.path) !== String(event.path)) {
+      // 同 id 已登记在另一条路径：先确认旧路径是否真的没了。
+      const stillThere = await port.stat(target.path);
+      if (stillThere !== null) {
+        log.warn('增量对账发现重复 id，保留先收录的路径', {
+          id: String(id),
+          path: String(event.path),
+        });
+        return;
+      }
+    }
+    const hash = await hashBytes(bytes);
+    // 读盘/hash 期间可能刚好有写入入队：apply 前再确认一次
+    if (isBusy(id) || queues.has(String(id))) return;
+
+    const text = canonicalText(rawText);
+    const style = detectStyle(bytes, rawText);
+    const utf8Valid = isUtf8(bytes);
+
+    // 内容换成了另一个 id：旧条目的身份必须一并摘掉，否则会留下指向不存在文件的记录
+    if (existing !== undefined && String(existing.id) !== String(id)) {
+      const oldKey = String(existing.id);
+      entries.delete(oldKey);
+      versions.delete(oldKey);
+      byPath.delete(String(existing.path));
+      emitChange({
+        id: existing.id,
+        path: existing.path,
+        kind: 'removed',
+        revision: { rev: existing.rev + 1, hash: existing.hash },
+      });
+    }
+
+    if (target !== undefined && String(target.path) === String(event.path)) {
+      const changed = target.hash !== hash;
+      target.text = text;
+      target.style = style;
+      target.utf8Valid = utf8Valid;
+      target.mtimeMs = event.mtimeMs ?? null;
+      target.size = event.size ?? null;
+      if (!changed) return;
+      target.hash = hash;
+      target.rev += 1;
+      bumpVersion(String(id));
+      emitChange({
+        id,
+        path: event.path,
+        kind: 'external',
+        revision: { rev: target.rev, hash },
+      });
+      return;
+    }
+
+    if (target !== undefined) {
+      // 同 id 的旧路径已不存在：外部改名/移动，迁移条目而不是新建
+      const oldPath = target.path;
+      const changed = target.hash !== hash;
+      const rev = changed ? target.rev + 1 : target.rev;
+      target.path = event.path;
+      target.rev = rev;
+      target.hash = hash;
+      target.text = text;
+      target.style = style;
+      target.utf8Valid = utf8Valid;
+      target.mtimeMs = event.mtimeMs ?? null;
+      target.size = event.size ?? null;
+      byPath.delete(String(oldPath));
+      byPath.set(String(event.path), id);
+      bumpVersion(String(id));
+      emitChange({
+        id,
+        path: event.path,
+        kind: changed ? 'external' : 'renamed',
+        revision: { rev, hash },
+      });
+      return;
+    }
+
+    entries.set(String(id), {
+      id,
+      path: event.path,
+      rev: 1,
+      hash,
+      text,
+      style,
+      utf8Valid,
+      mtimeMs: event.mtimeMs ?? null,
+      size: event.size ?? null,
+    });
+    byPath.set(String(event.path), id);
+    bumpVersion(String(id));
+    if (scanned) emitChange({ id, path: event.path, kind: 'created', revision: { rev: 1, hash } });
+  };
+
+  const applyFileEvents = async (events: readonly VaultFileEvent[]): Promise<void> => {
+    if (events.length === 0) return;
+    await ensureScanned();
+    // 溢出事件不在这里处理：调用方（boot）合并成一次 refresh()
+    for (const event of events) {
+      if (event.kind === 'overflow') continue;
+      await applyFileChange(event);
+    }
+  };
+
+  const rescan = async (): Promise<void> => {
+    if (refreshInFlight !== null) await refreshInFlight;
+    entries.clear();
+    byPath.clear();
+    versions.clear();
+    guard = null;
+    port.setRuntimeReadonly?.(null);
+    scanned = false;
+    await refresh();
   };
 
   const commit = async (entry: CatalogEntry, text: string, intent: WriteOptions['intent']): Promise<CatalogEntry> => {
@@ -597,7 +870,17 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       if (isBusy(entry.id)) {
         // 队列正在写同一 id：不能回写共享 entry（可能把队列刚推进的 rev/hash 打回旧值）。
         // 仅用刚读到的字节构造一次性快照返回；缓存交给队列在写完后更新。
-        const view: CatalogEntry = { id: entry.id, path: entry.path, rev: entry.rev, hash, text, style, utf8Valid };
+        const view: CatalogEntry = {
+          id: entry.id,
+          path: entry.path,
+          rev: entry.rev,
+          hash,
+          text,
+          style,
+          utf8Valid,
+          mtimeMs: null,
+          size: null,
+        };
         return snapshotOf(view);
       }
       if ((versions.get(key) ?? 0) !== versionAtRead) {
@@ -612,6 +895,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       entry.text = text;
       entry.style = style;
       entry.utf8Valid = utf8Valid;
+      entry.mtimeMs = null;
+      entry.size = null;
       bumpVersion(key);
     }
     return snapshotOf(entry);
@@ -674,7 +959,17 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       const bytes = encoder.encode(applyStyle(text, style));
       await track(port.write(input.path, bytes, input.intent));
       const hash = await hashBytes(bytes);
-      const entry: CatalogEntry = { id, path: input.path, rev: 1, hash, text, style, utf8Valid: true };
+      const entry: CatalogEntry = {
+        id,
+        path: input.path,
+        rev: 1,
+        hash,
+        text,
+        style,
+        utf8Valid: true,
+        mtimeMs: null,
+        size: null,
+      };
       entries.set(String(id), entry);
       byPath.set(String(input.path), id);
       bumpVersion(String(id));
@@ -739,7 +1034,17 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         const encoded = encoder.encode(applyStyle(text, style));
         await track(port.write(path, encoded, 'migration'));
         const hash = await hashBytes(encoded);
-        const entry: CatalogEntry = { id, path, rev: 1, hash, text, style, utf8Valid: true };
+        const entry: CatalogEntry = {
+          id,
+          path,
+          rev: 1,
+          hash,
+          text,
+          style,
+          utf8Valid: true,
+          mtimeMs: null,
+          size: null,
+        };
         entries.set(String(id), entry);
         byPath.set(String(path), id);
         bumpVersion(String(id));
@@ -1132,5 +1437,11 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         },
       };
     },
+
+    applyFileEvents,
+
+    guard: () => guard,
+
+    rescan,
   };
 };

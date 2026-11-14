@@ -1,6 +1,6 @@
 import { unsafeVaultPath } from '#doc-model';
 import type { KernelContext } from '../../src/kernel/context.ts';
-import type { VaultFileEvent, VaultPort } from '../../src/kernel/ports.ts';
+import type { VaultFileChange, VaultFileEvent, VaultPort } from '../../src/kernel/ports.ts';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: false });
@@ -9,12 +9,16 @@ export interface MemoryVault {
   readonly port: VaultPort;
   /** 端口 read 调用记录（按调用顺序），用于断言「没有读取」 */
   readonly reads: readonly string[];
+  /** 端口 list 调用次数，用于断言全量对账只跑一次 */
+  readonly listCalls: number;
   dump(): Readonly<Record<string, string>>;
   /** 模拟外部工具直接改文件（不经端口写） */
   writeRaw(path: string, text: string): void;
   /** 模拟外部工具直接删除/移走文件（不经端口写） */
   removeRaw(path: string): void;
-  emitExternal(path: string, kind: VaultFileEvent['kind']): void;
+  emitExternal(path: string, kind: VaultFileChange['kind'], from?: string): void;
+  /** 模拟 watcher 单 tick 事件溢出 */
+  emitOverflow(count: number): void;
 }
 
 export interface MemoryVaultOptions {
@@ -36,6 +40,8 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
   const sizeOverrides = new Map(Object.entries(options.sizes ?? {}));
   const reads: string[] = [];
   const listeners = new Set<(event: VaultFileEvent) => void>();
+  let listCalls = 0;
+  let runtimeReadonly: string | null = null;
   let clock = 0;
 
   const tick = (): string => {
@@ -53,12 +59,19 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
   }
 
   const assertWritable = (): void => {
-    if (options.readonlyMode === true) throw new Error('readonly port');
+    if (options.readonlyMode === true || runtimeReadonly !== null) throw new Error('readonly port');
   };
 
   const port: VaultPort = {
-    readonlyMode: options.readonlyMode === true,
-    readonlyReason: options.readonlyMode === true ? 'lockedByOther' : null,
+    get readonlyMode() {
+      return options.readonlyMode === true || runtimeReadonly !== null;
+    },
+    get readonlyReason() {
+      return runtimeReadonly ?? (options.readonlyMode === true ? 'lockedByOther' : null);
+    },
+    setRuntimeReadonly(reason: string | null) {
+      runtimeReadonly = reason;
+    },
     read: (path) => {
       reads.push(String(path));
       return Promise.resolve(files.get(String(path)) ?? null);
@@ -94,7 +107,10 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
       sizeOverrides.delete(String(from));
       return Promise.resolve();
     },
-    list: () => Promise.resolve([...files.keys()].map((path) => unsafeVaultPath(path))),
+    list: () => {
+      listCalls += 1;
+      return Promise.resolve([...files.keys()].map((path) => unsafeVaultPath(path)));
+    },
     scan: () =>
       Promise.resolve(
         [
@@ -140,14 +156,28 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
     get reads() {
       return [...reads];
     },
+    get listCalls() {
+      return listCalls;
+    },
     dump: () => {
       const out: Record<string, string> = {};
       for (const [path, bytes] of files) out[path] = decoder.decode(bytes);
       return out;
     },
-    emitExternal: (path, kind) => {
-      const event: VaultFileEvent = { path: unsafeVaultPath(path), kind };
+    emitExternal: (path, kind, from) => {
+      const bytes = files.get(path);
+      const mtime = mtimes.get(path);
+      const event: VaultFileChange = {
+        kind,
+        path: unsafeVaultPath(path),
+        ...(from === undefined ? {} : { from: unsafeVaultPath(from) }),
+        ...(mtime === undefined ? {} : { mtimeMs: Date.parse(mtime) }),
+        ...(bytes === undefined ? {} : { size: bytes.byteLength }),
+      };
       for (const listener of [...listeners]) listener(event);
+    },
+    emitOverflow: (count) => {
+      for (const listener of [...listeners]) listener({ kind: 'overflow', count });
     },
     writeRaw: (path, text) => {
       files.set(path, encoder.encode(text));

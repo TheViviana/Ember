@@ -307,6 +307,16 @@ export interface SettingsService {
   flush(): Promise<void>;
 }
 
+/** 库守护熔断状态：单次对账中消失文档过多时进入，等待用户确认 */
+export interface VaultGuardState {
+  /** 熔断前目录里的文档数 */
+  readonly known: number;
+  /** 本次对账中消失的文档数 */
+  readonly missing: number;
+  /** missing / known（known 为 0 时按 0 处理） */
+  readonly ratio: number;
+}
+
 export interface KernelEnv {
   readonly kernelVersion: string;
   readonly vaultId: VaultId;

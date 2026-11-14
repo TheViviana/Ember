@@ -4,12 +4,29 @@ import type { Disposable, WriteIntent } from './types.ts';
 /** 用户删除的实际落点：系统回收站，或降级后的库内回收目录（vault-format §8.3） */
 export type TrashDestination = 'system' | 'internal';
 
-export interface VaultFileEvent {
+/** 单个文件的变更事件（watcher 已按 mtime + size 判定确实变了） */
+export interface VaultFileChange {
   readonly kind: 'created' | 'changed' | 'removed' | 'renamed';
   readonly path: VaultPath;
   /** 仅 kind === 'renamed' 携带：重命名前的原路径 */
   readonly from?: VaultPath;
+  /** 事件发生时的 mtime（Unix 毫秒）：与目录里缓存的元数据一致时前端可跳过读盘 */
+  readonly mtimeMs?: number;
+  /** 事件发生时的字节数 */
+  readonly size?: number;
 }
+
+/**
+ * 单 tick 事件数超过阈值时，watcher 只发这一条替代成百上千条逐文件事件；
+ * 前端收到后做一次全量对账。
+ */
+export interface VaultOverflowEvent {
+  readonly kind: 'overflow';
+  /** 本 tick 被合并掉的事件数 */
+  readonly count: number;
+}
+
+export type VaultFileEvent = VaultFileChange | VaultOverflowEvent;
 
 /** 库健康检查清单条目；只读遍历结果，不跟随符号链接 */
 export interface VaultScanEntry {
@@ -47,6 +64,12 @@ export interface VaultPort {
   /** 文件元信息；不存在返回 null */
   stat(path: VaultPath): Promise<{ readonly mtime: string; readonly size: number } | null>;
   watch(listener: (event: VaultFileEvent) => void): Disposable;
+  /**
+   * 运行期只读切换（库守护熔断用）：传 null 解除。
+   * 实现方必须让 readonlyMode / readonlyReason 联动；不实现的端口（如纯内存桩）
+   * 只会失去跨服务的只读扩散，内核自身仍会拒绝写入。
+   */
+  setRuntimeReadonly?(reason: string | null): void;
 }
 
 /**

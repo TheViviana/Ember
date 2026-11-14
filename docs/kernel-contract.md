@@ -247,9 +247,9 @@ export interface KernelContext {
 }
 ```
 
-事件表：`doc:changed`、`doc:conflict`、`index:updated`、`command:executed`、`settings:changed`、`canvas:changed`、`canvas:ui`。（`capability:state`、`vault:mode` 已随能力体系与心跳锁删除。）
+事件表：`doc:changed`、`doc:conflict`、`index:updated`、`command:executed`、`settings:changed`、`canvas:changed`、`canvas:ui`、`vault:guarded`、`vault:sync`。（`capability:state`、`vault:mode` 已随能力体系与心跳锁删除。）
 
-`KERNEL_VERSION = '2.3.0'`：2.2.0 → 2.3.0 为 minor，`DocService` 新增 `adopt`，`KernelContext` 新增 `health`，`VaultPort` 新增只读 `scan`；既有方法签名与错误码不变。2.1.0 → 2.2.0 为 minor，`DocService` 新增 `adoptCopy` / `detachCopy` 两个方法，`DocMeta` 新增 `conflictOf`。2.0.0 → 2.1.0 为 minor，`DocService` 新增 `listHistory` / `readHistory` / `restoreHistory` 三个方法。相对 1.2.0 的 2.0.0 是 major：删除了 `articles` / `editor` / `capabilities` 三个服务与 `withOwner`，IndexService 语义变更。
+`KERNEL_VERSION = '2.4.0'`：2.3.0 → 2.4.0 为 minor，`DocService` 新增 `guard` / `rescan`，`KernelEventMap` 新增 `vault:guarded` / `vault:sync`，`VaultPort` 新增可选 `setRuntimeReadonly`；既有方法签名与错误码不变。2.2.0 → 2.3.0 为 minor，`DocService` 新增 `adopt`，`KernelContext` 新增 `health`，`VaultPort` 新增只读 `scan`；既有方法签名与错误码不变。2.1.0 → 2.2.0 为 minor，`DocService` 新增 `adoptCopy` / `detachCopy` 两个方法，`DocMeta` 新增 `conflictOf`。2.0.0 → 2.1.0 为 minor，`DocService` 新增 `listHistory` / `readHistory` / `restoreHistory` 三个方法。相对 1.2.0 的 2.0.0 是 major：删除了 `articles` / `editor` / `capabilities` 三个服务与 `withOwner`，IndexService 语义变更。
 
 ---
 
