@@ -744,6 +744,7 @@ dependencies = [
  "getrandom 0.4.3",
  "keyring",
  "objc2",
+ "objc2-app-kit",
  "objc2-foundation",
  "reqwest",
  "serde",

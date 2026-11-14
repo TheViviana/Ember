@@ -26,7 +26,7 @@ pub struct LockPayload {
     pub app: String,
 }
 
-/// 只读原因收敛为两种：被占用（pid 存活）/ 丢失（契约保留态）。
+/// 只读原因收敛为三种：被占用（pid 存活）/ 丢失（契约保留态）/ 库位置不可写。
 /// 序列化为 camelCase 字符串，供 IPC 与前端文案映射共用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +35,8 @@ pub enum ReadonlyReason {
     LockedByOther,
     /// 运行期丢失（保留契约位；独占创建模型下运行期不会再出现）
     LockLost,
+    /// 库所在位置不可写（只读卷/只读目录）：身份可读，但无法建锁与写入
+    FilesystemReadonly,
 }
 
 /// `acquire_detailed` 的失败：只读要带原因，其它错误原样上抛。

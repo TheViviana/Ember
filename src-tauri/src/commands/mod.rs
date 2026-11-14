@@ -4,12 +4,62 @@ use std::path::PathBuf;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::Serialize;
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, State, Window};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, State, Window};
 
 use crate::error::{VaultError, VaultResult};
-use crate::vault::{atomic, backup, lock, media, paths, ScanEntry, Vault};
+use crate::vault::session::{self, StartupView, VaultApp, VaultIdentity, VaultInfo};
+use crate::vault::{atomic, backup, lock, media, paths, ScanEntry};
 
 pub mod ai;
+
+/// 启动闸门三态：前端据此决定渲染选择页、错误页还是进入内核。
+#[tauri::command]
+pub fn vault_startup_state(state: State<'_, VaultApp>) -> StartupView {
+    state.view()
+}
+
+/// 用户显式选择/新建/最近列表切换；失败时 Rust 侧保留当前库不动。
+#[tauri::command]
+pub async fn vault_open(
+    state: State<'_, VaultApp>,
+    root: String,
+    mode: String,
+) -> VaultResult<StartupView> {
+    state.open_user(&root, &mode)
+}
+
+/// 错误页「重试」：重跑启动时的解析候选。
+#[tauri::command]
+pub async fn vault_retry(state: State<'_, VaultApp>) -> VaultResult<StartupView> {
+    Ok(state.retry())
+}
+
+/// 原生目录面板：`mode=create` 允许新建文件夹；取消返回 null。
+#[tauri::command]
+pub async fn vault_choose_directory(
+    app: AppHandle,
+    mode: String,
+) -> VaultResult<Option<String>> {
+    let allow_create = match mode.as_str() {
+        "create" => true,
+        "existing" => false,
+        other => {
+            return Err(VaultError::Encoding(format!("未知的目录选择模式：{other}")));
+        }
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::vault::picker::choose_directory(&app, allow_create)
+    })
+    .await
+    .map_err(|error| VaultError::Startup(format!("目录选择器未完成：{error}")))
+}
+
+/// 设置页展示：当前库根与最近列表。未打开库时返回未初始化。
+#[tauri::command]
+pub async fn vault_current_info(state: State<'_, VaultApp>) -> VaultResult<VaultInfo> {
+    state.info()
+}
+
 
 /// 无边框窗口的自绘缩放：一次 IPC 同时落位置与尺寸，避免两帧撕裂。
 /// macOS 上 `startResizeDragging` 是 `NotSupported` 且错误被运行时吞掉，因此缩放必须走这里。
@@ -31,16 +81,6 @@ pub fn window_resize_frame(
 }
 
 #[derive(Debug, Serialize)]
-pub struct VaultIdentity {
-    #[serde(rename = "vaultId")]
-    vault_id: String,
-    readonly: bool,
-    /// 只读原因；可写时省略（additive 字段，老前端不受影响）
-    #[serde(rename = "readonlyReason", skip_serializing_if = "Option::is_none")]
-    readonly_reason: Option<crate::vault::lock::ReadonlyReason>,
-}
-
-#[derive(Debug, Serialize)]
 pub struct FileStat {
     mtime: String,
     size: u64,
@@ -53,32 +93,22 @@ const MAX_VAULT_WRITE_BYTES: u64 = 32 * 1024 * 1024;
 /// ui.json 是机器本地小文件，远超实际需要的载荷直接拒绝
 const MAX_MACHINE_UI_BYTES: usize = 1024 * 1024;
 
-fn identity_of(vault: &Vault) -> VaultIdentity {
-    VaultIdentity {
-        vault_id: vault.id().to_string(),
-        // 用 writable()：启动未抢到锁（被另一实例占用）的实例如实告知前端
-        readonly: !vault.writable(),
-        readonly_reason: vault.readonly_reason(),
-    }
-}
-
-/// 前端启动第一步：拿库身份与只读标志（只读标志来自库锁获取结果）。
-/// 建库失败时返回可读错误，交给启动页展示，而不是让原生进程 panic。
+/// 前端启动第二步：拿库身份与只读标志（只读标志来自库锁获取结果）。
+/// 启动闸门已保证此处有库；未就绪时返回可读错误而不是让原生进程 panic。
 #[tauri::command]
-pub fn vault_identity(app: AppHandle) -> VaultResult<VaultIdentity> {
-    match (
-        app.try_state::<crate::StartupFailure>(),
-        app.try_state::<Vault>(),
-    ) {
-        (Some(failure), _) => Err(VaultError::Startup(failure.0.clone())),
-        (None, Some(vault)) => Ok(identity_of(&vault)),
-        (None, None) => Err(VaultError::Uninitialized),
-    }
+pub fn vault_identity(state: State<'_, VaultApp>) -> VaultResult<VaultIdentity> {
+    let session = state.session()?;
+    Ok(session::identity_of(session.vault()?))
 }
 
 /// 字节以 base64 过 IPC；文件不存在返回 null。
 #[tauri::command]
-pub async fn vault_read(vault: State<'_, Vault>, path: String) -> VaultResult<Option<String>> {
+pub async fn vault_read(
+    state: State<'_, VaultApp>,
+    path: String,
+) -> VaultResult<Option<String>> {
+    let session = state.session()?;
+    let vault = session.vault()?;
     // stat 先行：外部塞进库里的超大文件不读入内存
     if let Some((_, size)) = vault.stat(&path)? {
         if size > MAX_VAULT_READ_BYTES {
@@ -93,7 +123,7 @@ pub async fn vault_read(vault: State<'_, Vault>, path: String) -> VaultResult<Op
 
 #[tauri::command]
 pub async fn vault_write(
-    vault: State<'_, Vault>,
+    state: State<'_, VaultApp>,
     path: String,
     data: String,
     intent: String,
@@ -108,71 +138,95 @@ pub async fn vault_write(
     let bytes = STANDARD
         .decode(data.as_bytes())
         .map_err(|error| VaultError::Encoding(error.to_string()))?;
-    vault.write(&path, &bytes, &intent)
+    let session = state.session()?;
+    session.vault()?.write(&path, &bytes, &intent)
 }
 
 /// 用户删除：优先系统回收站，不可用时降级 Finder 与库内回收目录（vault-format §8.3）。
 /// 返回实际落点 `system` / `internal`；文件本就不存在时返回 `null`。
 #[tauri::command]
 pub async fn vault_remove(
-    vault: State<'_, Vault>,
+    state: State<'_, VaultApp>,
     path: String,
 ) -> VaultResult<Option<&'static str>> {
-    Ok(vault.remove(&path)?.map(crate::vault::trash::TrashDestination::as_str))
+    let session = state.session()?;
+    Ok(session
+        .vault()?
+        .remove(&path)?
+        .map(crate::vault::trash::TrashDestination::as_str))
 }
 
 /// 永久删除：仅供内核回滚内部使用，不是用户命令（`core.doc.purge` 仍为 v1 未实现）。
 #[tauri::command]
-pub async fn vault_purge(vault: State<'_, Vault>, path: String) -> VaultResult<()> {
-    vault.purge(&path)
+pub async fn vault_purge(state: State<'_, VaultApp>, path: String) -> VaultResult<()> {
+    let session = state.session()?;
+    session.vault()?.purge(&path)
 }
 
 /// 目标路径已存在时返回 `path_exists`。该检查只降低覆盖概率，不能杜绝：
 /// 检查与 `fs::rename` 之间仍有窗口，外部进程此时创建同名文件仍会被覆盖。
 #[tauri::command]
-pub async fn vault_rename(vault: State<'_, Vault>, from: String, to: String) -> VaultResult<()> {
-    vault.rename(&from, &to)
+pub async fn vault_rename(
+    state: State<'_, VaultApp>,
+    from: String,
+    to: String,
+) -> VaultResult<()> {
+    let session = state.session()?;
+    session.vault()?.rename(&from, &to)
 }
 
 #[tauri::command]
-pub async fn vault_list(vault: State<'_, Vault>) -> VaultResult<Vec<String>> {
-    vault.list()
+pub async fn vault_list(state: State<'_, VaultApp>) -> VaultResult<Vec<String>> {
+    let session = state.session()?;
+    session.vault()?.list()
 }
 
 #[tauri::command]
-pub async fn vault_list_canvases(vault: State<'_, Vault>) -> VaultResult<Vec<String>> {
-    vault.list_canvases()
+pub async fn vault_list_canvases(state: State<'_, VaultApp>) -> VaultResult<Vec<String>> {
+    let session = state.session()?;
+    session.vault()?.list_canvases()
 }
 
 /// 库健康检查清单：只读，不跟随符号链接。
 #[tauri::command]
-pub async fn vault_scan(vault: State<'_, Vault>) -> VaultResult<Vec<ScanEntry>> {
-    vault.scan()
+pub async fn vault_scan(state: State<'_, VaultApp>) -> VaultResult<Vec<ScanEntry>> {
+    let session = state.session()?;
+    session.vault()?.scan()
 }
 
 #[tauri::command]
-pub async fn vault_stat(vault: State<'_, Vault>, path: String) -> VaultResult<Option<FileStat>> {
-    Ok(vault
+pub async fn vault_stat(
+    state: State<'_, VaultApp>,
+    path: String,
+) -> VaultResult<Option<FileStat>> {
+    let session = state.session()?;
+    Ok(session
+        .vault()?
         .stat(&path)?
         .map(|(mtime, size)| FileStat { mtime, size }))
 }
 
 /// 图库清单：`media/` 下所有合法图片，相对路径字典序。
 #[tauri::command]
-pub async fn asset_list(vault: State<'_, Vault>) -> VaultResult<Vec<media::AssetEntry>> {
-    media::list(&vault)
+pub async fn asset_list(state: State<'_, VaultApp>) -> VaultResult<Vec<media::AssetEntry>> {
+    let session = state.session()?;
+    media::list(session.vault()?)
 }
 
 /// 读单张图库图片，字节以 base64 过 IPC；只接受 `media/` 下的资产路径。
 #[tauri::command]
-pub async fn asset_read(vault: State<'_, Vault>, path: String) -> VaultResult<media::AssetData> {
-    media::read(&vault, &path)
+pub async fn asset_read(
+    state: State<'_, VaultApp>,
+    path: String,
+) -> VaultResult<media::AssetData> {
+    let session = state.session()?;
+    media::read(session.vault()?, &path)
 }
 
 /// 导入图片：校验白名单类型 / magic bytes / 20 MB 上限，按 sha256 内容寻址去重。
 #[tauri::command]
 pub async fn asset_save(
-    vault: State<'_, Vault>,
+    state: State<'_, VaultApp>,
     data: String,
     mime: String,
 ) -> VaultResult<media::AssetSaved> {
@@ -186,14 +240,19 @@ pub async fn asset_save(
     let bytes = STANDARD
         .decode(data.as_bytes())
         .map_err(|error| VaultError::Encoding(error.to_string()))?;
-    media::save(&vault, &bytes, &mime)
+    let session = state.session()?;
+    media::save(session.vault()?, &bytes, &mime)
 }
 
 /// 删除单张图库图片：移入系统回收站（与文档删除同一落点）。
 /// 不存在按幂等成功；只读库拒绝。
 #[tauri::command]
-pub async fn asset_delete(vault: State<'_, Vault>, path: String) -> VaultResult<&'static str> {
-    media::delete(&vault, &path)
+pub async fn asset_delete(
+    state: State<'_, VaultApp>,
+    path: String,
+) -> VaultResult<&'static str> {
+    let session = state.session()?;
+    media::delete(session.vault()?, &path)
 }
 
 /// 机器标识与库锁共用 `machine-id` 文件，保证 ui.json 落在同一台机器的目录下：
@@ -273,18 +332,20 @@ pub async fn machine_ai_write(vault_id: String, data: String) -> VaultResult<()>
 
 /// 默认导出目录（库外）：`~/Documents/Ember Export <库名> <YYYY-MM-DD>`。
 #[tauri::command]
-pub fn vault_backup_default_destination(vault: State<'_, Vault>) -> VaultResult<String> {
-    Ok(backup::default_destination(&vault))
+pub fn vault_backup_default_destination(state: State<'_, VaultApp>) -> VaultResult<String> {
+    let session = state.session()?;
+    Ok(backup::default_destination(session.vault()?))
 }
 
 /// 整库导出到指定目录：staging → 逐文件校验 → 原子改名。
 /// 只读库同样允许导出（导出不写库）。
 #[tauri::command]
 pub async fn vault_backup_export(
-    vault: State<'_, Vault>,
+    state: State<'_, VaultApp>,
     options: backup::ExportOptions,
 ) -> VaultResult<backup::ExportReport> {
-    backup::export(&vault, &options)
+    let session = state.session()?;
+    backup::export(session.vault()?, &options)
 }
 
 /// 导出包只读预检：格式/版本、内容 hash、路径穿越、重复路径与 id、大小写碰撞、目标占用。

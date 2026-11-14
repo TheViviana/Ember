@@ -1,9 +1,12 @@
 pub mod atomic;
 pub mod backup;
 pub mod clock;
+pub mod config;
 pub mod lock;
 pub mod media;
 pub mod paths;
+pub mod picker;
+pub mod session;
 pub mod trash;
 pub mod ulid;
 pub mod watcher;
@@ -90,10 +93,17 @@ pub struct Vault {
 }
 
 impl Vault {
-    /// 打开库：确保身份文件 → 抢锁（独占创建 + pid 存活判定）→ 启动清扫。
-    /// 抢不到锁进入只读观察者模式（被另一实例占用）。
+    /// 打开已存在的库：确保身份文件 → 抢锁（独占创建 + pid 存活判定）→ 启动清扫。
+    /// 抢不到锁进入只读观察者模式（被另一实例占用）；库位置不可写时降级为
+    /// `FilesystemReadonly` 只读会话，而不是把用户挡在错误页。
+    /// 不创建库根：只有显式选择/新建路径的 `open_or_init` 允许落盘。
     pub fn open(root: PathBuf) -> VaultResult<Self> {
-        fs::create_dir_all(&root)?;
+        if !root.is_dir() {
+            return Err(VaultError::Startup(format!(
+                "库目录不存在：{}",
+                root.display()
+            )));
+        }
         let id = ensure_identity(&root)?;
 
         let mut startup_readonly_reason: Option<lock::ReadonlyReason> = None;
@@ -105,10 +115,17 @@ impl Vault {
                     match reason {
                         lock::ReadonlyReason::LockedByOther => "已被其它实例打开",
                         lock::ReadonlyReason::LockLost => "库锁丢失",
+                        lock::ReadonlyReason::FilesystemReadonly => "库位置不可写",
                     },
                     root.display()
                 );
                 startup_readonly_reason = Some(reason);
+                None
+            }
+            // 只读卷/只读目录：身份可读但无法建锁。降级为只读会话，保留浏览能力。
+            Err(lock::AcquireFailure::Error(VaultError::PermissionDenied(message))) => {
+                eprintln!("库位置不可写（{message}），进入只读模式：{}", root.display());
+                startup_readonly_reason = Some(lock::ReadonlyReason::FilesystemReadonly);
                 None
             }
             Err(lock::AcquireFailure::Error(error)) => return Err(error),
@@ -131,6 +148,36 @@ impl Vault {
             _lock: guard,
             write_gate: Mutex::new(()),
         })
+    }
+
+    /// 打开配置里记录的既有库：不创建库根，也不在身份缺失时"顺手初始化"。
+    /// 缺 `.workbench/settings.json` 说明这个目录不是（或不再是）Ember 库，
+    /// 必须交给错误页让用户决定，而不是静默换一个新库 ID。
+    pub fn open_existing(root: PathBuf) -> VaultResult<Self> {
+        if !root.is_dir() {
+            return Err(VaultError::Startup(format!(
+                "库目录不存在：{}",
+                root.display()
+            )));
+        }
+        if !paths::settings_file(&root).is_file() {
+            return Err(VaultError::Startup(format!(
+                "这个文件夹还不是 Ember 库（缺少 .workbench/settings.json）：{}",
+                root.display()
+            )));
+        }
+        Self::open(root)
+    }
+
+    /// 用户显式选择/新建的目录：允许初始化库根、`.workbench/settings.json` 与画布目录。
+    /// 只读位置上的建目录失败不在这里判死：交给 `open` 走只读降级。
+    pub fn open_or_init(root: PathBuf) -> VaultResult<Self> {
+        match fs::create_dir_all(&root).and_then(|()| fs::create_dir_all(root.join(CANVAS_DIR))) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(error) => return Err(error.into()),
+        }
+        Self::open(root)
     }
 
     pub fn root(&self) -> &Path {
@@ -659,6 +706,7 @@ mod tests {
             let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let root = std::env::temp_dir()
                 .join(format!("ember-vault-{}-{nanos}-{seq}", std::process::id()));
+            fs::create_dir_all(&root).unwrap();
             let vault = Vault::open(root.clone()).unwrap();
             Self { vault, root }
         }
@@ -1134,5 +1182,83 @@ mod tests {
         assert_eq!(link.kind, "symlink");
 
         fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[test]
+    fn open_missing_root_does_not_create_it() {
+        let root = tempfile_dir("ember-missing-root");
+        let Err(error) = Vault::open(root.clone()) else {
+            panic!("不存在的库根不应打开成功");
+        };
+        assert!(matches!(error, VaultError::Startup(_)), "应为启动错误：{error}");
+        assert!(!root.exists(), "打开既有库不得凭空创建目录");
+    }
+
+    #[test]
+    fn open_existing_requires_identity_and_does_not_initialize() {
+        let root = tempfile_dir("ember-existing-empty");
+        fs::create_dir_all(&root).unwrap();
+
+        let Err(error) = Vault::open_existing(root.clone()) else {
+            panic!("缺少身份的目录不应打开成功");
+        };
+        assert!(matches!(error, VaultError::Startup(_)), "应为启动错误：{error}");
+        assert!(
+            !paths::workbench(&root).exists(),
+            "既有目录缺身份时不得顺手初始化"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn open_or_init_prepares_settings_and_canvas() {
+        let root = tempfile_dir("ember-init-root");
+        let vault = Vault::open_or_init(root.clone()).unwrap();
+
+        assert!(paths::settings_file(&root).is_file(), "应写入库身份");
+        assert!(
+            root.join(CANVAS_DIR).is_dir(),
+            "应准备画布目录：{}",
+            root.join(CANVAS_DIR).display()
+        );
+        assert!(vault.writable());
+        drop(vault);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_location_degrades_to_observer_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile_dir("ember-readonly-root");
+        {
+            let vault = Vault::open_or_init(root.clone()).unwrap();
+            drop(vault);
+        }
+        // 锁文件在 .workbench 内：只读位置要连子目录一起收权，库根仍需可遍历。
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(
+            paths::workbench(&root),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+
+        let opened = Vault::open(root.clone()).unwrap();
+        assert!(!opened.writable(), "不可写位置应降级为只读");
+        assert_eq!(
+            opened.readonly_reason(),
+            Some(lock::ReadonlyReason::FilesystemReadonly)
+        );
+        drop(opened);
+
+        fs::set_permissions(
+            paths::workbench(&root),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 }

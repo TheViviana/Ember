@@ -1138,6 +1138,7 @@ mod tests {
     impl TempVault {
         fn new() -> Self {
             let root = temp_dir("ember-backup-vault");
+            fs::create_dir_all(&root).unwrap();
             let vault = Vault::open(root.clone()).unwrap();
             Self { vault, root }
         }

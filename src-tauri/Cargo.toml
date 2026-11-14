@@ -34,3 +34,8 @@ getrandom = "0.4"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", features = ["NSFileManager", "NSURL", "NSError", "NSString", "NSValue"] }
+# 首启选库的原生目录面板：NSOpenPanel（vault/picker.rs）。版本对齐 Cargo.lock
+# （tao/wry 已编译的 objc2-app-kit 0.3.2），零新增下载。
+# 关掉 default-features（默认会启用整套 AppKit 并拖入 cloud-kit/core-image 等新包），
+# 只开面板及其父类所需 feature。
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder"] }
