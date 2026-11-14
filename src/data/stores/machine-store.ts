@@ -178,7 +178,26 @@ export interface MachineUiDocument {
   readonly panels: { readonly ai: AiPanelState };
   /** 每画布的 UI 开关（最近编辑层等）；键 = canvasId */
   readonly canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>>;
+  /** 文档树展开的文件夹路径；键 = vaultId（同一台机器可切多个库，状态互不串） */
+  readonly docTreeExpanded: Readonly<Record<string, readonly string[]>>;
 }
+
+/** 单个库的记忆上限：路径再多也只留前 500 条，避免 ui.json 无限增长 */
+export const DOC_TREE_EXPANDED_LIMIT = 500;
+
+/** 去重、只留字符串并截断到上限；磁盘与内存共用同一套收敛规则 */
+export const normalizeTreeExpanded = (value: unknown): readonly string[] => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || item.length === 0 || seen.has(item)) continue;
+    seen.add(item);
+    paths.push(item);
+    if (paths.length >= DOC_TREE_EXPANDED_LIMIT) break;
+  }
+  return paths;
+};
 
 export interface MachineState {
   /** docId → 浮窗尺寸；同一篇文章跨重启恢复，不同文章互不影响 */
@@ -191,6 +210,8 @@ export interface MachineState {
   readonly translationChannel: TranslationChannel;
   readonly panels: { readonly ai: AiPanelState };
   readonly canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>>;
+  /** 文档树展开状态；按 vaultId 分桶 */
+  readonly docTreeExpanded: Readonly<Record<string, readonly string[]>>;
   rememberFloatSize(docId: string, size: FloatSize): void;
   rememberFloatPosition(docId: string, position: FloatPosition): void;
   /** 清除某键的位置与尺寸记忆（双击宽度手柄复位等场景） */
@@ -200,6 +221,7 @@ export interface MachineState {
   setTranslationChannel(channel: TranslationChannel): void;
   setAiPanel(patch: Partial<AiPanelState>): void;
   setCanvasFlag(canvasId: string, patch: { readonly recentEdits?: boolean }): void;
+  setDocTreeExpanded(vaultId: string, paths: readonly string[]): void;
 }
 
 const clampInt = (value: unknown, fallback: number, min: number, max: number): number => {
@@ -342,6 +364,14 @@ export const parseMachineUi = (
         canvasFlags[key] = { ...(typeof value.recentEdits === 'boolean' ? { recentEdits: value.recentEdits } : {}) };
       }
     }
+    const docTreeExpanded: Record<string, readonly string[]> = {};
+    if (isRecord(record.docTreeExpanded)) {
+      for (const [key, value] of Object.entries(record.docTreeExpanded)) {
+        if (key.length === 0) continue;
+        const paths = normalizeTreeExpanded(value);
+        if (paths.length > 0) docTreeExpanded[key] = paths;
+      }
+    }
     return {
       schemaVersion: FLOAT_SIZE_SCHEMA_VERSION,
       floatSizes,
@@ -351,6 +381,7 @@ export const parseMachineUi = (
       translationChannel: parseTranslationChannel(record.translationChannel),
       panels: { ai: parseAiPanel(panels.ai, area) },
       canvasFlags,
+      docTreeExpanded,
     };
   } catch (error) {
     console.error(
@@ -369,6 +400,7 @@ export const serializeMachineUi = (
   aiPanel: AiPanelState = DEFAULT_AI_PANEL,
   canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>> = {},
   translationChannel: TranslationChannel = DEFAULT_TRANSLATION_CHANNEL,
+  docTreeExpanded: Readonly<Record<string, readonly string[]>> = {},
 ): string => {
   // 已知字段覆盖写，未知字段（含 panels 下的其他面板）原样带回，避免两边同时写时互相抹掉
   const knownPanels = isRecord(preservedKeys.panels) ? preservedKeys.panels : {};
@@ -392,6 +424,7 @@ export const serializeMachineUi = (
         },
       },
       canvasFlags,
+      docTreeExpanded,
     },
     null,
     2,
@@ -429,6 +462,7 @@ const queueWrite = (): void => {
     state.panels.ai,
     state.canvasFlags,
     state.translationChannel,
+    state.docTreeExpanded,
   );
   writeChain = writeChain.then(async () => {
     try {
@@ -488,6 +522,7 @@ export const hydrateMachineUi = (): Promise<void> => {
         translationChannel: parsed.translationChannel,
         panels: parsed.panels,
         canvasFlags: parsed.canvasFlags,
+        docTreeExpanded: parsed.docTreeExpanded,
       });
       return;
     }
@@ -533,6 +568,7 @@ export const useMachineStore = create<MachineState>((set) => ({
   translationChannel: DEFAULT_TRANSLATION_CHANNEL,
   panels: { ai: DEFAULT_AI_PANEL },
   canvasFlags: {},
+  docTreeExpanded: {},
 
   rememberFloatSize: (docId, size) => {
     const next: FloatSize = {
@@ -577,6 +613,12 @@ export const useMachineStore = create<MachineState>((set) => ({
       const current = state.canvasFlags[canvasId] ?? {};
       return { canvasFlags: { ...state.canvasFlags, [canvasId]: { ...current, ...patch } } };
     });
+    queueWrite();
+  },
+  setDocTreeExpanded: (vaultId, paths) => {
+    set((state) => ({
+      docTreeExpanded: { ...state.docTreeExpanded, [vaultId]: normalizeTreeExpanded(paths) },
+    }));
     queueWrite();
   },
   setAiPanel: (patch) => {

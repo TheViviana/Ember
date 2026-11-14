@@ -1,15 +1,25 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactElement,
+} from 'react';
 import { unsafeDocId } from '#doc-model';
 import type { DocMeta } from '../../kernel/types.ts';
 import { toErrorText } from '../../kernel/errors.ts';
 import { isEmberError } from '../../kernel/errors.ts';
 import { useEscLayer, isEscTop } from '../esc-arbiter.ts';
 import { clampVisible, growVisible, SIDEBAR_INITIAL } from '../components/list-window.ts';
-import { useMachineStore } from '../../data/stores/machine-store.ts';
+import { flushMachineUiWrites, useMachineStore } from '../../data/stores/machine-store.ts';
 import { DUPLICATE_DOC_COMMAND } from '../commands/shell-commands.ts';
 import { useKernel } from '../kernel-provider.tsx';
-import { readonlyText } from '../components/readonly-text.ts';
+import { buildTree, collectFolderPaths, flattenTree, type DocTreeRow } from './doc-tree.ts';
+import { DocumentItemOverlay, type ItemOverlay } from './DocumentItemOverlay.tsx';
+import { DocumentTreeView } from './DocumentTreeView.tsx';
 import styles from './DocumentListPanel.module.css';
 
 export interface DocumentListPanelProps {
@@ -25,10 +35,19 @@ export interface DocumentListPanelProps {
 
 /** 面板宽度在机器本地 ui.json floatSizes 里的记忆键（不与文档 ULID 冲突） */
 const SIDEBAR_WIDTH_KEY = 'document-list';
+/** 移动后的撤销窗口 */
+const UNDO_WINDOW_MS = 8000;
+
+interface Notice {
+  readonly tone: 'ok' | 'error';
+  readonly text: string;
+  readonly action?: { readonly label: string; readonly run: () => void };
+}
 
 /**
  * 可召出的文档列表浮层（过渡期入口：⌘K 统一搜索落地前，保证随时可浏览文档）。
  * 不常驻：由顶栏按钮 / 命令 `ember.panel.documents` 召出，Esc 或外点关闭。
+ * 目录按 `/` 组织成树；文档行可拖进文件夹，也可拖到画布生成节点。
  */
 export const DocumentListPanel = ({
   documents,
@@ -41,26 +60,12 @@ export const DocumentListPanel = ({
 }: DocumentListPanelProps): ReactElement => {
   const kernel = useKernel();
   const queryClient = useQueryClient();
+  const vaultId = String(kernel.env.vaultId);
   const [query, setQuery] = useState('');
   const [visibleDocs, setVisibleDocs] = useState(SIDEBAR_INITIAL);
-  /**
-   * 右键菜单 / 删除确认共用同一个锚点：直接覆盖在条目本身之上（跟随条目矩形），
-   * 视觉中心始终停在正在操作的那篇文档上，不在面板顶部与条目之间来回跳。
-   * top/bottom 是条目矩形的上下缘：底部条目空间不足时浮层向上翻（底边对齐条目底边）。
-   */
-  interface ItemOverlay {
-    readonly docId: string;
-    readonly path: string;
-    readonly title: string;
-    readonly left: number;
-    readonly top: number;
-    readonly bottom: number;
-    readonly w: number;
-  }
   const [menu, setMenu] = useState<ItemOverlay | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<ItemOverlay | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [notice, setNotice] = useState<{ readonly tone: 'ok' | 'error'; readonly text: string } | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [width, setWidth] = useState<number | null>(
     () => useMachineStore.getState().floatSizes[SIDEBAR_WIDTH_KEY]?.width ?? null,
   );
@@ -83,25 +88,75 @@ export const DocumentListPanel = ({
     [documents, keyword],
   );
 
-  useEffect(() => {
-    setVisibleDocs((current) => clampVisible(current, filtered.length));
-  }, [filtered]);
+  const tree = useMemo(() => buildTree(documents), [documents]);
+  const folderPaths = useMemo(() => collectFolderPaths(tree), [tree]);
+  const storedExpanded = useMachineStore((state) => state.docTreeExpanded[vaultId]);
+  const expanded = useMemo(() => {
+    if (storedExpanded === undefined) return new Set(folderPaths);
+    const valid = new Set(folderPaths);
+    return new Set(storedExpanded.filter((path) => valid.has(path)));
+  }, [storedExpanded, folderPaths]);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
 
-  const hasMore = filtered.length > visibleDocs;
+  const persistExpanded = useCallback(
+    (next: ReadonlySet<string>): void => {
+      useMachineStore.getState().setDocTreeExpanded(vaultId, [...next]);
+      void flushMachineUiWrites().catch(() => undefined);
+    },
+    [vaultId],
+  );
+
+  // 加载时丢弃已不存在的路径：与磁盘记忆不一致就写回一次收敛后的集合
+  useEffect(() => {
+    if (storedExpanded === undefined) return;
+    const same =
+      storedExpanded.length === expanded.size && [...expanded].every((path) => storedExpanded.includes(path));
+    if (same) return;
+    persistExpanded(expanded);
+  }, [storedExpanded, expanded, persistExpanded]);
+
+  const toggleFolder = useCallback(
+    (path: string): void => {
+      const next = new Set(expandedRef.current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      persistExpanded(next);
+    },
+    [persistExpanded],
+  );
+
+  /**
+   * 可见行：查询非空时回退为扁平结果（树里搜不到的路径也能命中）；
+   * 否则按展开状态把树压平，并继续沿用哨兵分批渲染。
+   */
+  const rows = useMemo<readonly DocTreeRow[]>(
+    () =>
+      keyword.length === 0
+        ? flattenTree(tree, (path) => expanded.has(path))
+        : filtered.map((meta) => ({ kind: 'doc' as const, name: meta.title, depth: 0, meta })),
+    [keyword.length, tree, expanded, filtered],
+  );
+
+  useEffect(() => {
+    setVisibleDocs((current) => clampVisible(current, rows.length));
+  }, [rows.length]);
+
+  const hasMore = rows.length > visibleDocs;
   useEffect(() => {
     if (!hasMore) return;
     const node = sentinelRef.current;
     if (node === null) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
-        setVisibleDocs((current) => growVisible(current, filtered.length));
+        setVisibleDocs((current) => growVisible(current, rows.length));
       }
     });
     observer.observe(node);
     return () => {
       observer.disconnect();
     };
-  }, [hasMore, filtered.length, visibleDocs]);
+  }, [hasMore, rows.length, visibleDocs]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent): void => {
@@ -123,36 +178,27 @@ export const DocumentListPanel = ({
     };
   }, [onClose]);
 
-  // 右键菜单：Esc / 外点关闭（菜单比面板晚入栈，Esc 先关菜单）
-  useEscLayer('doc-list-menu', menu !== null);
+  // 带撤销的提示 8 秒后自动收起
   useEffect(() => {
-    if (menu === null) return undefined;
-    const onPointerDown = (event: PointerEvent): void => {
-      const target = event.target;
-      if (target instanceof Element && target.closest('[data-doc-menu]') !== null) return;
-      setMenu(null);
-    };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return;
-      if (!isEscTop('doc-list-menu')) return;
-      event.preventDefault();
-      setMenu(null);
-    };
-    window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('keydown', onKeyDown);
+    if (notice?.action === undefined) return undefined;
+    const timer = window.setTimeout(() => {
+      setNotice(null);
+    }, UNDO_WINDOW_MS);
     return () => {
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown);
+      window.clearTimeout(timer);
     };
-  }, [menu]);
+  }, [notice]);
 
   // ---- 右键菜单动作 ----
+
+  const closeMenu = useCallback((): void => {
+    setMenu(null);
+  }, []);
 
   const openMenu = useCallback(
     (event: React.MouseEvent, doc: DocMeta): void => {
       event.preventDefault();
       event.stopPropagation();
-      setConfirmDelete(null);
       // 菜单直接盖在条目上：取条目矩形，宽度与条目一致
       const target = event.currentTarget;
       const rect = target instanceof Element ? target.getBoundingClientRect() : null;
@@ -174,31 +220,29 @@ export const DocumentListPanel = ({
       .writeText(path)
       .then(() => setNotice({ tone: 'ok', text: '已复制文档路径' }))
       .catch(() => setNotice({ tone: 'error', text: '复制失败：剪贴板不可用' }));
-    setMenu(null);
   }, []);
 
   /** 在画布中定位：由 App 侧完成 openCanvas + 高亮 + 关面板；本面板只负责查询 */
-  const locateInCanvas = useCallback((): void => {
-    const item = menu;
-    if (item === null) return;
-    setMenu(null);
-    void (async () => {
-      try {
-        const locations = await kernel.canvas.locateDoc(unsafeDocId(item.docId));
-        if (locations.length === 0) {
-          setNotice({ tone: 'error', text: `《${item.title}》没有文章卡片节点，从库拖入即可生成` });
-          return;
+  const locateInCanvas = useCallback(
+    (item: ItemOverlay): void => {
+      void (async () => {
+        try {
+          const locations = await kernel.canvas.locateDoc(unsafeDocId(item.docId));
+          if (locations.length === 0) {
+            setNotice({ tone: 'error', text: `《${item.title}》没有文章卡片节点，从库拖入即可生成` });
+            return;
+          }
+          const first = locations[0];
+          if (first !== undefined) onOpenCanvasLocation(String(first.canvasId), String(first.nodeId));
+        } catch (cause) {
+          setNotice({ tone: 'error', text: `画布定位失败：${toErrorText(cause)}` });
         }
-        const first = locations[0];
-        if (first !== undefined) onOpenCanvasLocation(String(first.canvasId), String(first.nodeId));
-      } catch (cause) {
-        setNotice({ tone: 'error', text: `画布定位失败：${toErrorText(cause)}` });
-      }
-    })();
-  }, [kernel, menu, onOpenCanvasLocation]);
+      })();
+    },
+    [kernel, onOpenCanvasLocation],
+  );
 
-  const duplicateDoc = useCallback((item: { readonly docId: string; readonly title: string }): void => {
-    setMenu(null);
+  const duplicateDoc = useCallback((item: ItemOverlay): void => {
     void kernel.commands
       .execute(DUPLICATE_DOC_COMMAND, { docId: unsafeDocId(item.docId) })
       .then((result) => {
@@ -210,8 +254,7 @@ export const DocumentListPanel = ({
   }, [kernel]);
 
   /** 删除：base 取当前磁盘 revision；stale 时提示刷新重试，绝不盲删 */
-  const removeDoc = useCallback((item: { readonly docId: string; readonly title: string }): void => {
-    setConfirmDelete(null);
+  const removeDoc = useCallback((item: ItemOverlay): void => {
     setDeleting(true);
     void (async () => {
       try {
@@ -249,20 +292,6 @@ export const DocumentListPanel = ({
       }
     })();
   }, [kernel, queryClient]);
-
-  /**
-   * 覆盖层纵向定位：默认顶边对齐条目顶边；条目下方放不下时向上翻
-   * （底边对齐条目底边）。effectiveBottom 给底部状态栏/工具横排让位。
-   */
-  const MENU_HEIGHT = 212;
-  const CONFIRM_HEIGHT = 148;
-  const EFFECTIVE_BOTTOM_MARGIN = 72;
-  const anchorY = (overlay: ItemOverlay, height: number): number => {
-    const effectiveBottom = window.innerHeight - EFFECTIVE_BOTTOM_MARGIN;
-    if (overlay.top + height <= effectiveBottom) return overlay.top;
-    const flipped = overlay.bottom - height;
-    return Math.max(60, Math.min(flipped, effectiveBottom - height));
-  };
 
   /** 双击宽度手柄：回到默认宽度并清掉记忆 */
   const onResizeReset = (): void => {
@@ -340,168 +369,66 @@ export const DocumentListPanel = ({
         />
       </div>
 
-      <div className={styles.list}>
-        {loading ? <p className={styles.note}>加载中…</p> : null}
-        {error === null ? null : <p className={styles.error}>{error}</p>}
-        {!loading && error === null && filtered.length === 0 ? (
-          <p className={styles.note}>库内还没有匹配的文档</p>
-        ) : null}
-        <ul className={styles.items}>
-          {filtered.slice(0, visibleDocs).map((meta) => (
-            <li
-              key={String(meta.id)}
-              onContextMenu={(event) => {
-                openMenu(event, meta);
-              }}
-            >
-              <button
-                type="button"
-                className={`${styles.item} ${activeDocId === String(meta.id) ? styles.itemActive : ''}`}
-                onClick={() => {
-                  onSelectDoc(String(meta.id));
-                  onClose();
-                }}
-              >
-                <span className={styles.itemHead}>
-                  <span className={styles.itemTitle}>{meta.title}</span>
-                  {meta.conflictOf === null ? null : (
-                    <span className={styles.itemConflict}>冲突副本</span>
-                  )}
-                </span>
-                <span className={styles.itemPath}>{String(meta.path)}</span>
-              </button>
-            </li>
-          ))}
-          {hasMore ? (
-            <li className={styles.note} ref={sentinelRef} aria-hidden="true">
-              滚动加载更多…
-            </li>
-          ) : null}
-        </ul>
-      </div>
-
-      {confirmDelete === null ? null : (
-        <div
-          className={styles.deleteConfirm}
-          role="alertdialog"
-          aria-label="确认删除文档"
-          style={{
-            left: confirmDelete.left,
-            top: anchorY(confirmDelete, CONFIRM_HEIGHT),
-            width: confirmDelete.w,
-          }}
-        >
-          <p className={styles.deleteText}>
-            删除《{confirmDelete.title}》？文件优先移入系统回收站；系统回收站不可用时落入库内回收目录
-            （.workbench/trash），30 天后自动清除。
-          </p>
-          <div className={styles.deleteActions}>
-            <button
-              type="button"
-              className={styles.deleteYes}
-              disabled={deleting}
-              onClick={() => {
-                removeDoc(confirmDelete);
-              }}
-            >
-              {deleting ? '删除中…' : '删除'}
-            </button>
-            <button
-              type="button"
-              className={styles.deleteNo}
-              onClick={() => {
-                setConfirmDelete(null);
-              }}
-            >
-              取消
-            </button>
-          </div>
-        </div>
-      )}
+      <DocumentTreeView
+        rows={rows}
+        visibleDocs={visibleDocs}
+        hasMore={hasMore}
+        sentinelRef={sentinelRef}
+        loading={loading}
+        error={error}
+        isEmpty={filtered.length === 0}
+        expanded={expanded}
+        activeDocId={activeDocId}
+        onToggleFolder={toggleFolder}
+        onSelectDoc={onSelectDoc}
+        onClose={onClose}
+        onOpenMenu={openMenu}
+      />
 
       {notice === null ? null : (
-        <p
-          className={notice.tone === 'ok' ? styles.noticeOk : styles.noticeError}
-          role="status"
-          onClick={() => {
-            setNotice(null);
-          }}
-        >
-          {notice.text}
-        </p>
-      )}
-
-      {menu === null ? null : (
         <div
-          className={styles.contextMenu}
-          data-doc-menu=""
-          role="menu"
-          aria-label={`文档操作：${menu.title}`}
-          style={{ left: menu.left, top: anchorY(menu, MENU_HEIGHT), width: menu.w }}
+          className={`${styles.noticeRow} ${notice.tone === 'ok' ? styles.noticeOk : styles.noticeError}`}
+          role="status"
         >
-          <button
-            type="button"
-            className={styles.menuItem}
-            role="menuitem"
+          <span
+            className={styles.noticeText}
             onClick={() => {
-              const item = menu;
-              setMenu(null);
-              onSelectDoc(item.docId);
-              onClose();
+              setNotice(null);
             }}
           >
-            打开浮窗
-          </button>
-          <button
-            type="button"
-            className={styles.menuItem}
-            role="menuitem"
-            onClick={() => {
-              locateInCanvas();
-            }}
-          >
-            在画布中定位
-          </button>
-          <button
-            type="button"
-            className={styles.menuItem}
-            role="menuitem"
-            onClick={() => {
-              duplicateDoc(menu);
-            }}
-          >
-            创建副本
-          </button>
-          <button
-            type="button"
-            className={styles.menuItem}
-            role="menuitem"
-            onClick={() => {
-              copyPath(menu.path);
-            }}
-          >
-            复制路径
-          </button>
-          <button
-            type="button"
-            className={`${styles.menuItem} ${styles.menuDanger}`}
-            role="menuitem"
-            disabled={kernel.env.readonlyMode}
-            title={
-              kernel.env.readonlyMode
-                ? readonlyText(kernel.env.readonlyReason)
-                : '优先移入系统回收站；不可用时落入库内回收目录（30 天后清除）'
-            }
-            onClick={() => {
-              // 确认条原地替换菜单：位置、宽度都继承条目锚点，视线不跳动
-              setConfirmDelete(menu);
-              setMenu(null);
-            }}
-          >
-            删除…
-          </button>
+            {notice.text}
+          </span>
+          {notice.action === undefined ? null : (
+            <button
+              type="button"
+              className={styles.noticeAction}
+              onClick={() => {
+                const action = notice.action;
+                setNotice(null);
+                action?.run();
+              }}
+            >
+              {notice.action.label}
+            </button>
+          )}
         </div>
       )}
+
+      <DocumentItemOverlay
+        menu={menu}
+        onCloseMenu={closeMenu}
+        onOpenItem={(item) => {
+          onSelectDoc(item.docId);
+          onClose();
+        }}
+        onLocate={locateInCanvas}
+        onDuplicate={duplicateDoc}
+        onCopyPath={copyPath}
+        onDelete={removeDoc}
+        deleting={deleting}
+        readonlyMode={kernel.env.readonlyMode}
+        readonlyReason={kernel.env.readonlyReason}
+      />
 
       <div
         className={styles.resizeHandle}
