@@ -280,7 +280,17 @@ impl VaultApp {
 
     pub fn info(&self) -> VaultResult<VaultInfo> {
         let session = self.session()?;
-        let root = session.vault()?.root().to_string_lossy().to_string();
+        // 统一用规范化路径回给界面：recents 也按规范化路径写入，
+        // 否则同一库经软链/`/private` 前缀会显示成两条、当前项也标不出来。
+        let root = {
+            let vault = session.vault()?;
+            vault
+                .root()
+                .canonicalize()
+                .unwrap_or_else(|_| vault.root().to_path_buf())
+                .to_string_lossy()
+                .to_string()
+        };
         let warning = session.warning.clone();
         drop(session);
         let (settings, _) = config::load();
