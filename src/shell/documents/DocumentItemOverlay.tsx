@@ -1,6 +1,7 @@
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
 import { useEscLayer, isEscTop } from '../esc-arbiter.ts';
 import { readonlyText } from '../components/readonly-text.ts';
+import { parentDirOf } from './doc-tree.ts';
 import styles from './DocumentListPanel.module.css';
 
 /** 菜单 / 删除确认的锚点：直接盖在条目矩形上，宽度与条目一致 */
@@ -23,11 +24,14 @@ export interface DocumentItemOverlayProps {
   readonly onCopyPath: (path: string) => void;
   readonly onDelete: (item: ItemOverlay) => void;
   readonly deleting: boolean;
+  readonly moveDirs: readonly string[];
+  readonly onMoveDoc: (docId: string, fromPath: string, targetDir: string) => void;
   readonly readonlyMode: boolean;
   readonly readonlyReason: string | null;
 }
 
 const MENU_HEIGHT = 212;
+const MOVE_HEIGHT = 260;
 const CONFIRM_HEIGHT = 148;
 const EFFECTIVE_BOTTOM_MARGIN = 72;
 
@@ -39,7 +43,7 @@ const anchorY = (overlay: ItemOverlay, height: number): number => {
   return Math.max(60, Math.min(flipped, effectiveBottom - height));
 };
 
-/** 菜单内上下键移动焦点；按钮本身保持 Tab 可达 */
+/** 菜单内上下键移动焦点（两个视图共用；按钮本身保持 Tab 可达） */
 const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
   const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
@@ -53,7 +57,7 @@ const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
 
 /**
  * 文档条的右键操作菜单与删除确认。
- * 删除确认原地替换菜单，锚点与宽度不变。
+ * 「移动到…」在本组件内切换为目录列表；删除确认原地替换菜单，锚点与宽度不变。
  */
 export const DocumentItemOverlay = ({
   menu,
@@ -64,10 +68,17 @@ export const DocumentItemOverlay = ({
   onCopyPath,
   onDelete,
   deleting,
+  moveDirs,
+  onMoveDoc,
   readonlyMode,
   readonlyReason,
 }: DocumentItemOverlayProps): ReactElement | null => {
+  const [mode, setMode] = useState<'actions' | 'move'>('actions');
   const [confirm, setConfirm] = useState<ItemOverlay | null>(null);
+
+  useEffect(() => {
+    setMode('actions');
+  }, [menu]);
 
   useEscLayer('doc-list-menu', menu !== null || confirm !== null);
   useEffect(() => {
@@ -148,73 +159,128 @@ export const DocumentItemOverlay = ({
         aria-label={`文档操作：${menu.title}`}
         style={{
           left: menu.left,
-          top: anchorY(menu, MENU_HEIGHT),
+          top: anchorY(menu, mode === 'move' ? MOVE_HEIGHT : MENU_HEIGHT),
           width: menu.w,
         }}
         onKeyDown={onMenuKeyDown}
       >
-        <button
-          type="button"
-          className={styles.menuItem}
-          role="menuitem"
-          onClick={() => {
-            closeMenu();
-            onOpenItem(menu);
-          }}
-        >
-          打开浮窗
-        </button>
-        <button
-          type="button"
-          className={styles.menuItem}
-          role="menuitem"
-          onClick={() => {
-            closeMenu();
-            onLocate(menu);
-          }}
-        >
-          在画布中定位
-        </button>
-        <button
-          type="button"
-          className={styles.menuItem}
-          role="menuitem"
-          onClick={() => {
-            closeMenu();
-            onDuplicate(menu);
-          }}
-        >
-          创建副本
-        </button>
-        <button
-          type="button"
-          className={styles.menuItem}
-          role="menuitem"
-          onClick={() => {
-            closeMenu();
-            onCopyPath(menu.path);
-          }}
-        >
-          复制路径
-        </button>
-        <button
-          type="button"
-          className={`${styles.menuItem} ${styles.menuDanger}`}
-          role="menuitem"
-          disabled={readonlyMode}
-          title={
-            readonlyMode
-              ? readonlyText(readonlyReason)
-              : '优先移入系统回收站；不可用时落入库内回收目录（30 天后清除）'
-          }
-          onClick={() => {
-            // 确认条原地替换菜单：位置、宽度都继承条目锚点，视线不跳动
-            setConfirm(menu);
-            closeMenu();
-          }}
-        >
-          删除…
-        </button>
+        {mode === 'move' ? (
+          <>
+            <button
+              type="button"
+              className={styles.menuItem}
+              role="menuitem"
+              onClick={() => {
+                setMode('actions');
+              }}
+            >
+              ← 返回
+            </button>
+            <p className={styles.menuHint}>移动到（当前：{parentDirOf(menu.path) || '库根'}）</p>
+            <div className={styles.menuScroll}>
+              <button
+                type="button"
+                className={styles.menuItem}
+                role="menuitem"
+                onClick={() => {
+                  closeMenu();
+                  onMoveDoc(menu.docId, menu.path, '');
+                }}
+              >
+                库根
+              </button>
+              {moveDirs.map((dir) => (
+                <button
+                  key={dir}
+                  type="button"
+                  className={styles.menuItem}
+                  role="menuitem"
+                  onClick={() => {
+                    closeMenu();
+                    onMoveDoc(menu.docId, menu.path, dir);
+                  }}
+                >
+                  {dir}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={styles.menuItem}
+              role="menuitem"
+              onClick={() => {
+                closeMenu();
+                onOpenItem(menu);
+              }}
+            >
+              打开浮窗
+            </button>
+            <button
+              type="button"
+              className={styles.menuItem}
+              role="menuitem"
+              onClick={() => {
+                closeMenu();
+                onLocate(menu);
+              }}
+            >
+              在画布中定位
+            </button>
+            <button
+              type="button"
+              className={styles.menuItem}
+              role="menuitem"
+              onClick={() => {
+                setMode('move');
+              }}
+            >
+              移动到…
+            </button>
+            <button
+              type="button"
+              className={styles.menuItem}
+              role="menuitem"
+              onClick={() => {
+                closeMenu();
+                onDuplicate(menu);
+              }}
+            >
+              创建副本
+            </button>
+            <button
+              type="button"
+              className={styles.menuItem}
+              role="menuitem"
+              onClick={() => {
+                closeMenu();
+                onCopyPath(menu.path);
+              }}
+            >
+              复制路径
+            </button>
+            <button
+              type="button"
+              className={`${styles.menuItem} ${styles.menuDanger}`}
+              role="menuitem"
+              disabled={readonlyMode}
+              title={
+                readonlyMode
+                  ? readonlyText(readonlyReason)
+                  : '优先移入系统回收站；不可用时落入库内回收目录（30 天后清除）'
+              }
+              onClick={() => {
+                // 确认条原地替换菜单：位置、宽度都继承条目锚点，视线不跳动
+                setConfirm(menu);
+                closeMenu();
+              }}
+            >
+              删除…
+            </button>
+          </>
+        )}
       </div>
     </>
   );

@@ -18,8 +18,10 @@ import { flushMachineUiWrites, useMachineStore } from '../../data/stores/machine
 import { DUPLICATE_DOC_COMMAND } from '../commands/shell-commands.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import { buildTree, collectFolderPaths, flattenTree, type DocTreeRow } from './doc-tree.ts';
+import { isDocDragActive } from './doc-drag.ts';
 import { DocumentItemOverlay, type ItemOverlay } from './DocumentItemOverlay.tsx';
 import { DocumentTreeView } from './DocumentTreeView.tsx';
+import { useDocMove, type PanelNotice } from './use-doc-move.ts';
 import styles from './DocumentListPanel.module.css';
 
 export interface DocumentListPanelProps {
@@ -37,12 +39,6 @@ export interface DocumentListPanelProps {
 const SIDEBAR_WIDTH_KEY = 'document-list';
 /** 移动后的撤销窗口 */
 const UNDO_WINDOW_MS = 8000;
-
-interface Notice {
-  readonly tone: 'ok' | 'error';
-  readonly text: string;
-  readonly action?: { readonly label: string; readonly run: () => void };
-}
 
 /**
  * 可召出的文档列表浮层（过渡期入口：⌘K 统一搜索落地前，保证随时可浏览文档）。
@@ -65,7 +61,7 @@ export const DocumentListPanel = ({
   const [visibleDocs, setVisibleDocs] = useState(SIDEBAR_INITIAL);
   const [menu, setMenu] = useState<ItemOverlay | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [notice, setNotice] = useState<Notice | null>(null);
+  const [notice, setNotice] = useState<PanelNotice | null>(null);
   const [width, setWidth] = useState<number | null>(
     () => useMachineStore.getState().floatSizes[SIDEBAR_WIDTH_KEY]?.width ?? null,
   );
@@ -126,6 +122,17 @@ export const DocumentListPanel = ({
     [persistExpanded],
   );
 
+  /** 拖拽悬停自动展开：只增不减，折叠仍由点击决定 */
+  const expandFolder = useCallback(
+    (path: string): void => {
+      if (expandedRef.current.has(path)) return;
+      const next = new Set(expandedRef.current);
+      next.add(path);
+      persistExpanded(next);
+    },
+    [persistExpanded],
+  );
+
   /**
    * 可见行：查询非空时回退为扁平结果（树里搜不到的路径也能命中）；
    * 否则按展开状态把树压平，并继续沿用哨兵分批渲染。
@@ -160,6 +167,8 @@ export const DocumentListPanel = ({
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent): void => {
+      // 拖拽期间源面板不能消失：否则拖到画布时 dragend 丢失、落点也找不到
+      if (isDocDragActive()) return;
       if (rootRef.current !== null && !rootRef.current.contains(event.target as Node)) {
         onClose();
       }
@@ -188,6 +197,8 @@ export const DocumentListPanel = ({
       window.clearTimeout(timer);
     };
   }, [notice]);
+
+  const { moveDirs, moveDoc } = useDocMove(documents, setNotice);
 
   // ---- 右键菜单动作 ----
 
@@ -380,9 +391,11 @@ export const DocumentListPanel = ({
         expanded={expanded}
         activeDocId={activeDocId}
         onToggleFolder={toggleFolder}
+        onExpandFolder={expandFolder}
         onSelectDoc={onSelectDoc}
         onClose={onClose}
         onOpenMenu={openMenu}
+        onMoveDoc={moveDoc}
       />
 
       {notice === null ? null : (
@@ -426,6 +439,8 @@ export const DocumentListPanel = ({
         onCopyPath={copyPath}
         onDelete={removeDoc}
         deleting={deleting}
+        moveDirs={moveDirs}
+        onMoveDoc={moveDoc}
         readonlyMode={kernel.env.readonlyMode}
         readonlyReason={kernel.env.readonlyReason}
       />

@@ -211,6 +211,36 @@
   text-overflow: ellipsis;
 }
 
+/* 悬停落点：可移动 */
+.dropTarget {
+  outline: 1px dashed var(--ember-border-focus);
+  background: var(--ember-bg-hover);
+}
+
+/* 悬停当前父目录：高亮但松手不写盘 */
+.dropCurrent {
+  outline: 1px dashed var(--ember-warning-border);
+  background: var(--ember-warning-tint);
+  color: var(--ember-warning);
+}
+
+.rootDrop {
+  margin: 2px 0 var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px dashed var(--ember-border);
+  border-radius: var(--radius-md);
+  color: var(--ember-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  text-align: center;
+}
+
+.rootDropActive {
+  border-color: var(--ember-border-focus);
+  background: var(--ember-bg-hover);
+  color: var(--ember-text-primary);
+}
+
 .note {
   margin: 0;
   padding: var(--space-sm);
@@ -233,11 +263,26 @@
   position: fixed;
   z-index: calc(var(--layer-menu) + 2);
   min-width: 160px;
+  max-height: calc(100vh - 96px);
+  overflow: hidden;
   padding: var(--space-xs);
   border: 1px solid var(--ember-border);
   border-radius: var(--radius-md);
   background: var(--ember-menu-bg);
   box-shadow: var(--shadow-lg);
+}
+
+.menuHint {
+  margin: 0;
+  padding: 0 var(--space-sm) var(--space-xs);
+  color: var(--ember-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+}
+
+.menuScroll {
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 .menuItem {
