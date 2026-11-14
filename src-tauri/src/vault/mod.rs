@@ -28,6 +28,48 @@ const ORPHAN_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// 由启动清扫按 mtime 回收，见 `trash::TrashDestination::Internal`。
 const TRASH_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
 
+/// 默认忽略的目录名：依赖缓存与版本库元数据。它们可能含成百上千个 `.md`
+/// （README、依赖文档），既不属于知识库内容，也不该被 watcher 每轮轮询。
+pub const DEFAULT_IGNORED_DIRS: [&str; 2] = ["node_modules", ".git"];
+
+/// 合并默认忽略目录与 `.workbench/settings.json` 的 `watcherIgnoreDirs`。
+/// 只接受单段目录名（不含 `/`、`\`、`.`、`..`），避免把忽略规则写成路径通配；
+/// 读不到或格式不合法时退回默认值，不让一份坏设置阻断启动。
+pub fn ignored_dirs(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = DEFAULT_IGNORED_DIRS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    if let Ok(text) = fs::read_to_string(paths::settings_file(root)) {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(serde_json::Value::Array(items)) = map.get("watcherIgnoreDirs") {
+                for item in items {
+                    let Some(raw) = item.as_str() else { continue };
+                    let name = raw.trim();
+                    if name.is_empty()
+                        || name == "."
+                        || name == ".."
+                        || name == paths::WORKBENCH_DIR
+                        || name.contains('/')
+                        || name.contains('\\')
+                    {
+                        continue;
+                    }
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// 目录名是否在忽略清单中（只看单段 basename，不解释路径）。
+pub(crate) fn is_ignored_dir(name: &str, ignored: &[String]) -> bool {
+    ignored.iter().any(|item| item == name)
+}
+
 /// IPC 可接受的写入意图（kernel types.ts 的 WriteIntent）：仅校验来源合法性，不落盘。
 const WRITE_INTENTS: [&str; 3] = ["user", "migration", "system"];
 
@@ -189,10 +231,12 @@ impl Vault {
         Ok(())
     }
 
-    /// 全库 Markdown 文件清单（相对 POSIX 路径，字典序），跳过 `.workbench/` 与隐藏项。
+    /// 全库 Markdown 文件清单（相对 POSIX 路径，字典序），跳过 `.workbench/`、
+    /// 隐藏目录与忽略目录（`node_modules`、`.git` 及 settings 配置项）。
     pub fn list(&self) -> VaultResult<Vec<String>> {
+        let ignored = ignored_dirs(&self.root);
         let mut files = Vec::new();
-        collect_documents(&self.root, &self.root, &mut files)?;
+        collect_documents(&self.root, &self.root, &ignored, &mut files)?;
         files.sort();
         Ok(files)
     }
@@ -223,8 +267,9 @@ impl Vault {
     /// 库健康检查清单：只读遍历，返回文档、`.workbench` 画布/历史 JSON 与符号链接。
     /// 不跟随符号链接；`media/` 与 `settings.json` 等无关文件不返回，避免清单膨胀。
     pub fn scan(&self) -> VaultResult<Vec<ScanEntry>> {
+        let ignored = ignored_dirs(&self.root);
         let mut entries = Vec::new();
-        collect_scan(&self.root, &self.root, &mut entries)?;
+        collect_scan(&self.root, &self.root, &ignored, &mut entries)?;
         entries.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(entries)
     }
@@ -483,7 +528,12 @@ fn identity_from(text: &str) -> VaultResult<String> {
     Ok(id.to_string())
 }
 
-fn collect_documents(root: &Path, dir: &Path, out: &mut Vec<String>) -> VaultResult<()> {
+fn collect_documents(
+    root: &Path,
+    dir: &Path,
+    ignored: &[String],
+    out: &mut Vec<String>,
+) -> VaultResult<()> {
     let entries = match fs::read_dir(dir) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -492,12 +542,12 @@ fn collect_documents(root: &Path, dir: &Path, out: &mut Vec<String>) -> VaultRes
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == paths::WORKBENCH_DIR || name.starts_with('.') {
+        if name == paths::WORKBENCH_DIR || name.starts_with('.') || is_ignored_dir(&name, ignored) {
             continue;
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_documents(root, &entry.path(), out)?;
+            collect_documents(root, &entry.path(), ignored, out)?;
             continue;
         }
         if !file_type.is_file() || !name.ends_with(".md") {
@@ -520,7 +570,12 @@ pub struct ScanEntry {
     pub size: u64,
 }
 
-fn collect_scan(root: &Path, dir: &Path, out: &mut Vec<ScanEntry>) -> VaultResult<()> {
+fn collect_scan(
+    root: &Path,
+    dir: &Path,
+    ignored: &[String],
+    out: &mut Vec<ScanEntry>,
+) -> VaultResult<()> {
     let entries = match fs::read_dir(dir) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -529,7 +584,7 @@ fn collect_scan(root: &Path, dir: &Path, out: &mut Vec<ScanEntry>) -> VaultResul
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == "node_modules" {
+        if is_ignored_dir(&name, ignored) {
             continue;
         }
         // 除 .workbench 外，隐藏项不进入库索引范围（与 collect_documents 一致）
@@ -559,7 +614,7 @@ fn collect_scan(root: &Path, dir: &Path, out: &mut Vec<ScanEntry>) -> VaultResul
             continue;
         }
         if file_type.is_dir() {
-            collect_scan(root, &absolute, out)?;
+            collect_scan(root, &absolute, ignored, out)?;
             continue;
         }
         if !file_type.is_file() {
@@ -658,6 +713,25 @@ mod tests {
         }
         // 保留路径之外的清理走 purge，避免把测试文件塞进用户回收站（真实落点由下方专测覆盖）
         temp.vault.purge("notes/a.md").unwrap();
+    }
+
+    #[test]
+    fn list_skips_dependency_and_configured_dirs() {
+        let temp = TempVault::new();
+        temp.vault.write("notes/a.md", b"x", "user").unwrap();
+        temp.vault
+            .write("node_modules/pkg/readme.md", b"x", "user")
+            .unwrap();
+        temp.vault.write("vendor/dep/doc.md", b"x", "user").unwrap();
+        temp.vault
+            .write(
+                ".workbench/settings.json",
+                br#"{"watcherIgnoreDirs":["vendor"]}"#,
+                "user",
+            )
+            .unwrap();
+
+        assert_eq!(temp.vault.list().unwrap(), vec!["notes/a.md".to_string()]);
     }
 
     #[test]

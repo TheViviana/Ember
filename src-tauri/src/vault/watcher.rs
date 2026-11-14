@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::vault::paths;
+use crate::vault::{ignored_dirs, is_ignored_dir, paths};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1200);
 /// 轮询等待的切片步长：Drop join 最多阻塞这么久
@@ -17,11 +17,21 @@ const POLL_STEP: Duration = Duration::from_millis(250);
 /// 连续无变化时逐级拉长轮询间隔（最多 6s），降低空闲态全库扫描开销；
 /// 一旦发现变化立即恢复到 1.2s，活跃期的事件延迟不变。
 const POLL_INTERVAL_MAX: Duration = Duration::from_millis(6000);
+/// 单个 tick 最多逐条发送的事件数：超过即只发一条 `overflow`，
+/// 由前端做一次全量对账。正常编辑远低于该值；批量导入/整库替换才可能击穿，
+/// 此时逐条发送会让 IPC 与前端逐个读盘的成本随文件数线性放大。
+const MAX_EVENTS_PER_TICK: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     mtime_ms: u128,
     size: u64,
+}
+
+impl Fingerprint {
+    fn mtime_millis(&self) -> u64 {
+        self.mtime_ms.min(u64::MAX as u128) as u64
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -31,6 +41,48 @@ struct VaultChange {
     /// 仅 renamed 事件携带：原路径
     #[serde(skip_serializing_if = "Option::is_none")]
     from: Option<String>,
+    /// 事件发生时的 mtime（Unix 毫秒）：前端据此跳过元数据未变的文件
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mtime: Option<u64>,
+    /// 事件发生时的字节数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    /// 仅 overflow 事件携带：本 tick 被合并掉的事件数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<usize>,
+}
+
+impl VaultChange {
+    fn file(
+        kind: &'static str,
+        path: &str,
+        from: Option<&str>,
+        fingerprint: Option<&Fingerprint>,
+    ) -> Self {
+        Self {
+            kind,
+            path: path.to_string(),
+            from: from.map(str::to_string),
+            mtime: fingerprint.map(Fingerprint::mtime_millis),
+            size: fingerprint.map(|value| value.size),
+            count: None,
+        }
+    }
+
+    fn overflow(count: usize) -> Self {
+        Self {
+            kind: "overflow",
+            path: String::new(),
+            from: None,
+            mtime: None,
+            size: None,
+            count: Some(count),
+        }
+    }
+}
+
+fn should_overflow(count: usize) -> bool {
+    count > MAX_EVENTS_PER_TICK
 }
 
 /// 轮询型 watcher（不引入 notify crate）：按 mtime + size 指纹对比整库 Markdown 文件。
@@ -80,7 +132,9 @@ fn run(app: AppHandle, root: PathBuf, stop: Arc<AtomicBool>) {
         for (path, fingerprint) in &current {
             match previous.get(path) {
                 None => created.push((path.clone(), fingerprint.clone())),
-                Some(known) if known != fingerprint => emit(&app, "changed", path, None),
+                Some(known) if known != fingerprint => {
+                    emit(&app, VaultChange::file("changed", path, None, Some(fingerprint)))
+                }
                 Some(_) => {}
             }
         }
@@ -93,14 +147,24 @@ fn run(app: AppHandle, root: PathBuf, stop: Arc<AtomicBool>) {
         // 指纹相同的 removed+created 配对为重命名：内容未变只是路径变化。
         // 改了内容再改名会自然退化为 removed+created（安全降级，不丢事件）。
         let (renames, rest_removed, rest_created) = pair_renames(&removed, &created);
+        let mut changes: Vec<VaultChange> = Vec::new();
         for (from, to) in &renames {
-            emit(&app, "renamed", to, Some(from));
+            changes.push(VaultChange::file("renamed", to, Some(from), current.get(to)));
         }
         for path in &rest_created {
-            emit(&app, "created", path, None);
+            changes.push(VaultChange::file("created", path, None, current.get(path)));
         }
         for path in &rest_removed {
-            emit(&app, "removed", path, None);
+            changes.push(VaultChange::file("removed", path, None, None));
+        }
+        // 单 tick 事件过多：只发一条溢出标记，让前端做一次全量对账，
+        // 而不是把几千条逐文件事件推过 IPC。
+        if should_overflow(changes.len()) {
+            emit(&app, VaultChange::overflow(changes.len()));
+        } else {
+            for change in changes {
+                emit(&app, change);
+            }
         }
         // 有变化回到最高频率；空闲则退避到最长 6s
         interval = if created.is_empty() && removed.is_empty() {
@@ -149,40 +213,39 @@ fn pair_renames(
     (renames, rest_removed, rest_created)
 }
 
-fn emit(app: &AppHandle, kind: &'static str, path: &str, from: Option<&str>) {
-    if let Err(error) = app.emit(
-        "vault://changed",
-        VaultChange {
-            kind,
-            path: path.to_string(),
-            from: from.map(str::to_string),
-        },
-    ) {
+fn emit(app: &AppHandle, change: VaultChange) {
+    if let Err(error) = app.emit("vault://changed", change) {
         eprintln!("vault://changed 事件发送失败：{error}");
     }
 }
 
 fn scan(root: &Path) -> HashMap<String, Fingerprint> {
+    let ignored = ignored_dirs(root);
     let mut files = HashMap::new();
-    collect(root, root, &mut files);
+    collect(root, root, &ignored, &mut files);
     files
 }
 
-fn collect(root: &Path, dir: &Path, out: &mut HashMap<String, Fingerprint>) {
+fn collect(
+    root: &Path,
+    dir: &Path,
+    ignored: &[String],
+    out: &mut HashMap<String, Fingerprint>,
+) {
     let entries = match fs::read_dir(dir) {
         Ok(value) => value,
         Err(_) => return,
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == paths::WORKBENCH_DIR || name.starts_with('.') {
+        if name == paths::WORKBENCH_DIR || name.starts_with('.') || is_ignored_dir(&name, ignored) {
             continue;
         }
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
         if file_type.is_dir() {
-            collect(root, &entry.path(), out);
+            collect(root, &entry.path(), ignored, out);
             continue;
         }
         if !file_type.is_file() || !name.ends_with(".md") {
@@ -275,5 +338,64 @@ mod tests {
         assert!(renames.is_empty());
         assert_eq!(rest_removed, vec!["notes/gone.md".to_string()]);
         assert_eq!(rest_created, vec!["notes/fresh.md".to_string()]);
+    }
+
+    #[test]
+    fn tick_below_threshold_keeps_individual_events() {
+        assert!(!should_overflow(0));
+        assert!(!should_overflow(MAX_EVENTS_PER_TICK));
+        assert!(should_overflow(MAX_EVENTS_PER_TICK + 1));
+    }
+
+    #[test]
+    fn change_payload_carries_metadata_and_rename_source() {
+        let change = VaultChange::file("renamed", "notes/new.md", Some("notes/old.md"), Some(&fingerprint(1234, 99)));
+        assert_eq!(change.mtime, Some(1234));
+        assert_eq!(change.size, Some(99));
+        assert_eq!(change.from.as_deref(), Some("notes/old.md"));
+        let removed = VaultChange::file("removed", "notes/gone.md", None, None);
+        assert_eq!(removed.mtime, None);
+        assert_eq!(removed.size, None);
+        let overflow = VaultChange::overflow(3000);
+        assert_eq!(overflow.kind, "overflow");
+        assert_eq!(overflow.count, Some(3000));
+    }
+
+    #[test]
+    fn scan_skips_dependency_and_configured_dirs() {
+        let root = temp_root();
+        for (dir, file) in [
+            ("notes", "a.md"),
+            ("node_modules/pkg", "readme.md"),
+            (".git/hooks", "sample.md"),
+            ("vendor/dep", "doc.md"),
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(root.join(dir).join(file), b"x").unwrap();
+        }
+        fs::create_dir_all(root.join(".workbench")).unwrap();
+        fs::write(
+            root.join(".workbench/settings.json"),
+            br#"{"watcherIgnoreDirs":["vendor"]}"#,
+        )
+        .unwrap();
+
+        let files = scan(&root);
+        let mut paths: Vec<String> = files.keys().cloned().collect();
+        paths.sort();
+        assert_eq!(paths, vec!["notes/a.md".to_string()]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn temp_root() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default();
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("ember-watcher-{}-{nanos}-{seq}", std::process::id()))
     }
 }
