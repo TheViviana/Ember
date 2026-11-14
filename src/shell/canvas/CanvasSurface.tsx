@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useState, type DragEvent as ReactDragEvent, type ReactElement } from 'react';
 import type { CanvasBookmark, CanvasFilters, CanvasGrid, CanvasNode, CanvasScene } from '#canvas-engine';
-import { asDocId, createUlid, type CanvasId, type DocId } from '#doc-model';
+import { createUlid, type CanvasId, type DocId } from '#doc-model';
 import { useKernel } from '../kernel-provider.tsx';
+import { isDocDragActive } from '../documents/doc-drag.ts';
 import { FloatLayer } from '../editor/FloatLayer.tsx';
 import type { CursorPosition } from '../editor/cursor.ts';
 import { AnchorMenu } from './AnchorMenu.tsx';
@@ -10,8 +11,8 @@ import { CanvasHistoryPanel } from './CanvasHistoryPanel.tsx';
 import { EMPTY_FILTERS, useCanvasViewStore } from './canvas-view-store.ts';
 import { buildBookmark } from './BookmarkStrip.tsx';
 import { ContextMenu, LabelPrompt } from './ContextMenu.tsx';
-import { centeredNodeRect, visibleNodeCenter } from './commands.ts';
-import { DEFAULT_NODE_SIZE, boundsOfRects, fitViewport, orderedNodes, screenToWorld, snapValue } from './geometry.ts';
+import { docDropRect, hasDocPayload, readDocId } from './doc-drop.ts';
+import { boundsOfRects, fitViewport, orderedNodes, screenToWorld, snapValue } from './geometry.ts';
 import {
   CanvasEmptyHint,
   CanvasEdgePass,
@@ -322,33 +323,30 @@ export const CanvasSurface = ({
     surfaceRef,
   });
 
+  /** 是否该由画布接管这次拖放：文稿面板拖入、或拖拽已由文稿面板发起 */
+  const carriesDoc = useCallback((dataTransfer: DataTransfer): boolean => {
+    return isDocDragActive() || hasDocPayload(dataTransfer);
+  }, []);
+
   /** 文档面板拖入：在鼠标位置落一个 kind:'doc' 节点，走正常 addNode 提交与保存 */
   const onDropDoc = useCallback(
     (event: ReactDragEvent<HTMLDivElement>): void => {
-      const docId = asDocId(event.dataTransfer.getData('application/x-ember-doc'));
+      const docId = readDocId(event.dataTransfer);
       const element = surfaceRef.current;
       if (docId === null || element === null || scene === null) return;
       const bounds = element.getBoundingClientRect();
-      const center = visibleNodeCenter(
-        screenToWorld(
-          { x: event.clientX - bounds.left, y: event.clientY - bounds.top },
-          viewportRef.current,
-        ),
-        viewportRef.current,
-        { width: element.clientWidth, height: element.clientHeight },
-        DEFAULT_NODE_SIZE,
-      );
-      const rect = centeredNodeRect(center, DEFAULT_NODE_SIZE);
+      const rect = docDropRect({
+        point: { x: event.clientX - bounds.left, y: event.clientY - bounds.top },
+        viewport: viewportRef.current,
+        canvas: { width: element.clientWidth, height: element.clientHeight },
+        grid: scene.grid,
+      });
       const node: CanvasNode = {
         id: `n_${createUlid()}`,
         kind: 'doc',
         docId,
         text: null,
-        rect: {
-          ...rect,
-          x: snapValue(rect.x, scene.grid),
-          y: snapValue(rect.y, scene.grid),
-        },
+        rect,
         z: scene.nodes.reduce((max, item) => Math.max(max, item.z), 0) + 1,
         groupId: null,
         meta: {},
@@ -430,18 +428,25 @@ export const CanvasSurface = ({
       onPointerUp={gestures.onPointerUp}
       onPointerCancel={gestures.onPointerUp}
       onContextMenu={commands.onContextMenu}
+      onDragEnter={(event) => {
+        // WebKit 只在 dragenter 也 preventDefault 时才把这次拖拽当作可落点
+        if (carriesDoc(event.dataTransfer)) event.preventDefault();
+      }}
       onDragOver={(event) => {
         const types = [...event.dataTransfer.types];
-        if (types.includes('Files') || types.includes('application/x-ember-doc')) event.preventDefault();
+        if (!types.includes('Files') && !carriesDoc(event.dataTransfer)) return;
+        event.preventDefault();
+        // 源侧 effectAllowed 是 move：目标侧必须显式声明 dropEffect，否则落点会被取消
+        event.dataTransfer.dropEffect = 'move';
       }}
       onDrop={(event) => {
-        const types = [...event.dataTransfer.types];
         // 文档面板拖入：落成文章卡片，不交给图片/文件通道
-        if (types.includes('application/x-ember-doc')) {
+        if (carriesDoc(event.dataTransfer)) {
           event.preventDefault();
           onDropDoc(event);
           return;
         }
+        const types = [...event.dataTransfer.types];
         // 拖放目标始终接管：不给浏览器留下「导航打开文件」的默认行为
         if (types.includes('Files')) event.preventDefault();
         onDropFiles(event);

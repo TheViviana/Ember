@@ -155,6 +155,26 @@ export const App = (): ReactElement => {
     };
   }, [kernel, queryClient]);
 
+  // 原生拖放处理器已关（tauri.conf.json 的 dragDropEnabled:false），文件拖拽交给 DOM 处理。
+  // 画布之外没有接收方时 WebKit 的默认动作是把整页导航到被拖入的文件，这里统一挡掉。
+  useEffect(() => {
+    const blockUnhandledFileDrop = (event: DragEvent): void => {
+      // 画布/输入框已经接管的事件不再插手（否则会覆盖它们设置的 dropEffect）
+      if (event.defaultPrevented) return;
+      if (event.dataTransfer === null || !event.dataTransfer.types.includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'none';
+    };
+    window.addEventListener('dragenter', blockUnhandledFileDrop);
+    window.addEventListener('dragover', blockUnhandledFileDrop);
+    window.addEventListener('drop', blockUnhandledFileDrop);
+    return () => {
+      window.removeEventListener('dragenter', blockUnhandledFileDrop);
+      window.removeEventListener('dragover', blockUnhandledFileDrop);
+      window.removeEventListener('drop', blockUnhandledFileDrop);
+    };
+  }, []);
+
   // 本进程 patch 落盘后同步面板展示；外部直接改 settings.json 暂无监听（下次 patch 会重读磁盘保留改动）
   useEffect(() => {
     const subscription = kernel.events.on('settings:changed', ({ settings: next }) => {
