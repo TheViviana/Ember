@@ -1,6 +1,7 @@
 import {
   createUlid,
   deriveSummary,
+  isUlid,
   joinFrontmatter,
   toSerializable,
   unsafeContentHash,
@@ -11,7 +12,15 @@ import {
   type VaultPath,
 } from '#doc-model';
 import { stringify as stringifyYaml } from 'yaml';
-import { canonicalText, hashBytes, isUtf8, parseDocText, utcNow } from './doc-text.ts';
+import {
+  canonicalText,
+  hashBytes,
+  isUtf8,
+  parseDocText,
+  patchFrontmatterRegion,
+  replaceBodyRegion,
+  utcNow,
+} from './doc-text.ts';
 import type { EventBus } from './events.ts';
 import { EmberError } from './errors.ts';
 import type { PathTools } from './paths.ts';
@@ -55,19 +64,12 @@ export interface DocService {
   restoreHistory(id: DocId, versionId: string, opts: WriteOptions): Promise<WriteOutcome>;
 
   /**
-   * 采用副本：正文与 title/summary/tags/aliases 写回原文（保留原 id 与 created），
+   * 采用副本：正文与 title/summary/tags/aliases 写回原文（保留原 created），
    * 成功后把副本移入系统回收站；两步非事务，删除失败返回 copyRemoved: false。
    */
   adoptCopy(copyId: DocId, opts: AdoptConflictOptions): Promise<AdoptConflictResult>;
-  /** 另存为普通文档：清除副本的 ember.conflictOf，不改 id / 路径 / 正文 */
+  /** 另存为普通文档：清除副本的 ember.conflictOf，不改路径 / 正文 */
   detachCopy(copyId: DocId, opts: WriteOptions): Promise<DocSnapshot>;
-
-  /**
-   * 为缺少 id 的既有 `.md` 文件补写身份（库健康检查的显式 adoption）。
-   * 仅当文件仍无 id、字节 hash 等于 expectedHash、且为合法 UTF-8 时写入；
-   * 不改正文，只补 `id` / 缺失的 `created` / 刷新 `updated`。
-   */
-  adopt(path: VaultPath, expectedHash: ContentHash): Promise<DocSnapshot>;
 
   flush(): Promise<void>;
   watch(listener: (change: DocChange) => void): Disposable;
@@ -80,7 +82,7 @@ export interface DocService {
 
 /** 内核内部扩展：watcher 触发目录对账、文章回滚用，不暴露给能力（G1） */
 export interface DocServiceInternal extends DocService {
-  /** 全量对账：文件 → 目录；只收录已具备合法且唯一 id 的文档 */
+  /** 全量对账：文件 → 目录；文档身份即规范化相对路径 */
   refresh(): Promise<void>;
   /**
    * 增量对账：按 watcher 事件只重读发生变化的文件；`removed` 用路径反查 id 直接摘除。
@@ -92,6 +94,8 @@ export interface DocServiceInternal extends DocService {
    * 不注册为命令——`core.doc.purge` 在契约里仍是「v1 未实现」。
    */
   purge(id: DocId, opts: WriteOptions): Promise<void>;
+  /** 注册改名后的外部引用同步（画布节点）；传 null 解除 */
+  setRenameHook(hook: ((from: DocId, to: DocId) => Promise<void>) | null): void;
 }
 
 interface CatalogEntry {
@@ -195,19 +199,6 @@ const composeDocText = (frontmatter: Frontmatter, body: string): string => {
   return joinFrontmatter(stringifyYaml(serializable, { lineWidth: 0 }).replace(/\n$/, ''), body);
 };
 
-/** 三态补丁：undefined 保留、null 删键、其余覆盖（null 让「清空简介」回落派生而不是写空串） */
-const withFrontmatterPatch = (base: Frontmatter, patch: DocPatch): Frontmatter => {
-  const next = patch.frontmatter;
-  if (next === undefined) return base;
-  return {
-    ...base,
-    title: next.title === undefined ? base.title : next.title,
-    summary: next.summary === undefined ? base.summary : next.summary,
-    tags: next.tags ?? base.tags,
-    aliases: next.aliases ?? base.aliases,
-  };
-};
-
 /** 保留策略：最多 HISTORY_KEEP 版、总字节不超过 HISTORY_BUDGET，永远保留最新一条 */
 const pruneHistory = (
   entries: readonly DocHistoryEntry[],
@@ -226,13 +217,14 @@ const pruneHistory = (
   return { kept: entries.filter((entry) => !droppedIds.has(entry.versionId)), dropped };
 };
 
-/** 目录对账：只收录已具备合法且唯一 id 的文档；adoption 尚未实现（vault-format §3.3） */
+/** 目录对账：身份即规范化相对路径，所有合法 `.md` 直接收录（vault-format §3.1） */
 export const createDocService = (options: DocServiceOptions): DocServiceInternal => {
   const { port, paths, events, log } = options;
   const now = options.now ?? ((): Date => new Date());
 
   const entries = new Map<string, CatalogEntry>();
-  const byPath = new Map<string, DocId>();
+  /** 改名后同步外部引用（画布节点）；boot 在画布服务就绪后注册 */
+  let renameHook: ((from: DocId, to: DocId) => Promise<void>) | null = null;
   const listeners = new Set<(change: DocChange) => void>();
   const pending = new Set<Promise<unknown>>();
   let scanned = false;
@@ -296,7 +288,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
     }
   };
 
-  /** 冲突副本归属：只认合法 ULID，其余一律视为普通文档 */
+  /** 冲突副本归属：值是原文的库内相对路径；非法值按普通文档处理 */
   const conflictOfOf = (frontmatter: Frontmatter): DocId | null => {
     const raw = frontmatter.ember['conflictOf'];
     return typeof raw === 'string' ? asDocId(raw) : null;
@@ -315,7 +307,6 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       created: parsed.frontmatter.created ?? '',
       updated: parsed.frontmatter.updated ?? '',
       rev: { rev: entry.rev, hash: entry.hash },
-      flags: { needsAdoption: false, idInvalid: false, duplicateId: false },
       conflictOf: conflictOfOf(parsed.frontmatter),
     };
   };
@@ -369,7 +360,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         const path = typeof raw.path === 'string' ? raw.path : '';
         const at = typeof raw.at === 'string' ? raw.at : '';
         const size = raw.size;
-        if (asDocId(versionId) === null) throw new Error('版本 id 非法');
+        if (!isUlid(versionId)) throw new Error('版本 id 非法');
         if (!HISTORY_HASH_PATTERN.test(hash)) throw new Error('版本 hash 非法');
         if (at === '') throw new Error('版本时间缺失');
         if (typeof size !== 'number' || !Number.isInteger(size) || size < 0) {
@@ -426,7 +417,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
   const listHistory = async (id: DocId): Promise<readonly DocHistoryEntry[]> => readHistoryIndex(id);
 
   const readHistory = async (id: DocId, versionId: string): Promise<DocHistoryPreview> => {
-    if (asDocId(versionId) === null) {
+    if (!isUlid(versionId)) {
       throw new EmberError('invalid_payload', `历史版本 id 非法：${versionId}`, { id: String(id) });
     }
     const entry = (await readHistoryIndex(id)).find((item) => item.versionId === versionId);
@@ -463,103 +454,58 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
   };
 
   const applyScan = async (pathsInVault: readonly VaultPath[]): Promise<void> => {
-    const present = new Set(pathsInVault.map((item) => String(item)));
     const seen = new Set<string>();
-    const duplicateIds = new Set<string>();
     // 读盘期间可能有队列写入完成：用代数快照判断 apply 时条目是否已被推进
     const versionSnapshot = new Map(versions);
 
     for (const path of pathsInVault) {
       if (paths.ext(path).toLowerCase() !== '.md') continue;
+      const id = asDocId(String(path));
+      if (id === null) continue;
+      const key = String(id);
+      if (isBusy(id)) {
+        // 该 id 有排队中的写操作：本次扫描读到的可能是写前内容，不能回写目录/广播事件。
+        // 标记 seen 防止下面的清理误删；写完成后条目由队列自身更新。
+        seen.add(key);
+        continue;
+      }
       const bytes = await readBytes(path);
       if (bytes === null) continue;
       const rawText = decoder.decode(bytes);
-      const text = canonicalText(rawText);
-      const style = detectStyle(bytes, rawText);
-      const utf8Valid = isUtf8(bytes);
       const parsed = parseDocText(rawText);
-      const id = parsed.frontmatter.id === null ? null : asDocId(parsed.frontmatter.id);
-      if (id === null) {
-        if (parsed.frontmatterBroken) {
-          log.warn('frontmatter YAML 无法解析，按待 adoption 跳过该文档', { path: String(path) });
-        } else {
-          log.warn('跳过缺少合法 id 的文档，等待 adoption', { path: String(path) });
-        }
-        continue;
-      }
       if (parsed.issues.length > 0) {
         log.warn('frontmatter 含取值非法的键，原值已保留、修正前不参与语义', {
           path: String(path),
           keys: parsed.issues.map((issue) => issue.key),
         });
       }
-      if (isBusy(id)) {
-        // 该 id 有排队中的写操作：本次扫描读到的可能是写前内容，不能回写目录/广播事件。
-        // 标记 seen 防止下面的清理误删；写完成后条目由队列自身更新。
-        seen.add(String(id));
-        continue;
-      }
       const hash = await hashBytes(bytes);
       if (isBusy(id)) {
         // hash 计算期间可能刚好有写入入队：apply 前再确认一次，避免覆盖队列的更新
-        seen.add(String(id));
+        seen.add(key);
         continue;
       }
-      if ((versions.get(String(id)) ?? 0) !== (versionSnapshot.get(String(id)) ?? 0)) {
+      if ((versions.get(key) ?? 0) !== (versionSnapshot.get(key) ?? 0)) {
         // 读盘/hash 期间该条目已被队列写入推进：本次扫描结果已过期，不能回写
-        seen.add(String(id));
+        seen.add(key);
         continue;
       }
-      const existing = entries.get(String(id));
-      if (existing !== undefined && String(existing.path) !== String(path)) {
-        if (present.has(String(existing.path))) {
-          // 重复 id：两个路径都还在，保留先收录者（list 为字典序，结果稳定），
-          // 后来者不进目录、也不写 byPath
-          duplicateIds.add(String(id));
-          continue;
-        }
-        // 同 id 的旧路径已不存在：外部改名/移动，迁移条目而不是当作重复 id 丢弃
-        const oldPath = existing.path;
-        const changed = existing.hash !== hash;
-        const rev = changed ? existing.rev + 1 : existing.rev;
-        existing.path = path;
-        existing.rev = rev;
-        existing.hash = hash;
-        existing.text = text;
-        existing.style = style;
-        existing.utf8Valid = utf8Valid;
-        existing.mtimeMs = null;
-        existing.size = null;
-        byPath.delete(String(oldPath));
-        byPath.set(String(path), id);
-        bumpVersion(String(id));
-        // 本次扫描自身的推进不算「读盘期间被写入推进」：同步局部快照，避免同 id 的后续路径被误判
-        versionSnapshot.set(String(id), versions.get(String(id)) ?? 0);
-        seen.add(String(id));
-        emitChange({
-          id,
-          path,
-          kind: changed ? 'external' : 'renamed',
-          revision: { rev, hash },
-        });
-        continue;
-      }
+      const existing = entries.get(key);
       const rev = existing === undefined ? 1 : existing.hash === hash ? existing.rev : existing.rev + 1;
-      entries.set(String(id), {
+      entries.set(key, {
         id,
         path,
         rev,
         hash,
-        text,
-        style,
-        utf8Valid,
+        text: canonicalText(rawText),
+        style: detectStyle(bytes, rawText),
+        utf8Valid: isUtf8(bytes),
         mtimeMs: null,
         size: null,
       });
-      byPath.set(String(path), id);
-      bumpVersion(String(id));
-      versionSnapshot.set(String(id), versions.get(String(id)) ?? 0);
-      seen.add(String(id));
+      bumpVersion(key);
+      versionSnapshot.set(key, versions.get(key) ?? 0);
+      seen.add(key);
       // 目录对账发现外部改动时广播，编辑器据此自动重载或提示合并
       if (existing === undefined) {
         // 初次扫描不算"新增"，避免启动时把整个库广播成 created
@@ -599,11 +545,9 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       if (queues.has(key)) continue;
       entries.delete(key);
       versions.delete(key);
-      byPath.delete(String(entry.path));
       emitChange({ id: entry.id, path: entry.path, kind: 'removed', revision: { rev: entry.rev, hash: entry.hash } });
     }
     scanned = true;
-    if (duplicateIds.size > 0) log.warn('检测到重复 id', { ids: [...duplicateIds] });
   };
 
   const refresh = async (): Promise<void> => {
@@ -625,17 +569,27 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
    * 事件自带 mtime/size，与目录里的元数据一致时连这一次读盘也省掉。
    */
   const applyFileChange = async (event: VaultFileChange): Promise<void> => {
+    // 外部改名按「旧路径删除 + 新路径新建」处理：身份即路径，改名就是换身份。
+    // 严格重绑（inode / sha256 第二信号）由迁移层负责，这里不猜。
+    if (
+      event.kind === 'renamed' &&
+      event.from !== undefined &&
+      String(event.from) !== String(event.path)
+    ) {
+      await applyFileChange({ kind: 'removed', path: event.from });
+    }
+
+    const id = asDocId(String(event.path));
+    if (id === null) return;
+    const key = String(id);
+
     if (event.kind === 'removed') {
-      const id = byPath.get(String(event.path));
-      if (id === undefined) return;
-      const key = String(id);
       // 队列正在处理该 id：删除/改名由队列自身完成，增量对账不能抢先摘除
       if (isBusy(id) || queues.has(key)) return;
       const entry = entries.get(key);
-      if (entry === undefined || String(entry.path) !== String(event.path)) return;
+      if (entry === undefined) return;
       entries.delete(key);
       versions.delete(key);
-      byPath.delete(String(event.path));
       emitChange({
         id,
         path: entry.path,
@@ -645,17 +599,9 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       return;
     }
 
-    let existing: CatalogEntry | undefined;
-    if (event.kind === 'renamed' && event.from !== undefined) {
-      const movedId = byPath.get(String(event.from));
-      if (movedId !== undefined) existing = entries.get(String(movedId));
-    } else {
-      const mapped = byPath.get(String(event.path));
-      if (mapped !== undefined) existing = entries.get(String(mapped));
-    }
+    const existing = entries.get(key);
     if (existing !== undefined) {
-      const key = String(existing.id);
-      if (isBusy(existing.id) || queues.has(key)) return;
+      if (isBusy(id) || queues.has(key)) return;
       if (
         event.mtimeMs !== undefined &&
         event.size !== undefined &&
@@ -669,106 +615,30 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
     const bytes = await readBytes(event.path);
     if (bytes === null) return;
     const rawText = decoder.decode(bytes);
-    const parsed = parseDocText(rawText);
-    const id = parsed.frontmatter.id === null ? null : asDocId(parsed.frontmatter.id);
-
-    if (id === null) {
-      // 文件还在但已没有合法 id：把它从目录里摘掉，等 adoption 流程处理
-      if (existing === undefined) return;
-      const key = String(existing.id);
-      if (isBusy(existing.id) || queues.has(key)) return;
-      entries.delete(key);
-      versions.delete(key);
-      byPath.delete(String(existing.path));
-      emitChange({
-        id: existing.id,
-        path: existing.path,
-        kind: 'removed',
-        revision: { rev: existing.rev + 1, hash: existing.hash },
-      });
-      return;
-    }
-
-    const target = entries.get(String(id));
-    if (target !== undefined && String(target.path) !== String(event.path)) {
-      // 同 id 已登记在另一条路径：先确认旧路径是否真的没了。
-      const stillThere = await port.stat(target.path);
-      if (stillThere !== null) {
-        log.warn('增量对账发现重复 id，保留先收录的路径', {
-          id: String(id),
-          path: String(event.path),
-        });
-        return;
-      }
-    }
     const hash = await hashBytes(bytes);
     // 读盘/hash 期间可能刚好有写入入队：apply 前再确认一次
-    if (isBusy(id) || queues.has(String(id))) return;
+    if (isBusy(id) || queues.has(key)) return;
 
     const text = canonicalText(rawText);
     const style = detectStyle(bytes, rawText);
     const utf8Valid = isUtf8(bytes);
 
-    // 内容换成了另一个 id：旧条目的身份必须一并摘掉，否则会留下指向不存在文件的记录
-    if (existing !== undefined && String(existing.id) !== String(id)) {
-      const oldKey = String(existing.id);
-      entries.delete(oldKey);
-      versions.delete(oldKey);
-      byPath.delete(String(existing.path));
-      emitChange({
-        id: existing.id,
-        path: existing.path,
-        kind: 'removed',
-        revision: { rev: existing.rev + 1, hash: existing.hash },
-      });
-    }
-
-    if (target !== undefined && String(target.path) === String(event.path)) {
-      const changed = target.hash !== hash;
-      target.text = text;
-      target.style = style;
-      target.utf8Valid = utf8Valid;
-      target.mtimeMs = event.mtimeMs ?? null;
-      target.size = event.size ?? null;
+    if (existing !== undefined) {
+      const changed = existing.hash !== hash;
+      existing.text = text;
+      existing.style = style;
+      existing.utf8Valid = utf8Valid;
+      existing.mtimeMs = event.mtimeMs ?? null;
+      existing.size = event.size ?? null;
       if (!changed) return;
-      target.hash = hash;
-      target.rev += 1;
-      bumpVersion(String(id));
-      emitChange({
-        id,
-        path: event.path,
-        kind: 'external',
-        revision: { rev: target.rev, hash },
-      });
+      existing.hash = hash;
+      existing.rev += 1;
+      bumpVersion(key);
+      emitChange({ id, path: event.path, kind: 'external', revision: { rev: existing.rev, hash } });
       return;
     }
 
-    if (target !== undefined) {
-      // 同 id 的旧路径已不存在：外部改名/移动，迁移条目而不是新建
-      const oldPath = target.path;
-      const changed = target.hash !== hash;
-      const rev = changed ? target.rev + 1 : target.rev;
-      target.path = event.path;
-      target.rev = rev;
-      target.hash = hash;
-      target.text = text;
-      target.style = style;
-      target.utf8Valid = utf8Valid;
-      target.mtimeMs = event.mtimeMs ?? null;
-      target.size = event.size ?? null;
-      byPath.delete(String(oldPath));
-      byPath.set(String(event.path), id);
-      bumpVersion(String(id));
-      emitChange({
-        id,
-        path: event.path,
-        kind: changed ? 'external' : 'renamed',
-        revision: { rev, hash },
-      });
-      return;
-    }
-
-    entries.set(String(id), {
+    entries.set(key, {
       id,
       path: event.path,
       rev: 1,
@@ -779,8 +649,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       mtimeMs: event.mtimeMs ?? null,
       size: event.size ?? null,
     });
-    byPath.set(String(event.path), id);
-    bumpVersion(String(id));
+    bumpVersion(key);
     if (scanned) emitChange({ id, path: event.path, kind: 'created', revision: { rev: 1, hash } });
   };
 
@@ -797,7 +666,6 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
   const rescan = async (): Promise<void> => {
     if (refreshInFlight !== null) await refreshInFlight;
     entries.clear();
-    byPath.clear();
     versions.clear();
     guard = null;
     port.setRuntimeReadonly?.(null);
@@ -805,23 +673,36 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
     await refresh();
   };
 
-  const commit = async (entry: CatalogEntry, text: string, intent: WriteOptions['intent']): Promise<CatalogEntry> => {
-    // 唯一落盘收口：编辑器保存、AI 替换、冲突副本合并、撤销都从这里写。
-    // 入参是 canonical 文本，写前按文件既有风格还原 BOM 与行尾。
-    const canonical = canonicalText(text);
-    const bytes = encoder.encode(applyStyle(canonical, entry.style));
+  /** 原样写入已组装好的文件文本：字节即最终字节，不再做全局 canonical/行尾重排 */
+  const commitRaw = async (
+    entry: CatalogEntry,
+    rawText: string,
+    intent: WriteOptions['intent'],
+  ): Promise<CatalogEntry> => {
+    // TextDecoder 默认吞掉 BOM；落盘前按探测到的风格补回，保证 BOM 文件保存后仍带 BOM
+    const withBom =
+      entry.style.bom && !rawText.startsWith('\uFEFF') ? `\uFEFF${rawText}` : rawText;
+    const bytes = encoder.encode(withBom);
     await port.write(entry.path, bytes, intent);
     // hash 必须按真实落盘字节算：base.hash 校验比较的是磁盘内容，
     // 换成 canonical 文本的 hash 会让并发写入的过期判定整体失真。
     const hash = await hashBytes(bytes);
     // 入队时捕获的 entry 可能已被 refresh 替换：更新 map 中的当前对象，避免改到脱管副本
     const current = entries.get(String(entry.id)) ?? entry;
-    current.text = canonical;
+    current.text = canonicalText(rawText);
     current.hash = hash;
     current.rev += 1;
     bumpVersion(String(entry.id));
     return current;
   };
+
+  /** 整份重写：只在新建文件或显式元数据合并时使用，按文件既有风格还原 BOM 与行尾 */
+  const commitWhole = async (
+    entry: CatalogEntry,
+    text: string,
+    intent: WriteOptions['intent'],
+  ): Promise<CatalogEntry> =>
+    commitRaw(entry, applyStyle(canonicalText(text), entry.style), intent);
 
   const conflictCopy = async (
     entry: CatalogEntry,
@@ -835,13 +716,13 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       });
     }
     const parsed = parseDocText(localText);
-    const copyIdValue = createUlid(now().getTime());
-    const copyId = asDocId(copyIdValue);
-    if (copyId === null) throw new EmberError('io_failed', '生成冲突副本 id 失败');
-    const copyPath = paths.conflictName(entry.path, now(), copyIdValue.slice(-6));
+    const copyPath = paths.conflictName(entry.path, now(), createUlid(now().getTime()).slice(-6));
+    // 身份即路径：副本的 id 就是它自己的相对路径；frontmatter 不写 id
+    const copyId = asDocId(String(copyPath));
+    if (copyId === null) throw new EmberError('io_failed', '生成冲突副本路径失败');
     const frontmatter: Frontmatter = {
       ...parsed.frontmatter,
-      id: copyIdValue,
+      id: null,
       ember: { ...parsed.frontmatter.ember, conflictOf: String(entry.id) },
     };
     await port.write(
@@ -909,8 +790,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
 
     readByPath: async (path) => {
       await ensureScanned();
-      const id = byPath.get(String(path));
-      if (id === undefined) return null;
+      const id = asDocId(String(path));
+      if (id === null || entries.get(String(id)) === undefined) return null;
       return read(id);
     },
 
@@ -933,23 +814,24 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
     create: async (input) => {
       assertWritable();
       await ensureScanned();
-      if (byPath.has(String(input.path)) || (await readBytes(input.path)) !== null) {
+      const id = asDocId(String(input.path));
+      if (id === null) {
+        throw new EmberError('invalid_payload', `不是合法的文档路径：${String(input.path)}`);
+      }
+      if (entries.has(String(id)) || (await readBytes(input.path)) !== null) {
         throw new EmberError('path_exists', `路径已存在：${String(input.path)}`);
       }
-      const idValue = input.id === undefined ? createUlid(now().getTime()) : String(input.id);
-      const id = asDocId(idValue);
-      if (id === null) throw new EmberError('doc_not_found', `非法 id：${idValue}`);
-      if (entries.has(String(id))) throw new EmberError('duplicate_id', `id 已存在：${idValue}`);
 
-      const stamp = utcNow(now());
+      // 新文件由内核创建：只写用户显式提供的展示元数据。
+      // 身份来自路径，因此不再写 id；也不写 created / updated（D8：不替用户发明字段）。
       const frontmatter: Frontmatter = {
-        id: idValue,
+        id: null,
         title: input.title ?? paths.stem(input.path),
         summary: input.summary ?? null,
         tags: input.tags ?? [],
         aliases: input.aliases ?? [],
-        created: stamp,
-        updated: stamp,
+        created: null,
+        updated: null,
         ember: {},
         extra: {},
       };
@@ -971,86 +853,9 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         size: null,
       };
       entries.set(String(id), entry);
-      byPath.set(String(input.path), id);
       bumpVersion(String(id));
       emitChange({ id, path: input.path, kind: 'created', revision: { rev: 1, hash } });
       return snapshotOf(entry);
-    },
-
-    adopt: async (path, expectedHash) => {
-      await ensureScanned();
-      return enqueue(`adopt:${String(path)}`, async () => {
-        assertWritable();
-        if (paths.ext(path).toLowerCase() !== '.md') {
-          throw new EmberError('invalid_payload', `只有 .md 文件可以纳入库管理：${String(path)}`);
-        }
-        if (byPath.has(String(path))) {
-          throw new EmberError('invalid_payload', `文件已纳入目录，无需 adoption：${String(path)}`);
-        }
-        const bytes = await readBytes(path);
-        if (bytes === null) throw new EmberError('doc_not_found', `文件已消失：${String(path)}`);
-        if (!isUtf8(bytes)) {
-          throw new EmberError('invalid_payload', '文件不是合法 UTF-8，无法补写 id', {
-            path: String(path),
-          });
-        }
-        const diskHash = await hashBytes(bytes);
-        if (diskHash !== expectedHash) {
-          throw new EmberError('stale_revision', '文件在扫描后已变化，请重新检查', {
-            path: String(path),
-          });
-        }
-        const rawText = decoder.decode(bytes);
-        const parsed = parseDocText(rawText);
-        if (parsed.frontmatterBroken) {
-          throw new EmberError('invalid_payload', 'frontmatter YAML 无法解析，只报告不修复', {
-            path: String(path),
-          });
-        }
-        if (parsed.issues.some((item) => item.code === 'id_invalid')) {
-          throw new EmberError('invalid_payload', 'id 格式非法，只报告不修复', {
-            path: String(path),
-          });
-        }
-        if (parsed.frontmatter.id !== null) {
-          throw new EmberError('invalid_payload', '文件已有 id（含非法 id），不做 adoption', {
-            path: String(path),
-          });
-        }
-        const idValue = createUlid(now().getTime());
-        const id = asDocId(idValue);
-        if (id === null || entries.has(String(id))) {
-          throw new EmberError('duplicate_id', `无法分配唯一 id：${idValue}`);
-        }
-        const stamp = utcNow(now());
-        const frontmatter: Frontmatter = {
-          ...parsed.frontmatter,
-          id: idValue,
-          created: parsed.frontmatter.created ?? stamp,
-          updated: stamp,
-        };
-        const text = composeDocText(frontmatter, parsed.body);
-        const style = detectStyle(bytes, rawText);
-        const encoded = encoder.encode(applyStyle(text, style));
-        await track(port.write(path, encoded, 'migration'));
-        const hash = await hashBytes(encoded);
-        const entry: CatalogEntry = {
-          id,
-          path,
-          rev: 1,
-          hash,
-          text,
-          style,
-          utf8Valid: true,
-          mtimeMs: null,
-          size: null,
-        };
-        entries.set(String(id), entry);
-        byPath.set(String(path), id);
-        bumpVersion(String(id));
-        emitChange({ id, path, kind: 'created', revision: { rev: 1, hash } });
-        return snapshotOf(entry);
-      });
     },
 
     update: async (id, patch, opts) => {
@@ -1074,16 +879,22 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         entry.utf8Valid = true;
         const diskHash = await hashBytes(bytes);
         const parsed = parseDocText(diskText);
-        const nextFrontmatter: Frontmatter = {
-          ...withFrontmatterPatch(parsed.frontmatter, patch),
-          updated: utcNow(now()),
-        };
-        const localComposed = composeDocText(nextFrontmatter, patch.body ?? parsed.body);
+        // D8：只替换正文区，frontmatter 按磁盘原文逐字节保留；
+        // 只有显式给出 frontmatter 补丁时才就地改那几个顶层键，从不新增 created / updated。
+        const patchedRaw =
+          patch.frontmatter === undefined
+            ? rawText
+            : patchFrontmatterRegion(rawText, patch.frontmatter);
+        const localRaw = replaceBodyRegion(
+          patchedRaw,
+          canonicalText(patch.body ?? parsed.body),
+          entry.style.eol,
+        );
 
         if (opts.base.hash === diskHash) {
           // 历史先落盘：写失败直接抛出，主文保持原样（spec §4）
           await recordHistory(id, entry.path, bytes);
-          const committed = await commit(entry, localComposed, opts.intent);
+          const committed = await commitRaw(entry, localRaw, opts.intent);
           const snapshot = snapshotOf(committed);
           emitChange({ id, path: committed.path, kind: 'updated', revision: snapshot.meta.rev });
           return { snapshot, merged: true, conflict: null };
@@ -1091,7 +902,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
 
         // 基线不符即落冲突副本并保留磁盘版本（不做自动三路合并）：
         // 正文唯一真相在磁盘，冲突副本保住本地改动，绝不静默覆盖外部修改
-        const copy = await conflictCopy(entry, localComposed, opts.intent);
+        const copy = await conflictCopy(entry, localRaw, opts.intent);
         // 队列内不会再有同 id 写入交错，这里同步的是只在本次 read 之后发生的外部变化
         if (diskHash !== entry.hash) {
           entry.rev += 1;
@@ -1112,8 +923,14 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       return enqueue(String(id), async () => {
         assertWritable();
         const entry = requireEntry(id);
-        if (String(entry.path) === String(next)) return { snapshot: snapshotOf(entry), merged: true, conflict: null };
-        if (byPath.has(String(next)) || (await readBytes(next)) !== null) {
+        if (String(entry.path) === String(next)) {
+          return { snapshot: snapshotOf(entry), merged: true, conflict: null };
+        }
+        const nextId = asDocId(String(next));
+        if (nextId === null) {
+          throw new EmberError('invalid_payload', `不是合法的文档路径：${String(next)}`);
+        }
+        if (entries.has(String(nextId)) || (await readBytes(next)) !== null) {
           throw new EmberError('path_exists', `目标路径已存在：${String(next)}`);
         }
         const bytes = await readBytes(entry.path);
@@ -1124,13 +941,35 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
             id: String(id),
           });
         }
+        const oldId = entry.id;
         await port.rename(entry.path, next);
-        byPath.delete(String(entry.path));
-        entry.path = next;
-        byPath.set(String(next), id);
-        bumpVersion(String(id));
-        emitChange({ id, path: next, kind: 'renamed', revision: { rev: entry.rev, hash: entry.hash } });
-        return { snapshot: snapshotOf(entry), merged: true, conflict: null };
+        // 身份即路径：改名后必须整体换键，旧路径的条目不能留在目录里
+        entries.delete(String(oldId));
+        const moved: CatalogEntry = { ...entry, id: nextId, path: next };
+        entries.set(String(nextId), moved);
+        versions.set(String(nextId), versions.get(String(oldId)) ?? 0);
+        versions.delete(String(oldId));
+        bumpVersion(String(nextId));
+        // 画布引用同步：逐画布原子写，失败只记录，不把已完成的改名回滚
+        if (renameHook !== null) {
+          try {
+            await renameHook(oldId, nextId);
+          } catch (error) {
+            log.error('改名后同步画布引用失败', {
+              from: String(oldId),
+              to: String(nextId),
+              error: String(error),
+            });
+          }
+        }
+        emitChange({
+          id: nextId,
+          from: oldId,
+          path: next,
+          kind: 'renamed',
+          revision: { rev: moved.rev, hash: moved.hash },
+        });
+        return { snapshot: snapshotOf(moved), merged: true, conflict: null };
       });
     },
 
@@ -1159,7 +998,6 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         }
         entries.delete(String(id));
         versions.delete(String(id));
-        byPath.delete(String(entry.path));
         emitChange({ id, path: entry.path, kind: 'removed', revision: { rev: entry.rev + 1, hash } });
         return destination;
       });
@@ -1174,7 +1012,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       return enqueue(String(id), async () => {
         assertWritable();
         const entry = requireEntry(id);
-        if (asDocId(versionId) === null) {
+        if (!isUlid(versionId)) {
           throw new EmberError('invalid_payload', `历史版本 id 非法：${versionId}`, { id: String(id) });
         }
         const bytes = await readBytes(entry.path);
@@ -1299,22 +1137,16 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         }
         const originalRaw = decoder.decode(originalBytes);
         original.style = detectStyle(originalBytes, originalRaw);
-        const originalParsed = parseDocText(canonicalText(originalRaw));
-        const nextFrontmatter: Frontmatter = {
-          ...originalParsed.frontmatter,
-          // 允许迁移的元数据：标题 / 简介 / 标签 / 别名；id、created、ember、extra 保留原文
+        // 只并入副本的四项元数据，其余 frontmatter 行逐字节保留；不写 created / updated / id
+        const patchedRaw = patchFrontmatterRegion(originalRaw, {
           title: copyParsed.frontmatter.title,
           summary: copyParsed.frontmatter.summary,
           tags: copyParsed.frontmatter.tags,
           aliases: copyParsed.frontmatter.aliases,
-          updated: utcNow(now()),
-        };
+        });
+        const nextRaw = replaceBodyRegion(patchedRaw, copyParsed.body, original.style.eol);
         await recordHistory(originalId, original.path, originalBytes);
-        const committed = await commit(
-          original,
-          composeDocText(nextFrontmatter, copyParsed.body),
-          opts.intent,
-        );
+        const committed = await commitRaw(original, nextRaw, opts.intent);
         const snapshot = snapshotOf(committed);
         emitChange({ id: originalId, path: committed.path, kind: 'updated', revision: snapshot.meta.rev });
 
@@ -1326,7 +1158,6 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
             await port.remove(copy.path);
             entries.delete(String(copyId));
             versions.delete(String(copyId));
-            byPath.delete(String(copy.path));
             emitChange({
               id: copyId,
               path: copy.path,
@@ -1379,10 +1210,9 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         const nextFrontmatter: Frontmatter = {
           ...parsed.frontmatter,
           ember,
-          updated: utcNow(now()),
         };
         await recordHistory(copyId, entry.path, bytes);
-        const committed = await commit(entry, composeDocText(nextFrontmatter, parsed.body), opts.intent);
+        const committed = await commitWhole(entry, composeDocText(nextFrontmatter, parsed.body), opts.intent);
         const snapshot = snapshotOf(committed);
         emitChange({ id: copyId, path: committed.path, kind: 'updated', revision: snapshot.meta.rev });
         return snapshot;
@@ -1413,9 +1243,12 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         }
         entries.delete(String(id));
         versions.delete(String(id));
-        byPath.delete(String(entry.path));
         emitChange({ id, path: entry.path, kind: 'removed', revision: { rev: entry.rev + 1, hash } });
       });
+    },
+
+    setRenameHook: (hook) => {
+      renameHook = hook;
     },
 
     flush: async () => {

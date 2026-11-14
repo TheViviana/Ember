@@ -167,8 +167,9 @@ void test('创建文档写入 frontmatter 身份，读取可往返', async () =>
   });
 
   assert.equal(snapshot.meta.title, '示例');
+  assert.equal(String(snapshot.meta.id), 'notes/a.md');
   assert.match(snapshot.text, /^---\n/);
-  assert.match(snapshot.text, /id: 01[0-9A-HJKMNP-TV-Z]{24}/);
+  assert.doesNotMatch(snapshot.text, /^id:/m, '身份即路径，frontmatter 不再写 id');
   const onDisk = vault.dump()['notes/a.md'];
   assert.ok(onDisk !== undefined && onDisk.includes('demo'));
 

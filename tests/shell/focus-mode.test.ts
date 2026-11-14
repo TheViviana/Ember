@@ -4,8 +4,8 @@ import { unsafeDocId } from '#doc-model';
 import { FOCUS_MARGIN_PX, focusedFloatFrame } from '../../src/shell/editor/focus-layout.ts';
 import { useFocusStore } from '../../src/shell/editor/focus-store.ts';
 
-const DOC_A = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V2');
-const DOC_B = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V3');
+const DOC_A = unsafeDocId('笔记/A.md');
+const DOC_B = unsafeDocId('笔记/B.md');
 
 void test('专注几何：1280×820 容器四周留 48，居中放大', () => {
   assert.deepEqual(focusedFloatFrame({ width: 1280, height: 820 }), {

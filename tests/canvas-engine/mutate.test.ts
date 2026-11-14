@@ -60,7 +60,7 @@ void test('removeNodes 级联：删节点连带删边，删组解散成员', () 
 });
 
 void test('updateNode 可把文档节点转为普通 note：kind/docId 同步变更，其它字段与连线不动', () => {
-  const docNode = node('d1', { kind: 'doc', docId: unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V6'), text: null });
+  const docNode = node('d1', { kind: 'doc', docId: unsafeDocId('notes/示例.md'), text: null });
   const base: CanvasScene = {
     ...scene(),
     nodes: [docNode, node('n2')],
@@ -82,7 +82,7 @@ void test('updateNode 可把文档节点转为普通 note：kind/docId 同步变
 void test('只改 kind 不改 docId 会被整场景校验拒绝（§8.2）', () => {
   const base: CanvasScene = {
     ...scene(),
-    nodes: [node('d1', { kind: 'doc', docId: unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V6'), text: null })],
+    nodes: [node('d1', { kind: 'doc', docId: unsafeDocId('notes/示例.md'), text: null })],
     edges: [],
   };
   const result = applyMutations(base, [{ type: 'updateNode', id: 'd1', patch: { kind: 'note' } }]);
@@ -145,7 +145,7 @@ void test('updateNode meta 按键合并而不是整体替换', () => {
 
 void test('doc 节点必须带 docId 且 text 为 null（invalid_node_doc）', () => {
   const result = applyMutations(scene(), [
-    { type: 'addNode', node: node('n9', { kind: 'doc', docId: unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V7'), text: '不允许' }) },
+    { type: 'addNode', node: node('n9', { kind: 'doc', docId: unsafeDocId('notes/示例.md'), text: '不允许' }) },
   ]);
   assert.equal(result.ok, false);
   assert.ok(result.issues.some((issue) => issue.code === 'invalid_node_doc'));

@@ -133,6 +133,14 @@ export interface CanvasHost {
     docId: DocId,
     text: string,
   ): Promise<{ readonly converted: number; readonly failed: number }>;
+  /**
+   * 文档改名后同步引用：把 `docId === from` 的文档节点改为 `to`。
+   * 逐画布独立原子写，单张失败不影响其它。
+   */
+  rewriteDocRefs(
+    from: DocId,
+    to: DocId,
+  ): Promise<{ readonly updated: number; readonly failed: number }>;
   /** 在画布中定位：资产 → 引用它的图片节点 */
   locateAsset(assetPath: string): Promise<readonly CanvasAssetLocation[]>;
   /** 全库书签清单：统一搜索直达观察角度 */
@@ -1044,6 +1052,42 @@ export const createCanvasHost = (options: CanvasHostOptions): CanvasHost => {
         }
       }
       return { converted, failed };
+    },
+
+    rewriteDocRefs: async (from, to) => {
+      const key = String(from);
+      const target = String(to);
+      const all = await list();
+      let updated = 0;
+      let failed = 0;
+      for (const summary of all) {
+        try {
+          const document = await readDocument(summary.id);
+          if (document === null) continue;
+          const targets = document.scene.nodes.filter(
+            (node) => node.kind === 'doc' && node.docId !== null && String(node.docId) === key,
+          );
+          if (targets.length === 0) continue;
+          await applyImpl(
+            summary.id,
+            targets.map((node): CanvasMutation => ({
+              type: 'updateNode',
+              id: node.id,
+              patch: { docId: to },
+            })),
+          );
+          updated += targets.length;
+        } catch (error) {
+          failed += 1;
+          log.error('画布节点跟随文档改名失败', {
+            canvasId: String(summary.id),
+            from: key,
+            to: target,
+            error: String(error),
+          });
+        }
+      }
+      return { updated, failed };
     },
 
     locateAsset: async (assetPath) => {

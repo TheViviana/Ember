@@ -21,12 +21,6 @@ export interface DocRevision {
   readonly hash: ContentHash;
 }
 
-export interface DocFlags {
-  readonly needsAdoption: boolean;
-  readonly idInvalid: boolean;
-  readonly duplicateId: boolean;
-}
-
 export interface DocMeta {
   readonly id: DocId;
   readonly path: VaultPath;
@@ -38,7 +32,6 @@ export interface DocMeta {
   readonly created: string;
   readonly updated: string;
   readonly rev: DocRevision;
-  readonly flags: DocFlags;
   /** 冲突副本指向的原文 id；普通文档为 null（vault-format §10.3） */
   readonly conflictOf: DocId | null;
 }
@@ -66,8 +59,6 @@ export interface CreateDocInput {
   readonly summary?: string;
   readonly tags?: readonly string[];
   readonly aliases?: readonly string[];
-  /** 仅导入/迁移允许指定；普通创建留空由内核生成 */
-  readonly id?: DocId;
   readonly intent: WriteIntent;
 }
 
@@ -113,9 +104,6 @@ export interface AdoptConflictResult {
 /** 库健康检查问题类别（kernel-contract H1/H5） */
 export type HealthIssueKind =
   | 'broken_frontmatter'
-  | 'missing_id'
-  | 'invalid_id'
-  | 'duplicate_id'
   | 'non_utf8'
   | 'oversize'
   | 'markdown_extension'
@@ -134,7 +122,7 @@ export interface HealthIssue {
   /** 扫描时字节 sha256；未读取或不可修复时为 null */
   readonly hash: ContentHash | null;
   /** 可安全执行的修复；其余问题只报告 */
-  readonly fix: 'adopt' | 'rename-markdown' | null;
+  readonly fix: 'rename-markdown' | null;
 }
 
 export interface HealthReport {
@@ -166,9 +154,12 @@ export interface DocHistoryPreview {
 }
 
 export interface DocChange {
+  /** 变更后的文档身份（即路径）；`renamed` 时为新路径 */
   readonly id: DocId;
   readonly path: VaultPath;
   readonly kind: 'created' | 'updated' | 'renamed' | 'removed' | 'external';
+  /** 仅 `renamed` 携带：改名前的路径身份 */
+  readonly from?: DocId;
   readonly revision: DocRevision;
 }
 

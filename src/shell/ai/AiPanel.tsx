@@ -12,7 +12,7 @@ import { startChat, describeAiError, type ChatSession, type ChatTurnInput } from
 import { toErrorText } from '../../kernel/errors.ts';
 import { mindMapMutations, parseMindMap } from './canvas-mindmap.ts';
 import { useFloatStore } from '../editor/float-store.ts';
-import { createUlid, unsafeContentHash, type CanvasId, type DocId } from '#doc-model';
+import { asDocId, createUlid, unsafeContentHash, type CanvasId, type DocId } from '#doc-model';
 import { useKernel } from '../kernel-provider.tsx';
 import { readCapturePoint } from '../canvas/canvas-capture.ts';
 import {
@@ -473,9 +473,8 @@ export const AiPanel = ({ onClose, onOpenSettings }: AiPanelProps) => {
     try {
       setNotice(await undoProposalDoc(kernel.docs, undo));
       if (undo.kind === 'remove-created') useFloatStore.getState().close(undo.docId);
-      if (undo.kind === 'restore-deleted' && undo.input.id !== undefined) {
-        useFloatStore.getState().open(undo.input.id, null);
-      }
+      const restoredId = undo.kind === 'restore-deleted' ? asDocId(String(undo.input.path)) : null;
+      if (restoredId !== null) useFloatStore.getState().open(restoredId, null);
       undoRef.current = null;
       setUndoText(null);
     } catch (cause) {

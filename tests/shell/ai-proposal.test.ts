@@ -20,16 +20,15 @@ import {
   type ProposalDocs,
 } from '../../src/shell/ai/proposal.ts';
 
-const DOC_ID_VALUE = '01JBQZ8K2N4M6P8R0T2V4X6Z8A';
+const DOC_ID_VALUE = 'notes/示例文章.md';
 const DOC_ID: DocId = (() => {
   const id = asDocId(DOC_ID_VALUE);
-  if (id === null) throw new Error('测试 fixture 的 ULID 非法');
+  if (id === null) throw new Error('测试 fixture 的文档路径非法');
   return id;
 })();
 
 const makeSnapshot = (hashText: string, rev = 1): DocSnapshot => {
   const { frontmatter } = normalizeFrontmatter({
-    id: DOC_ID_VALUE,
     title: '示例文章',
     summary: '摘要',
     tags: ['架构', '检索'],
@@ -38,7 +37,7 @@ const makeSnapshot = (hashText: string, rev = 1): DocSnapshot => {
   return {
     meta: {
       id: DOC_ID,
-      path: unsafeVaultPath('notes/示例文章.md'),
+      path: unsafeVaultPath(DOC_ID_VALUE),
       title: '示例文章',
       summary: '摘要',
       tags: ['架构', '检索'],
@@ -46,7 +45,6 @@ const makeSnapshot = (hashText: string, rev = 1): DocSnapshot => {
       created: '2026-11-11T10:00:00Z',
       updated: '2026-11-11T10:00:00Z',
       rev: { rev, hash: unsafeContentHash(hashText) },
-      flags: { needsAdoption: false, idInvalid: false, duplicateId: false },
       conflictOf: null,
     },
     frontmatter,
@@ -182,7 +180,7 @@ void test('撤销替换：正文已被人工改过时拒绝静默覆盖', async 
       };
       return Promise.resolve({ snapshot: current, merged: true, conflict: null });
     },
-    create: (input) => Promise.resolve(input.id === undefined ? current : current),
+    create: () => Promise.resolve(current),
     remove: () => Promise.resolve('system' as const),
   };
 
@@ -224,7 +222,6 @@ void test('撤销删除：按原 id / 路径 / 正文 / frontmatter 重建', asy
 
   if (applied.undo.kind !== 'restore-deleted') throw new Error('撤销类型应为重建');
   const input = applied.undo.input;
-  assert.equal(String(input.id), DOC_ID_VALUE);
   assert.equal(String(input.path), 'notes/示例文章.md');
   assert.equal(input.text, '旧正文');
   assert.equal(input.title, '示例文章');
@@ -235,7 +232,7 @@ void test('撤销删除：按原 id / 路径 / 正文 / frontmatter 重建', asy
   const notice = await undoProposalDoc(docs, applied.undo);
   assert.match(notice, /已恢复/);
   assert.equal(calls.create.length, 1);
-  assert.equal(String(calls.create[0]?.id), DOC_ID_VALUE);
+  assert.equal(String(calls.create[0]?.path), 'notes/示例文章.md');
 });
 
 void test('撤销新建：删除刚创建的文件', async () => {

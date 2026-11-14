@@ -13,7 +13,6 @@ const BROKEN = 'notes/broken.md';
 
 const VALID_TEXT = [
   '---',
-  `id: ${createUlid(1_700_000_000_000)}`,
   'title: 正常文档',
   'tags:',
   '  - 笔记',
@@ -58,30 +57,22 @@ const setup = (
   return { vault, service, events };
 };
 
-void test('YAML 语法非法的 frontmatter 不炸穿整库：其余文档照常可读', async () => {
+void test('YAML 语法非法的 frontmatter 不炸穿整库：所有 .md 仍按路径登记', async () => {
   silentLog.warnings.length = 0;
   const { service } = setup({ [VALID]: VALID_TEXT, [BROKEN]: BROKEN_TEXT });
 
   const docs = await service.list();
 
-  assert.equal(docs.length, 1);
-  const first = docs[0];
-  assert.ok(first !== undefined);
-  assert.equal(first.title, '正常文档');
-  await assert.doesNotReject(service.read(first.id));
-});
-
-void test('坏 YAML 文档被跳过并输出可诊断告警', async () => {
-  silentLog.warnings.length = 0;
-  const { service } = setup({ [BROKEN]: BROKEN_TEXT });
-
-  const docs = await service.list();
-
-  assert.deepEqual(docs, []);
-  assert.ok(
-    silentLog.warnings.some((line) => line.includes('frontmatter YAML 无法解析') && line.includes(BROKEN)),
-    `应包含坏 YAML 专属告警，实际：${JSON.stringify(silentLog.warnings)}`,
-  );
+  assert.equal(docs.length, 2);
+  const valid = docs.find((doc) => String(doc.path) === VALID);
+  assert.ok(valid !== undefined);
+  assert.equal(valid.title, '正常文档');
+  assert.equal(String(valid.id), VALID);
+  const broken = docs.find((doc) => String(doc.path) === BROKEN);
+  assert.ok(broken !== undefined);
+  assert.equal(String(broken.id), BROKEN);
+  await assert.doesNotReject(service.read(valid.id));
+  await assert.doesNotReject(service.read(broken.id));
 });
 
 void test('坏 YAML 文档在磁盘上保持逐字节原样（内核不改写）', async () => {
@@ -94,7 +85,7 @@ void test('坏 YAML 文档在磁盘上保持逐字节原样（内核不改写）
   assert.equal(vault.dump()[BROKEN], BROKEN_TEXT);
 });
 
-void test('frontmatter 解析为非对象（列表/标量）按无 id 跳过，不抛错', async () => {
+void test('frontmatter 解析为非对象（列表/标量）时按路径登记，不抛错', async () => {
   silentLog.warnings.length = 0;
   const listDoc = ['---', '- a', '- b', '---', '正文'].join('\n');
   const scalarDoc = ['---', '只是一个字符串', '---', '正文'].join('\n');
@@ -102,11 +93,14 @@ void test('frontmatter 解析为非对象（列表/标量）按无 id 跳过，�
 
   const docs = await service.list();
 
-  assert.deepEqual(docs, []);
+  assert.deepEqual(
+    docs.map((doc) => String(doc.path)),
+    ['notes/list.md', 'notes/scalar.md'],
+  );
   assert.ok(!silentLog.warnings.some((line) => line.includes('YAML 无法解析')));
 });
 
-void test('外部把合法文档改坏 YAML 后，后续刷新跳过该文档且整库仍可用', async () => {
+void test('外部把合法文档改坏 YAML 后，刷新仍按路径登记且整库可用', async () => {
   silentLog.warnings.length = 0;
   const { vault, service } = setup({ [VALID]: VALID_TEXT });
 
@@ -117,11 +111,14 @@ void test('外部把合法文档改坏 YAML 后，后续刷新跳过该文档且
   await assert.doesNotReject(service.refresh());
 
   const after = await service.list();
-  assert.equal(after.length, 1);
-  assert.equal(after[0]?.path, VALID);
+  assert.deepEqual(
+    after.map((doc) => String(doc.path)),
+    [BROKEN, VALID],
+  );
+  await assert.doesNotReject(service.read(after[0]!.id));
 });
 
-void test('外部改名（同 id 换路径）后目录跟随迁移，旧路径不再广播 removed', async () => {
+void test('rename 后身份换成新路径，广播 renamed 且携带 from', async () => {
   silentLog.warnings.length = 0;
   const { vault, service, events } = setup({ [VALID]: VALID_TEXT });
   const changes: DocChange[] = [];
@@ -135,36 +132,51 @@ void test('外部改名（同 id 换路径）后目录跟随迁移，旧路径�
   assert.ok(meta !== undefined);
 
   changes.length = 0;
-  vault.writeRaw('notes/renamed.md', VALID_TEXT);
-  vault.removeRaw(VALID);
-  await service.refresh();
+  const next = createPathTools().normalize('notes/renamed.md');
+  await service.rename(meta.id, next, { base: meta.rev, intent: 'user' });
 
   const after = await service.list();
   assert.equal(after.length, 1);
   assert.ok(after[0] !== undefined);
   assert.equal(after[0].path, 'notes/renamed.md');
+  assert.equal(String(after[0].id), 'notes/renamed.md');
   assert.equal(after[0].rev.rev, meta.rev.rev);
   assert.equal(after[0].rev.hash, meta.rev.hash);
+  assert.equal(vault.dump()[VALID], undefined, '旧路径不应残留');
   assert.ok(
-    changes.some((change) => change.kind === 'renamed' && change.path === 'notes/renamed.md'),
-    `应广播 renamed，实际：${JSON.stringify(changes)}`,
+    changes.some(
+      (change) =>
+        change.kind === 'renamed' &&
+        change.path === 'notes/renamed.md' &&
+        String(change.from) === String(meta.id) &&
+        String(change.id) === 'notes/renamed.md',
+    ),
+    `应广播带 from 的 renamed，实际：${JSON.stringify(changes)}`,
   );
   assert.ok(!changes.some((change) => change.kind === 'removed'), `不应广播 removed：${JSON.stringify(changes)}`);
 
-  const snapshot = await service.read(meta.id);
+  const snapshot = await service.read(after[0].id);
   assert.equal(snapshot.meta.path, 'notes/renamed.md');
+  await assert.rejects(
+    () => service.read(meta.id),
+    (error: unknown) => error instanceof EmberError && error.code === 'doc_not_found',
+    '旧路径身份改名后不应存在',
+  );
   subscription.dispose();
 });
 
-void test('同名 id 的两个路径同时存在时仍按重复 id 处理，不互相抢占', async () => {
+void test('同一内容放在不同路径时各自登记为独立文档，身份互不覆盖', async () => {
   silentLog.warnings.length = 0;
   const { service } = setup({ 'notes/a.md': VALID_TEXT, 'notes/b.md': VALID_TEXT });
 
   const docs = await service.list();
 
-  assert.equal(docs.length, 1);
-  assert.equal(docs[0]?.path, 'notes/a.md');
-  assert.ok(silentLog.warnings.some((line) => line.includes('检测到重复 id')));
+  assert.deepEqual(
+    docs.map((doc) => String(doc.id)),
+    ['notes/a.md', 'notes/b.md'],
+  );
+  assert.equal(String(docs[0]?.id), 'notes/a.md');
+  assert.equal(String(docs[1]?.id), 'notes/b.md');
 });
 
 void test('update 重写整份 frontmatter 时不丢失取值非法的键', async () => {
@@ -315,7 +327,7 @@ void test('并发 update 改动重叠时保留磁盘版本并落冲突副本，�
   assert.ok(all.includes('同一行改为 B'), '后写入的内容必须保留在冲突副本里');
 });
 
-void test('rename 先入队、update 后入队：update 落在新路径且 rev 只 +1', async () => {
+void test('rename 后旧身份失效：旧 id 更新报 doc_not_found，新 id 更新 rev 只 +1', async () => {
   const vault = createMemoryVault({ files: { [VALID]: VALID_TEXT } });
   const pathTools = createPathTools();
   const { service } = createServiceWith(vault);
@@ -323,12 +335,19 @@ void test('rename 先入队、update 后入队：update 落在新路径且 rev �
   assert.ok(meta !== undefined);
   const next = pathTools.normalize('notes/renamed.md');
 
-  const [renamed, updated] = await Promise.all([
-    service.rename(meta.id, next, { base: meta.rev, intent: 'user' }),
-    service.update(meta.id, { body: '改名后的正文' }, { base: meta.rev, intent: 'user' }),
-  ]);
+  const renamed = await service.rename(meta.id, next, { base: meta.rev, intent: 'user' });
+  assert.equal(String(renamed.snapshot.meta.id), 'notes/renamed.md');
+  await assert.rejects(
+    () => service.update(meta.id, { body: '旧身份写入' }, { base: renamed.snapshot.meta.rev, intent: 'user' }),
+    (error: unknown) => error instanceof EmberError && error.code === 'doc_not_found',
+    '改名后旧路径不再是文档身份',
+  );
 
-  assert.equal(renamed.snapshot.meta.path, next);
+  const updated = await service.update(
+    renamed.snapshot.meta.id,
+    { body: '改名后的正文' },
+    { base: renamed.snapshot.meta.rev, intent: 'user' },
+  );
   assert.equal(updated.merged, true);
   assert.equal(vault.dump()[VALID], undefined, '旧路径不应残留');
   assert.ok((vault.dump()['notes/renamed.md'] ?? '').includes('改名后的正文'));

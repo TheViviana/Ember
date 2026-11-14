@@ -1,5 +1,5 @@
-import type { VaultPath } from './ids.ts';
-import { unsafeVaultPath } from './ids.ts';
+import type { VaultPath } from './brands.ts';
+import { unsafeVaultPath } from './brands.ts';
 import { err, ok, type Result } from './result.ts';
 
 export type PathError =

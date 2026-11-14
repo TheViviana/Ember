@@ -44,7 +44,11 @@ const defaultSettings = (vaultId: VaultId, vaultName: string, createdAt: string)
 });
 
 /** 读取时只做归一化，不回写：未知键、未知 ui 键原样保留（P2） */
-const normalizeSettings = (raw: unknown, fallback: VaultSettings): VaultSettings => {
+const normalizeSettings = (
+  raw: unknown,
+  fallback: VaultSettings,
+  onDroppedOverride?: (key: string, value: string) => void,
+): VaultSettings => {
   if (!isRecord(raw)) return fallback;
 
   const rawVault = isRecord(raw['vault']) ? raw['vault'] : {};
@@ -81,8 +85,10 @@ const normalizeSettings = (raw: unknown, fallback: VaultSettings): VaultSettings
   const linkOverrides: Record<string, DocId> = {};
   if (isRecord(raw['linkOverrides'])) {
     for (const [key, value] of Object.entries(raw['linkOverrides'])) {
-      const docId = typeof value === 'string' ? asDocId(value) : null;
+      if (typeof value !== 'string') continue;
+      const docId = asDocId(value);
       if (docId !== null) linkOverrides[key] = docId;
+      else onDroppedOverride?.(key, value);
     }
   }
 
@@ -173,7 +179,9 @@ export const createSettingsService = (options: SettingsServiceOptions): Settings
       options.log.warn('settings.json 解析失败，使用默认设置（不覆盖磁盘）', { path: String(path) });
       return fallback();
     }
-    return normalizeSettings(parsed, fallback());
+    return normalizeSettings(parsed, fallback(), (key, value) => {
+      options.log.warn('linkOverrides 指向的旧 id 无法解析为文档路径，已丢弃', { key, value });
+    });
   };
 
   const load = async (): Promise<VaultSettings> => {

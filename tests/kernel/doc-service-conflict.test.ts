@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { asDocId, createUlid, unsafeVaultPath, type DocId } from '#doc-model';
+import { asDocId, unsafeVaultPath, type DocId } from '#doc-model';
 import { createDocService } from '../../src/kernel/doc-service.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
 import { createEventBus } from '../../src/kernel/events.ts';
@@ -122,13 +122,12 @@ const setup = (
   return { vault, service };
 };
 
-const originalText = (id: string, body: string): string =>
-  `---\nid: ${id}\ntitle: 原文\ncreated: 2026-01-01T00:00:00Z\n---\n${body}`;
+const originalText = (body: string): string =>
+  `---\ntitle: 原文\ncreated: 2026-01-01T00:00:00Z\n---\n${body}`;
 
-const copyText = (id: string, of: string, body: string): string =>
+const copyText = (of: string, body: string): string =>
   [
     '---',
-    `id: ${id}`,
     'title: 副本标题',
     'summary: 副本简介',
     'tags:',
@@ -169,21 +168,21 @@ const codeOf = async (run: () => Promise<unknown>): Promise<string> => {
 const snapshot = (vault: ByteVault): Readonly<Record<string, string>> =>
   Object.fromEntries([...vault.files].map(([path, bytes]) => [path, decoder.decode(bytes)]));
 
-const makeId = (seed: number): DocId => {
-  const id = asDocId(createUlid(seed));
-  if (id === null) throw new Error(`不是合法 ULID：${createUlid(seed)}`);
+const docIdOf = (path: string): DocId => {
+  const id = asDocId(path);
+  if (id === null) throw new Error(`不是合法文档路径：${path}`);
   return id;
 };
 
 const seed = (): { readonly originalId: DocId; readonly copyId: DocId; readonly files: Record<string, string> } => {
-  const originalId = makeId(1_700_010_000_000);
-  const copyId = makeId(1_700_010_001_000);
+  const originalId = docIdOf(ORIGINAL_PATH);
+  const copyId = docIdOf(COPY_PATH);
   return {
     originalId,
     copyId,
     files: {
-      [ORIGINAL_PATH]: originalText(originalId, '原文正文'),
-      [COPY_PATH]: copyText(copyId, originalId, '副本正文'),
+      [ORIGINAL_PATH]: originalText('原文正文'),
+      [COPY_PATH]: copyText(ORIGINAL_PATH, '副本正文'),
     },
   };
 };
@@ -214,9 +213,9 @@ void test('启动扫描即可发现冲突，不依赖运行时 doc:conflict 事�
 });
 
 void test('原文缺失时为孤儿冲突：采用被拒绝且零写入，另存可清除标记', async () => {
-  const originalId = makeId(1_700_020_000_000);
-  const copyId = makeId(1_700_020_001_000);
-  const { vault, service } = setup({ [COPY_PATH]: copyText(copyId, originalId, '孤儿正文') });
+  const originalId = docIdOf('notes/已删除的原文.md');
+  const copyId = docIdOf(COPY_PATH);
+  const { vault, service } = setup({ [COPY_PATH]: copyText(String(originalId), '孤儿正文') });
   await service.refresh();
   const metas = await service.list();
   const copy = findCopy(metas);
@@ -237,14 +236,14 @@ void test('原文缺失时为孤儿冲突：采用被拒绝且零写入，另存
 });
 
 void test('原文基线过期：采用抛 stale_revision 且原文与副本都不变', async () => {
-  const { originalId, copyId, files } = seed();
+  const { copyId, files } = seed();
   const { vault, service } = setup(files);
   await service.refresh();
   const metas = await service.list();
   const copy = findCopy(metas);
   const original = findOriginal(metas);
 
-  vault.writeRaw(ORIGINAL_PATH, originalText(String(originalId), '外部改写的原文'));
+  vault.writeRaw(ORIGINAL_PATH, originalText('外部改写的原文'));
   const before = snapshot(vault);
 
   const code = await codeOf(() =>
@@ -262,7 +261,7 @@ void test('副本基线过期：采用抛 stale_revision 且不写原文', async
   const copy = findCopy(metas);
   const original = findOriginal(metas);
 
-  vault.writeRaw(COPY_PATH, copyText(String(copyId), String(originalId), '外部改写的副本'));
+  vault.writeRaw(COPY_PATH, copyText(String(originalId), '外部改写的副本'));
   const before = snapshot(vault);
 
   const code = await codeOf(() =>

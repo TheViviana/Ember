@@ -37,9 +37,6 @@ interface MoveDrag {
 
 const KIND_ORDER: readonly HealthIssueKind[] = [
   'broken_frontmatter',
-  'missing_id',
-  'invalid_id',
-  'duplicate_id',
   'non_utf8',
   'oversize',
   'markdown_extension',
@@ -51,9 +48,6 @@ const KIND_ORDER: readonly HealthIssueKind[] = [
 
 const KIND_LABEL: Readonly<Record<HealthIssueKind, string>> = {
   broken_frontmatter: '坏 frontmatter',
-  missing_id: '缺少 id',
-  invalid_id: '非法 id',
-  duplicate_id: '重复 id',
   non_utf8: '非 UTF-8',
   oversize: '超限文件',
   markdown_extension: '.markdown 漏收录',
@@ -72,15 +66,10 @@ interface ConfirmState {
   readonly issue: HealthIssue;
 }
 
-const confirmText = (kind: HealthIssue['fix']): string => {
-  if (kind === 'adopt') return '将为该文件补写 id 与 created/updated，正文保持不变。';
-  return '将把 .markdown 改名为 .md，文件内容保持不变；目标已存在时不覆盖。';
-};
+const confirmText = (_kind: HealthIssue['fix']): string =>
+  '将把 .markdown 改名为 .md，文件内容保持不变；目标已存在时不覆盖。';
 
-const buttonLabel = (kind: HealthIssue['fix']): string => {
-  if (kind === 'adopt') return '确认纳入';
-  return '确认改名';
-};
+const buttonLabel = (_kind: HealthIssue['fix']): string => '确认改名';
 
 export interface HealthPanelProps {
   readonly onClose: () => void;
@@ -240,13 +229,8 @@ export const HealthPanel = ({ onClose }: HealthPanelProps): ReactElement => {
       setBusy(true);
       setMessage(null);
       void (async (): Promise<void> => {
-        if (issue.fix === 'adopt') {
-          await kernel.health.adopt(issue.path, hash);
-          setMessage({ tone: 'ok', text: `${String(issue.path)} 已纳入库管理。` });
-        } else {
-          const target = await kernel.health.renameMarkdown(issue.path, hash);
-          setMessage({ tone: 'ok', text: `${String(issue.path)} 已改名为 ${String(target)}。` });
-        }
+        const target = await kernel.health.renameMarkdown(issue.path, hash);
+        setMessage({ tone: 'ok', text: `${String(issue.path)} 已改名为 ${String(target)}。` });
         await runScan();
       })()
         .catch((cause: unknown) => {
@@ -394,7 +378,7 @@ export const HealthPanel = ({ onClose }: HealthPanelProps): ReactElement => {
                             setConfirm({ issue });
                           }}
                         >
-                          {issue.fix === 'adopt' ? '纳入库管理' : '改名为 .md'}
+                          {'改名为 .md'}
                         </button>
                       </div>
                     ) : null}

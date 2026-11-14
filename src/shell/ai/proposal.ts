@@ -143,7 +143,6 @@ export const applyProposalDoc = async (
   }
   const input: CreateDocInput = {
     path: current.meta.path,
-    id: current.meta.id,
     title: current.frontmatter.title ?? proposal.title,
     text: splitFrontmatter(current.text).body,
     tags: current.frontmatter.tags,

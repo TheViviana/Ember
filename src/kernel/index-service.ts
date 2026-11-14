@@ -379,6 +379,10 @@ export const createIndexService = (options: IndexServiceOptions): IndexService =
 
   // doc:changed → 增量维护
   docs.watch((change) => {
+    // 身份即路径：改名会换 id，必须先把旧路径的索引摘掉，再按新路径重建
+    if (change.kind === 'renamed' && change.from !== undefined) {
+      dropDoc(change.from);
+    }
     if (change.kind === 'removed') {
       dropDoc(change.id);
       emit({ kind: 'updated', changedDocIds: [change.id] });

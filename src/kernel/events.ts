@@ -3,7 +3,13 @@ import type { Disposable, DocChange, DocRevision, VaultGuardState, VaultSettings
 
 /** 内核事件总线的事件表（kernel-contract §7） */
 export interface KernelEventMap {
-  'doc:changed': { id: DocId; path: VaultPath; kind: DocChange['kind']; revision: DocRevision };
+  'doc:changed': {
+    id: DocId;
+    path: VaultPath;
+    kind: DocChange['kind'];
+    from?: DocId;
+    revision: DocRevision;
+  };
   'doc:conflict': { id: DocId; copyId: DocId; copyPath: VaultPath };
   'index:updated': { changedDocIds: readonly DocId[] };
   'command:executed': { id: CommandId; ok: boolean };

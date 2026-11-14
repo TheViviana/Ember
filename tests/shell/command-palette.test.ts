@@ -48,16 +48,16 @@ void test('命令作用域文案', () => {
 });
 
 void test('编辑器命令参数：没有活动文档时不构造参数', () => {
-  const docId = asDocId('01J9Z6Q2M8V4N7K3R5T1W9X0AB');
+  const docId = asDocId('notes/示例.md');
   assert.notEqual(docId, null);
   assert.deepEqual(editorArgsFor(docId), { docId });
   assert.equal(editorArgsFor(null), null);
 });
 
 void test('从命令参数中取回 docId，非法输入返回 null', () => {
-  const docId = asDocId('01J9Z6Q2M8V4N7K3R5T1W9X0AB');
+  const docId = asDocId('notes/示例.md');
   assert.equal(commandDocId({ docId }), docId);
-  assert.equal(commandDocId({ docId: 'not-a-ulid' }), null);
+  assert.equal(commandDocId({ docId: 'notes/无扩展名' }), null);
   assert.equal(commandDocId({}), null);
   assert.equal(commandDocId(null), null);
   assert.equal(commandDocId('doc'), null);

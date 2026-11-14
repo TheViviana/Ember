@@ -9,7 +9,7 @@ import type { DocSnapshot, WriteOutcome } from '../../src/kernel/types.ts';
 import { createFloatPersister } from '../../src/shell/editor/float-persist.ts';
 import type { MetaField } from '../../src/shell/editor/float-editor-model.ts';
 
-const DOC_ID: DocId = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V2');
+const DOC_ID: DocId = unsafeDocId('笔记/测试.md');
 
 const snapshotOf = (body: string, rev: number): DocSnapshot => ({
   meta: {
@@ -22,11 +22,10 @@ const snapshotOf = (body: string, rev: number): DocSnapshot => ({
     created: '2026-01-01T00:00:00Z',
     updated: '2026-01-01T00:00:00Z',
     rev: { rev, hash: unsafeContentHash('hash') },
-    flags: { needsAdoption: false, idInvalid: false, duplicateId: false },
     conflictOf: null,
   },
   frontmatter: {
-    id: String(DOC_ID),
+    id: null,
     title: '测试',
     summary: null,
     tags: [],

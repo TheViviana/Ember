@@ -22,7 +22,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::error::{VaultError, VaultResult};
-use crate::vault::{clock, paths, ulid, Vault};
+use crate::vault::{clock, paths, Vault};
 
 const FORMAT: &str = "ember-export";
 const FORMAT_VERSION: u64 = 1;
@@ -420,15 +420,12 @@ fn write_package(
     Ok(stats)
 }
 
-/// manifest 里的文档条目：id/title/tags/aliases 来自 frontmatter，
-/// 缺 id 时省略（预检会把它列为 warn，而不是伪造一个 id）。
+/// manifest 里的文档条目：身份即库内相对路径；title/tags/aliases 来自 frontmatter
 fn document_entry(source: &Path, target: &str, copied: &Copied) -> Value {
     let meta = read_doc_meta(source);
     let mut map = Map::new();
     map.insert("path".to_string(), json!(target));
-    if let Some(id) = meta.id {
-        map.insert("id".to_string(), json!(id));
-    }
+    map.insert("id".to_string(), json!(target));
     let title = meta
         .title
         .unwrap_or_else(|| file_stem(target).unwrap_or_else(|| "未命名".to_string()));
@@ -520,43 +517,14 @@ pub fn inspect(directory: &str) -> VaultResult<InspectReport> {
         .cloned()
         .unwrap_or_default();
 
-    // 文档身份：缺失 warn、非法 conflict、重复 conflict
-    let mut id_counts: HashMap<String, usize> = HashMap::new();
+    // 文档身份：路径必须存在；重复路径在下面的 declared 校验里按冲突处理
     for item in &documents {
-        let Some(path) = item.get("path").and_then(Value::as_str) else {
+        if item.get("path").and_then(Value::as_str).is_none() {
             issues.push(issue(
                 "error",
                 "invalid_manifest",
                 None,
                 "documents[] 条目缺少 path".to_string(),
-            ));
-            continue;
-        };
-        match item.get("id").and_then(Value::as_str) {
-            None => {
-                issues.push(issue(
-                    "warn",
-                    "missing_id",
-                    Some(path.to_string()),
-                    "文档没有 frontmatter id（adoption 前不能按身份去重）".to_string(),
-                ));
-            }
-            Some(id) if !ulid::is_ulid(id) => issues.push(issue(
-                "conflict",
-                "invalid_id",
-                Some(path.to_string()),
-                format!("id 不是合法 ULID：{id}"),
-            )),
-            Some(id) => *id_counts.entry(id.to_string()).or_insert(0) += 1,
-        }
-    }
-    for (id, count) in id_counts {
-        if count > 1 {
-            issues.push(issue(
-                "conflict",
-                "duplicate_id",
-                None,
-                format!("同一 id 出现 {count} 次：{id}"),
             ));
         }
     }
@@ -1213,7 +1181,7 @@ mod tests {
             serde_json::from_slice(&fs::read(dest.join(MANIFEST)).unwrap()).unwrap();
         assert_eq!(manifest["format"], FORMAT);
         assert_eq!(manifest["formatVersion"], FORMAT_VERSION);
-        assert_eq!(manifest["documents"][0]["id"], "01JB8ZQ3K4M5N6P7Q8R9S0T1V2");
+        assert_eq!(manifest["documents"][0]["id"], "docs/notes/方案.md");
         assert_eq!(manifest["documents"][0]["title"], "方案");
         assert_eq!(manifest["documents"][0]["tags"][0], "研发");
         assert_eq!(manifest["workbench"]["canvas"][0], "01JCANVAS");
@@ -1366,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_flags_duplicate_ids_and_case_collisions() {
+    fn inspect_flags_duplicate_paths_and_case_collisions() {
         let temp = TempVault::new();
         temp.vault.write("notes/a.md", DOC.as_bytes(), "user").unwrap();
         temp.vault.write("notes/b.md", DOC.as_bytes(), "user").unwrap();
@@ -1376,13 +1344,22 @@ mod tests {
         let mut manifest: Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         let docs = manifest["documents"].as_array_mut().unwrap();
-        let first_id = docs[0]["id"].clone();
-        docs[1]["id"] = first_id;
+        let first_path = docs[0]["path"].clone();
+        docs[1]["path"] = first_path;
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+        let report = inspect(dest.to_str().unwrap()).unwrap();
+        assert!(report.issues.iter().any(|item| item.code == "duplicate_path"));
+        assert!(report.restorable, "冲突不算致命错误：{:?}", report.issues);
+
+        // 身份即路径：大小写折叠后的同名路径仍须单独报 case_collision
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let docs = manifest["documents"].as_array_mut().unwrap();
         docs[1]["path"] = json!("docs/Notes/A.md");
         fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 
         let report = inspect(dest.to_str().unwrap()).unwrap();
-        assert!(report.issues.iter().any(|item| item.code == "duplicate_id"));
         assert!(report.issues.iter().any(|item| item.code == "case_collision"));
         assert!(report.restorable, "冲突不算致命错误：{:?}", report.issues);
     }

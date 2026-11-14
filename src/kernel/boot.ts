@@ -108,6 +108,10 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
     log,
     ...(options.now ? { now: options.now } : {}),
   });
+  // 身份即路径：改名后让所有画布节点跟着换 docId，避免引用断链
+  docs.setRenameHook(async (from, to) => {
+    await canvas.rewriteDocRefs(from, to);
+  });
 
   const context = createKernelContext({
     env,

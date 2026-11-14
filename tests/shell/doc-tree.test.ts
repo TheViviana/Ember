@@ -14,7 +14,7 @@ import {
 import { unsafeContentHash, unsafeDocId, unsafeVaultPath } from '../../packages/doc-model/src/ids.ts';
 
 const doc = (path: string, title: string = path): DocMeta => ({
-  id: unsafeDocId(`01J8ZQ3K4M5N6P7Q8R9S0T${String(path.length).padStart(4, '0')}`),
+  id: unsafeDocId(path),
   path: unsafeVaultPath(path),
   title,
   summary: '',
@@ -23,7 +23,6 @@ const doc = (path: string, title: string = path): DocMeta => ({
   created: '2026-01-01T00:00:00.000Z',
   updated: '2026-01-01T00:00:00.000Z',
   rev: { rev: 1, hash: unsafeContentHash('h') },
-  flags: { needsAdoption: false, idInvalid: false, duplicateId: false },
   conflictOf: null,
 });
 

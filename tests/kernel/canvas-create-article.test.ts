@@ -51,10 +51,11 @@ void test('正常路径：落盘 notes/标题.md 并新增一个 doc 节点', as
   const result = await kernel.context.canvas.createArticle(input);
 
   assert.equal(String(result.snapshot.meta.path), 'notes/验收文章.md');
+  assert.equal(String(result.snapshot.meta.id), 'notes/验收文章.md');
   const text = vault.dump()['notes/验收文章.md'];
   assert.ok(text !== undefined, '磁盘上应生成 .md');
   assert.match(text, /title: 验收文章/);
-  assert.ok(text.includes(`id: ${String(result.snapshot.meta.id)}`), 'frontmatter 应写入文档 id');
+  assert.doesNotMatch(text, /^id:/m, '身份即路径，frontmatter 不再写 id');
 
   assert.equal(result.scene.nodes.length, 1);
   const node = result.scene.nodes[0];

@@ -6,7 +6,7 @@ import {
   type CanvasNode,
   type CanvasScene,
 } from '#canvas-engine';
-import { asCanvasId } from '#doc-model';
+import { asCanvasId, unsafeDocId } from '#doc-model';
 import type { CanvasClipboard } from '../../src/shell/canvas/clipboard.ts';
 import { planCommand, planEdgeLabel, type MenuTarget } from '../../src/shell/canvas/commands.ts';
 import { buildCanvasMenu, type CanvasMenuItem } from '../../src/shell/canvas/menu-model.ts';
@@ -457,9 +457,7 @@ void test('菜单完整性：每个条目执行后都产生合法变更，不存
     makeNode('g', { kind: 'group', z: 0 }),
     makeNode('m', { groupId: 'g', z: 1 }),
   ]);
-  const doc = makeScene([
-    makeNode('d', { kind: 'doc', docId: '01M74JZW7CQFP1CY70HTZFTYZD' as CanvasNode['docId'] }),
-  ]);
+  const doc = makeScene([makeNode('d', { kind: 'doc', docId: unsafeDocId('notes/示例.md') })]);
   const clipboard: CanvasClipboard = { nodes: [makeNode('n')], edges: [] };
 
   const cases: readonly MenuCase[] = [
@@ -537,7 +535,7 @@ void test('菜单完整性：每个条目执行后都产生合法变更，不存
 });
 
 void test('S7：空白菜单可一步新建文章，doc 节点有浮窗入口且不出现无 docId 的死条目', () => {
-  const scene = makeScene([makeNode('d', { kind: 'doc', docId: '01M74JZW7CQFP1CY70HTZFTYZD' as CanvasNode['docId'] })]);
+  const scene = makeScene([makeNode('d', { kind: 'doc', docId: unsafeDocId('notes/示例.md') })]);
   const emptyTarget: MenuTarget = { kind: 'empty', point: { x: 20, y: 40 } };
 
   const emptyMenu = buildCanvasMenu({ target: emptyTarget, scene, clipboard: null });

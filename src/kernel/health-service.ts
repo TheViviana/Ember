@@ -1,17 +1,15 @@
-import { asDocId, type ContentHash, type VaultPath } from '#doc-model';
+import { isUlid, type ContentHash, type VaultPath } from '#doc-model';
 import { parseCanvasDocument } from '#canvas-engine';
 import { hashBytes, isUtf8, parseDocText, utcNow } from './doc-text.ts';
 import { EmberError, toErrorText } from './errors.ts';
 import type { DocServiceInternal } from './doc-service.ts';
 import type { PathTools } from './paths.ts';
 import type { VaultPort, VaultScanEntry } from './ports.ts';
-import type { DocSnapshot, HealthIssue, HealthReport, Logger } from './types.ts';
+import type { HealthIssue, HealthReport, Logger } from './types.ts';
 
 export interface HealthService {
   /** 只读扫描；全程不写盘 */
   scan(): Promise<HealthReport>;
-  /** 委托 DocService.adopt；参数为扫描报告中的 path + hash */
-  adopt(path: VaultPath, expectedHash: ContentHash): Promise<DocSnapshot>;
   /** 校验 hash 与目标不存在后改名，再 docs.refresh()；不改文件内容 */
   renameMarkdown(path: VaultPath, expectedHash: ContentHash): Promise<VaultPath>;
 }
@@ -149,7 +147,7 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
       const hash = typeof version.hash === 'string' ? version.hash : '';
       const size = typeof version.size === 'number' ? version.size : -1;
       if (
-        asDocId(versionId) === null ||
+        !isUlid(versionId) ||
         !HASH_PATTERN.test(hash) ||
         typeof version.path !== 'string' ||
         typeof version.at !== 'string' ||
@@ -256,8 +254,6 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
         .filter((entry) => entry.kind === 'file')
         .map((entry) => [String(entry.path), entry.size] as const),
     );
-    const ids = new Map<string, string[]>();
-    const docHashes = new Map<string, ContentHash>();
     let documents = 0;
 
     for (const entry of inventory) {
@@ -299,7 +295,6 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
       const bytes = await port.read(entry.path);
       if (bytes === null) continue;
       const hash = await hashBytes(bytes);
-      docHashes.set(String(entry.path), hash);
       if (!isUtf8(bytes)) {
         issues.push(issue('non_utf8', entry.path, '文件不是合法 UTF-8', { hash }));
         continue;
@@ -311,44 +306,7 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
         );
         continue;
       }
-      const rawId = parsed.frontmatter.id;
-      const invalidId = parsed.issues.some((item) => item.code === 'id_invalid');
-      if (invalidId) {
-        const detailId = parsed.frontmatter.extra['id'];
-        issues.push(
-          issue(
-            'invalid_id',
-            entry.path,
-            `id 格式非法（必须为 26 位 ULID）：${typeof detailId === 'string' ? detailId : ''}`,
-            { hash },
-          ),
-        );
-      } else if (rawId === null) {
-        issues.push(
-          issue('missing_id', entry.path, '缺少 id，可纳入库管理', { hash, fix: 'adopt' }),
-        );
-      } else if (asDocId(rawId) === null) {
-        issues.push(
-          issue('invalid_id', entry.path, `id 格式非法：${rawId}`, { hash }),
-        );
-      } else {
-        const bucket = ids.get(rawId);
-        if (bucket === undefined) ids.set(rawId, [String(entry.path)]);
-        else bucket.push(String(entry.path));
-      }
       await checkAssets(entry.path, parsed.body, issues);
-    }
-
-    for (const [id, docPaths] of ids) {
-      if (docPaths.length < 2) continue;
-      const sorted = [...docPaths].sort((left, right) => left.localeCompare(right));
-      for (const path of sorted) {
-        issues.push(
-          issue('duplicate_id', paths.normalize(path), `id ${id} 被多个文档使用：${sorted.join('、')}`, {
-            hash: docHashes.get(path) ?? null,
-          }),
-        );
-      }
     }
 
     return {
@@ -360,8 +318,6 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
 
   return {
     scan,
-
-    adopt: async (path, expectedHash) => docs.adopt(path, expectedHash),
 
     renameMarkdown: async (path, expectedHash) => {
       if (port.readonlyMode) {

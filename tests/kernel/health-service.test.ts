@@ -62,63 +62,9 @@ void test('坏 YAML 可被发现且不可修复', async () => {
   assert.equal(issue.path, 'notes/bad.md');
   assert.equal(issue.fix, null);
   assert.ok(issue.hash !== null);
-  assert.equal(issuesOf(report.issues, 'missing_id').length, 0);
 });
 
-void test('缺失 id 可通过 adoption 纳入库管理，正文不变', async () => {
-  const { vault, docs, health } = setup({
-    files: { 'notes/inbox.md': '# 收集\n\n待整理正文\n' },
-  });
-
-  const report = await health.scan();
-  const issue = one(report.issues, 'missing_id');
-  assert.equal(issue.fix, 'adopt');
-  assert.equal(issue.hash === null, false);
-
-  const snapshot = await health.adopt(issue.path, issue.hash ?? assert.fail('缺少 hash'));
-  assert.match(snapshot.text, /^---\n/);
-  assert.ok(snapshot.text.includes('# 收集\n\n待整理正文'));
-
-  const listed = await docs.list();
-  assert.equal(listed.length, 1);
-  assert.equal(listed[0]?.path, 'notes/inbox.md');
-
-  const after = await health.scan();
-  assert.equal(issuesOf(after.issues, 'missing_id').length, 0);
-  assert.ok(vault.dump()['notes/inbox.md']?.includes('待整理正文'));
-});
-
-void test('非法 id 只报告，不写盘', async () => {
-  const { vault, health } = setup({ files: { 'notes/bad-id.md': docText('正文', 'id: nope') } });
-  const before = vault.dump();
-
-  const report = await health.scan();
-  const issue = one(report.issues, 'invalid_id');
-
-  assert.equal(issue.fix, null);
-  assert.deepEqual(vault.dump(), before);
-});
-
-void test('重复 id 会标出全部路径', async () => {
-  const { health } = setup({
-    files: {
-      'notes/a.md': docText('A'),
-      'notes/b.md': docText('B'),
-    },
-  });
-
-  const report = await health.scan();
-  const duplicates = issuesOf(report.issues, 'duplicate_id');
-
-  assert.equal(duplicates.length, 2);
-  for (const issue of duplicates) {
-    assert.equal(issue.fix, null);
-    assert.ok(issue.detail.includes('notes/a.md'));
-    assert.ok(issue.detail.includes('notes/b.md'));
-  }
-});
-
-void test('非 UTF-8 只报告，不产生 id 问题', async () => {
+void test('非 UTF-8 只报告，不产生 frontmatter 问题', async () => {
   const { health } = setup({
     rawFiles: { 'notes/broken.md': Uint8Array.from([0xff, 0xfe, 0x00]) },
   });
@@ -127,7 +73,6 @@ void test('非 UTF-8 只报告，不产生 id 问题', async () => {
   const issue = one(report.issues, 'non_utf8');
 
   assert.equal(issue.fix, null);
-  assert.equal(issuesOf(report.issues, 'missing_id').length, 0);
   assert.equal(issuesOf(report.issues, 'broken_frontmatter').length, 0);
 });
 
@@ -276,21 +221,6 @@ void test('扫描零写入', async () => {
   assert.deepEqual(vault.dump(), before);
 });
 
-void test('修复前文件变化则取消，零写入', async () => {
-  const path = 'notes/inbox.md';
-  const { vault, health } = setup({ files: { [path]: '# 原始\n' } });
-
-  const report = await health.scan();
-  const issue = one(report.issues, 'missing_id');
-  const hash = issue.hash ?? assert.fail('缺少 hash');
-
-  vault.writeRaw(path, '# 外部修改\n');
-  const code = await codeOf(() => health.adopt(issue.path, hash));
-
-  assert.equal(code, 'stale_revision');
-  assert.equal(vault.dump()[path], '# 外部修改\n');
-});
-
 void test('只读模式可扫描，修复被拒绝', async () => {
   const { health } = setup({
     readonlyMode: true,
@@ -301,13 +231,8 @@ void test('只读模式可扫描，修复被拒绝', async () => {
   });
 
   const report = await health.scan();
-  const missing = one(report.issues, 'missing_id');
   const legacy = one(report.issues, 'markdown_extension');
 
-  assert.equal(
-    await codeOf(() => health.adopt(missing.path, missing.hash ?? assert.fail('缺少 hash'))),
-    'vault_locked',
-  );
   assert.equal(
     await codeOf(() => health.renameMarkdown(legacy.path, legacy.hash ?? assert.fail('缺少 hash'))),
     'vault_locked',

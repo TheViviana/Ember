@@ -14,15 +14,15 @@ import {
   type FloatStoreData,
 } from '../../src/shell/editor/float-store.ts';
 
-const DOC_A = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V2');
-const DOC_B = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V3');
-const DOC_C = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V4');
-const DOC_D = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V5');
-const DOC_E = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V6');
-const DOC_F = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V7');
-const DOC_G = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V8');
-const DOC_H = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1V9');
-const DOC_I = unsafeDocId('01JB8ZQ3K4M5N6P7Q8R9S0T1W2');
+const DOC_A = unsafeDocId('笔记/A.md');
+const DOC_B = unsafeDocId('笔记/B.md');
+const DOC_C = unsafeDocId('笔记/C.md');
+const DOC_D = unsafeDocId('笔记/D.md');
+const DOC_E = unsafeDocId('笔记/E.md');
+const DOC_F = unsafeDocId('笔记/F.md');
+const DOC_G = unsafeDocId('笔记/G.md');
+const DOC_H = unsafeDocId('笔记/H.md');
+const DOC_I = unsafeDocId('笔记/I.md');
 
 /** 以自定义上限构造初始状态（上限来自设置，测试不依赖全局默认值） */
 const withLimit = (limit: number): FloatStoreData => ({

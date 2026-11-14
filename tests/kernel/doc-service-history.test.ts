@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createUlid, unsafeVaultPath, type DocId } from '#doc-model';
+import { asDocId, createUlid, unsafeVaultPath, type DocId } from '#doc-model';
 import { createDocService } from '../../src/kernel/doc-service.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
 import { createEventBus } from '../../src/kernel/events.ts';
@@ -353,17 +353,19 @@ void test('纯 rename 与冲突副本创建都不记录历史', async () => {
     base: booted.rev,
     intent: 'user',
   });
-  assert.equal((await first.service.listHistory(booted.id)).length, 0, 'rename 不记内容版本');
+  const renamedId = asDocId('notes/renamed.md');
+  assert.ok(renamedId !== null);
+  assert.equal((await first.service.listHistory(renamedId)).length, 0, 'rename 不记内容版本');
 
-  const snapshot = await first.service.read(booted.id);
+  const snapshot = await first.service.read(renamedId);
   first.vault.writeRaw('notes/renamed.md', encoder.encode(docText(id, 'external\n')));
   const outcome = await first.service.update(
-    booted.id,
+    renamedId,
     { body: 'local\n' },
     { base: snapshot.meta.rev, intent: 'user' },
   );
   assert.notEqual(outcome.conflict, null);
-  assert.equal((await first.service.listHistory(booted.id)).length, 0, '冲突副本创建不记历史');
+  assert.equal((await first.service.listHistory(renamedId)).length, 0, '冲突副本创建不记历史');
 });
 
 void test('非法版本 id、缺失文件与哈希不符都拒绝预览/恢复', async () => {

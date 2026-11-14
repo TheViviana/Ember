@@ -42,7 +42,7 @@ const docId = (value: string): DocId => {
   return id;
 };
 
-const DOC_ID = docId('01M7AAD8N962VX82NDWZF662BW');
+const DOC_ID = docId('notes/示例.md');
 
 const cmdId = (value: string): CommandId => {
   const id = asCommandId(value);
