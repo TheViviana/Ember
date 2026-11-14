@@ -76,7 +76,18 @@ void test('FolderService.remove：不存在报错，空目录调用 trashDir 后
   );
 });
 
-void test('FolderService.remove：非空目录被端口拒绝（后端同样拦截）', async () => {
-  const { folders } = setup({ files: { 'notes/a.md': 'x' } });
-  await assert.rejects(folders.remove(unsafeVaultPath('notes')), /not empty/);
+void test('FolderService.remove：非空目录整体删除，文档与子目录一并消失', async () => {
+  const { vault, folders } = setup({
+    files: { 'notes/a.md': 'x', 'notes/sub/b.md': 'y' },
+    dirs: ['notes', 'notes/sub'],
+  });
+  await folders.remove(unsafeVaultPath('notes'));
+  assert.deepEqual(
+    (await vault.port.listDirs()).map((path) => String(path)),
+    [],
+  );
+  assert.deepEqual(
+    (await vault.port.list()).map((path) => String(path)),
+    [],
+  );
 });

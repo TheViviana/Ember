@@ -155,11 +155,18 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
       assertWritable();
       const target = String(path);
       if (!dirs.has(target)) return Promise.reject(new Error(`missing dir ${target}`));
-      const occupied =
-        [...files.keys()].some((file) => file.startsWith(`${target}/`)) ||
-        [...dirs].some((dir) => dir.startsWith(`${target}/`));
-      if (occupied) return Promise.reject(new Error(`dir not empty: ${target}`));
-      dirs.delete(target);
+      // 与后端一致：整个目录连同内容一次性移走（桩里就是整段删除）。
+      const prefix = `${target}/`;
+      for (const file of [...files.keys()]) {
+        if (file.startsWith(prefix)) {
+          files.delete(file);
+          mtimes.delete(file);
+          sizeOverrides.delete(file);
+        }
+      }
+      for (const dir of [...dirs]) {
+        if (dir === target || dir.startsWith(prefix)) dirs.delete(dir);
+      }
       return Promise.resolve();
     },
 

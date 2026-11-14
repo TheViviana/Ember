@@ -10,6 +10,9 @@ export interface FolderMenu {
   readonly top: number;
   readonly bottom: number;
   readonly w: number;
+  /** 确认框里展示的代价：该目录下的文章数与子文件夹数 */
+  readonly docs: number;
+  readonly dirs: number;
 }
 
 export interface FolderMenuOverlayProps {
@@ -22,7 +25,7 @@ export interface FolderMenuOverlayProps {
 }
 
 const MENU_HEIGHT = 84;
-const CONFIRM_HEIGHT = 168;
+const CONFIRM_HEIGHT = 208;
 const EFFECTIVE_BOTTOM_MARGIN = 72;
 
 /** 纵向定位：默认顶边对齐条目顶边；下方放不下时向上翻并夹在可视区内 */
@@ -92,7 +95,10 @@ export const FolderMenuOverlay = ({
       >
         <p className={styles.deleteText}>删除文件夹「{name}」？</p>
         <p className={styles.menuHint}>
-          将移入系统回收站；系统废纸篓不可用时删除失败，文件夹保持原样。
+          其中 {menu.docs} 篇文章、{menu.dirs} 个子文件夹将整体移入系统废纸篓。
+        </p>
+        <p className={styles.menuHint}>
+          此操作不可撤销；系统废纸篓不可用时删除失败，文件夹保持原样。
         </p>
         <div className={styles.deleteActions}>
           <button type="button" className={styles.deleteYes} onClick={() => onDelete(menu.path)}>

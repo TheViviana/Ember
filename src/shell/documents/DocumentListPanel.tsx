@@ -244,14 +244,17 @@ export const DocumentListPanel = ({
     const target = event.currentTarget;
     const rect = target instanceof Element ? target.getBoundingClientRect() : null;
     setCreateParent(null);
+    const prefix = `${path}/`;
     setFolderMenu({
       path,
       left: rect?.left ?? event.clientX,
       top: rect?.top ?? event.clientY,
       bottom: rect?.bottom ?? event.clientY,
       w: rect?.width ?? 220,
+      docs: documents.filter((meta) => String(meta.path).startsWith(prefix)).length,
+      dirs: folders.filter((dir) => dir.startsWith(prefix)).length,
     });
-  }, []);
+  }, [documents, folders]);
 
   const invalidateFolders = useCallback((): void => {
     // 建/删目录不产生 watcher 事件，只能由操作方主动失效清单
@@ -274,29 +277,22 @@ export const DocumentListPanel = ({
     [expandFolder, invalidateFolders, kernel],
   );
 
-  /** 删除前先在面板侧拦非空目录，避免把整棵文档树一起移进废纸篓 */
+  /** 整个目录一次入篓；失败时后端保持原样，这里只负责展示原因 */
   const removeFolder = useCallback(
     (path: string): void => {
       setFolderMenu(null);
-      const prefix = `${path}/`;
-      if (
-        documents.some((meta) => String(meta.path).startsWith(prefix)) ||
-        folders.some((dir) => dir.startsWith(prefix))
-      ) {
-        setNotice({ tone: 'error', text: '只支持删除空文件夹：请先移走其中的文档或子文件夹' });
-        return;
-      }
       void (async () => {
         try {
           await kernel.folders.remove(unsafeVaultPath(path));
           invalidateFolders();
-          setNotice({ tone: 'ok', text: `已删除文件夹 ${path}（系统回收站）` });
+          void queryClient.invalidateQueries({ queryKey: ['docs'] });
+          setNotice({ tone: 'ok', text: `已删除文件夹 ${path}（整体移入系统回收站）` });
         } catch (cause) {
           setNotice({ tone: 'error', text: `删除文件夹失败：${toErrorText(cause)}` });
         }
       })();
     },
-    [documents, folders, invalidateFolders, kernel],
+    [invalidateFolders, kernel, queryClient],
   );
 
   const copyPath = useCallback((path: string): void => {

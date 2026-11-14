@@ -166,7 +166,7 @@ export interface FolderService {
 
 - **F1** 不维护 `.workbench/folders.json` 之类目录索引：空目录也直接来自 `VaultPort.listDirs`（磁盘），不存在第二真相源。
 - **F2** `create` 只建单层，父目录必须已存在；名称经 UI / 服务 / 后端三层同规则校验（空名、`/`、控制字符、`.`/`..`、隐藏名、`media`）。同名目录或同名文件抛 `path_exists`，父目录缺失抛 `doc_not_found`，只读抛 `vault_locked`。
-- **F3** `remove` 只删空文件夹（后端同样拒绝非空目录）；走 `vault_remove_dir` → 系统回收站，系统回收站不可用时直接失败，不降级库内回收、不永久删除。
+- **F3** `remove` 把整个目录（连同文档与子目录）作为**一个条目**移入系统回收站，不可撤销；走 `vault_remove_dir` → 系统回收站，系统回收站不可用时直接失败，不降级库内回收、不永久删除、不拆成逐文件删除。
 
 ---
 
