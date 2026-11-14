@@ -94,6 +94,19 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
       await invoke('vault_rename', { from: String(from), to: String(to) });
     },
 
+    createDir: async (path) => {
+      await invoke('vault_create_dir', { path: String(path) });
+    },
+
+    trashDir: async (path) => {
+      await invoke('vault_remove_dir', { path: String(path) });
+    },
+
+    listDirs: async () => {
+      const paths = await invoke<readonly string[]>('vault_list_dirs');
+      return paths.map((path) => unsafeVaultPath(path));
+    },
+
     list: async () => {
       const paths = await invoke<readonly string[]>('vault_list');
       return paths.map((path) => unsafeVaultPath(path));

@@ -30,6 +30,8 @@ export interface MemoryVaultOptions {
   readonly symlinks?: readonly string[];
   /** 覆盖 stat/scan 的大小（模拟超大文件而不分配真实字节） */
   readonly sizes?: Readonly<Record<string, number>>;
+  /** 预置空目录（含多级），模拟磁盘上没有任何文档的文件夹 */
+  readonly dirs?: readonly string[];
 }
 
 /** 与 Rust vault 行为对齐的内存端口：写即落「盘」，可注入外部变更事件 */
@@ -37,6 +39,7 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
   const files = new Map<string, Uint8Array>();
   const mtimes = new Map<string, string>();
   const symlinks = new Set(options.symlinks ?? []);
+  const dirs = new Set<string>(options.dirs ?? []);
   const sizeOverrides = new Map(Object.entries(options.sizes ?? {}));
   const reads: string[] = [];
   const listeners = new Set<(event: VaultFileEvent) => void>();
@@ -49,13 +52,37 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
     return new Date(1_700_000_000_000 + clock).toISOString();
   };
 
+  /** 路径的各级父目录（`a/b/c.md` → `a`、`a/b`），与磁盘语义一致：写文件即隐式建目录 */
+  const parentsOf = (path: string): readonly string[] => {
+    const segments = path.split('/');
+    segments.pop();
+    const out: string[] = [];
+    let cursor = '';
+    for (const segment of segments) {
+      if (segment.length === 0) continue;
+      cursor = cursor.length === 0 ? segment : `${cursor}/${segment}`;
+      out.push(cursor);
+    }
+    return out;
+  };
+  const parentOf = (path: string): string => {
+    const segments = path.split('/');
+    segments.pop();
+    return segments.join('/');
+  };
+  const rememberParents = (path: string): void => {
+    for (const dir of parentsOf(path)) dirs.add(dir);
+  };
+
   for (const [path, text] of Object.entries(options.files ?? {})) {
     files.set(path, encoder.encode(text));
     mtimes.set(path, tick());
+    rememberParents(path);
   }
   for (const [path, bytes] of Object.entries(options.rawFiles ?? {})) {
     files.set(path, bytes);
     mtimes.set(path, tick());
+    rememberParents(path);
   }
 
   const assertWritable = (): void => {
@@ -81,6 +108,7 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
       files.set(String(path), bytes);
       mtimes.set(String(path), tick());
       sizeOverrides.delete(String(path));
+      rememberParents(String(path));
       return Promise.resolve();
     },
     remove: (path) => {
@@ -105,8 +133,37 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
       files.set(String(to), bytes);
       mtimes.set(String(to), tick());
       sizeOverrides.delete(String(from));
+      rememberParents(String(to));
       return Promise.resolve();
     },
+
+    createDir: (path) => {
+      assertWritable();
+      const target = String(path);
+      const parent = parentOf(target);
+      if (parent !== '' && !dirs.has(parent)) {
+        return Promise.reject(new Error(`missing parent of ${target}`));
+      }
+      if (dirs.has(target) || files.has(target)) {
+        return Promise.reject(new Error(`path exists: ${target}`));
+      }
+      dirs.add(target);
+      return Promise.resolve();
+    },
+
+    trashDir: (path) => {
+      assertWritable();
+      const target = String(path);
+      if (!dirs.has(target)) return Promise.reject(new Error(`missing dir ${target}`));
+      const occupied =
+        [...files.keys()].some((file) => file.startsWith(`${target}/`)) ||
+        [...dirs].some((dir) => dir.startsWith(`${target}/`));
+      if (occupied) return Promise.reject(new Error(`dir not empty: ${target}`));
+      dirs.delete(target);
+      return Promise.resolve();
+    },
+
+    listDirs: () => Promise.resolve([...dirs].sort().map((dir) => unsafeVaultPath(dir))),
     list: () => {
       listCalls += 1;
       return Promise.resolve([...files.keys()].map((path) => unsafeVaultPath(path)));

@@ -52,6 +52,12 @@ export interface VaultPort {
   /** 永久删除：仅供内核回滚内部使用，不是用户删除入口 */
   purge(path: VaultPath): Promise<void>;
   rename(from: VaultPath, to: VaultPath): Promise<void>;
+  /** 新建单层文件夹：父目录必须已存在；同名目录或同名文件抛 `path_exists` */
+  createDir(path: VaultPath): Promise<void>;
+  /** 删除空文件夹：只进系统回收站；系统回收站不可用即抛错，不降级库内回收 */
+  trashDir(path: VaultPath): Promise<void>;
+  /** 全库目录清单（含空目录，相对路径），供文档树与移动目标使用 */
+  listDirs(): Promise<readonly VaultPath[]>;
   /** 全库 Markdown 清单（相对路径），用于文档目录对账 */
   list(): Promise<readonly VaultPath[]>;
   /**

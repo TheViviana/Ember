@@ -53,6 +53,10 @@ const createByteVault = (
       files.set(String(to), bytes);
       return Promise.resolve();
     },
+    // 本桩只模拟文档字节，文件夹操作不在用例范围内。
+    createDir: () => Promise.reject(new Error('文件夹操作未在此桩实现')),
+    trashDir: () => Promise.reject(new Error('文件夹操作未在此桩实现')),
+    listDirs: () => Promise.resolve([]),
     list: () => Promise.resolve([...files.keys()].map((path) => unsafeVaultPath(path))),
     listCanvases: () => Promise.resolve([]),
     scan: () => Promise.resolve([]),

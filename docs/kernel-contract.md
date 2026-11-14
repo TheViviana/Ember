@@ -154,6 +154,22 @@ export interface HealthReport {
 
 ---
 
+## 3.2 FolderService（磁盘目录即唯一真相）
+
+```ts
+export interface FolderService {
+  list(): Promise<readonly VaultPath[]>;                    // 含空目录
+  create(parent: string, name: string): Promise<VaultPath>; // parent 为 '' 表示库根
+  remove(path: VaultPath): Promise<void>;
+}
+```
+
+- **F1** 不维护 `.workbench/folders.json` 之类目录索引：空目录也直接来自 `VaultPort.listDirs`（磁盘），不存在第二真相源。
+- **F2** `create` 只建单层，父目录必须已存在；名称经 UI / 服务 / 后端三层同规则校验（空名、`/`、控制字符、`.`/`..`、隐藏名、`media`）。同名目录或同名文件抛 `path_exists`，父目录缺失抛 `doc_not_found`，只读抛 `vault_locked`。
+- **F3** `remove` 只删空文件夹（后端同样拒绝非空目录）；走 `vault_remove_dir` → 系统回收站，系统回收站不可用时直接失败，不降级库内回收、不永久删除。
+
+---
+
 ## 4. IndexService（v2：内核内存实现）
 
 ```ts
@@ -235,6 +251,7 @@ export interface CanvasHost {
 export interface KernelContext {
   readonly env: KernelEnv;          // kernelVersion / vaultId / readonlyMode / readonlyReason
   readonly docs: DocService;
+  readonly folders: FolderService;
   readonly health: HealthService;
   readonly index: IndexService;
   readonly commands: CommandBus;
@@ -249,7 +266,7 @@ export interface KernelContext {
 
 事件表：`doc:changed`、`doc:conflict`、`index:updated`、`command:executed`、`settings:changed`、`canvas:changed`、`canvas:ui`、`vault:guarded`、`vault:sync`。（`capability:state`、`vault:mode` 已随能力体系与心跳锁删除。）
 
-`KERNEL_VERSION = '2.4.0'`：2.3.0 → 2.4.0 为 minor，`DocService` 新增 `guard` / `rescan`，`KernelEventMap` 新增 `vault:guarded` / `vault:sync`，`VaultPort` 新增可选 `setRuntimeReadonly`；既有方法签名与错误码不变。2.2.0 → 2.3.0 为 minor，`DocService` 新增 `adopt`，`KernelContext` 新增 `health`，`VaultPort` 新增只读 `scan`；既有方法签名与错误码不变。2.1.0 → 2.2.0 为 minor，`DocService` 新增 `adoptCopy` / `detachCopy` 两个方法，`DocMeta` 新增 `conflictOf`。2.0.0 → 2.1.0 为 minor，`DocService` 新增 `listHistory` / `readHistory` / `restoreHistory` 三个方法。相对 1.2.0 的 2.0.0 是 major：删除了 `articles` / `editor` / `capabilities` 三个服务与 `withOwner`，IndexService 语义变更。
+`KERNEL_VERSION = '2.5.0'`：2.4.0 → 2.5.0 为 minor，`KernelContext` 新增 `folders`（`FolderService`，见 §3.2），`VaultPort` 新增 `createDir` / `trashDir` / `listDirs`；既有方法签名与错误码不变。2.3.0 → 2.4.0 为 minor，`DocService` 新增 `guard` / `rescan`，`KernelEventMap` 新增 `vault:guarded` / `vault:sync`，`VaultPort` 新增可选 `setRuntimeReadonly`；既有方法签名与错误码不变。2.2.0 → 2.3.0 为 minor，`DocService` 新增 `adopt`，`KernelContext` 新增 `health`，`VaultPort` 新增只读 `scan`；既有方法签名与错误码不变。2.1.0 → 2.2.0 为 minor，`DocService` 新增 `adoptCopy` / `detachCopy` 两个方法，`DocMeta` 新增 `conflictOf`。2.0.0 → 2.1.0 为 minor，`DocService` 新增 `listHistory` / `readHistory` / `restoreHistory` 三个方法。相对 1.2.0 的 2.0.0 是 major：删除了 `articles` / `editor` / `capabilities` 三个服务与 `withOwner`，IndexService 语义变更。
 
 ---
 

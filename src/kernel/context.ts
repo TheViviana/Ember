@@ -3,6 +3,7 @@ import type { CommandBus } from './command-bus.ts';
 import type { DocService } from './doc-service.ts';
 import type { EventBus } from './events.ts';
 import { EmberError } from './errors.ts';
+import type { FolderService } from './folder-service.ts';
 import type { HealthService } from './health-service.ts';
 import type { IndexService } from './index-service.ts';
 import type { PathTools } from './paths.ts';
@@ -20,6 +21,7 @@ import type { Disposable, ExtensionSlot, KernelEnv, Logger, SettingsService } fr
 export interface KernelContext {
   readonly env: KernelEnv;
   readonly docs: DocService;
+  readonly folders: FolderService;
   readonly health: HealthService;
   readonly index: IndexService;
   readonly commands: CommandBus;
@@ -34,6 +36,7 @@ export interface KernelContext {
 export interface KernelServices {
   readonly env: KernelEnv;
   readonly docs: DocService;
+  readonly folders: FolderService;
   readonly health: HealthService;
   readonly index: IndexService;
   readonly commands: CommandBus;

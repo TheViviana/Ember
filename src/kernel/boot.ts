@@ -5,6 +5,7 @@ import { createKernelContext, type KernelContext } from './context.ts';
 import { createDocService } from './doc-service.ts';
 import { createEventBus } from './events.ts';
 import { toErrorText } from './errors.ts';
+import { createFolderService } from './folder-service.ts';
 import { createHealthService } from './health-service.ts';
 import { createIndexService } from './index-service.ts';
 import { createPathTools } from './paths.ts';
@@ -12,7 +13,7 @@ import type { VaultFileEvent, VaultPort } from './ports.ts';
 import { createSettingsService } from './settings-service.ts';
 import type { KernelEnv, Logger } from './types.ts';
 
-export const KERNEL_VERSION = '2.4.0';
+export const KERNEL_VERSION = '2.5.0';
 
 export interface BootPorts {
   readonly vault: VaultPort;
@@ -89,6 +90,7 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
     log,
     ...(options.now ? { now: options.now } : {}),
   });
+  const folders = createFolderService({ port: options.ports.vault, paths });
   const index = createIndexService({ docs, settings, events, log });
   const health = createHealthService({
     port: options.ports.vault,
@@ -110,6 +112,7 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
   const context = createKernelContext({
     env,
     docs,
+    folders,
     health,
     index,
     commands,
