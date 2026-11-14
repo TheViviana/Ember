@@ -152,3 +152,25 @@ export const startChat = (
     },
   };
 };
+
+export interface PublicTranslation {
+  /** 译文；失败分块保留原文后拼接在对应位置 */
+  readonly text: string;
+  /** 该段内失败并保留原文的分块数 */
+  readonly failed: number;
+}
+
+/**
+ * 公共免费接口翻译单段：正文只在 Rust 侧发往固定端点，前端不直接发外网。
+ * requestId 与对话共用取消表，切通道时可立即中止分块之间的请求。
+ */
+export const translatePublicBlock = (
+  text: string,
+  requestId: string,
+): Promise<PublicTranslation> =>
+  invoke<PublicTranslation>('ai_translate_public', { text, requestId });
+
+export const cancelPublicTranslate = async (requestId: string): Promise<void> => {
+  await invoke('ai_chat_cancel', { requestId });
+};
+

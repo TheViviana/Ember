@@ -73,6 +73,19 @@ export const DEFAULT_AI: AiSettings = {
 };
 
 /**
+ * 整篇翻译通道：model = 使用上方 AI 配置（本地 Ollama 或 API 模型）；
+ * public = 公共免费接口（MyMemory 主、Google 回落），不需要模型或密钥。
+ * 只持久化这两个取值，本地/API 的区分由 ai.provider 推导。
+ */
+export type TranslationChannel = 'model' | 'public';
+
+export const DEFAULT_TRANSLATION_CHANNEL: TranslationChannel = 'model';
+
+/** 缺键、非法值一律回落到 model：老文件与手改坏的字段都不会改变默认行为 */
+export const parseTranslationChannel = (value: unknown): TranslationChannel =>
+  value === 'public' ? 'public' : 'model';
+
+/**
  * AI 助手浮窗：不占文章浮窗槽位。
  * 位置是左上角相对主内容区（顶栏与状态栏之间）的像素坐标，尺寸与位置一起按机器记忆。
  */
@@ -161,6 +174,7 @@ export interface MachineUiDocument {
   readonly floatPositions: Readonly<Record<string, FloatPosition>>;
   readonly pomodoro: PomodoroState;
   readonly ai: AiSettings;
+  readonly translationChannel: TranslationChannel;
   readonly panels: { readonly ai: AiPanelState };
   /** 每画布的 UI 开关（最近编辑层等）；键 = canvasId */
   readonly canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>>;
@@ -174,6 +188,7 @@ export interface MachineState {
   readonly pomodoro: PomodoroState;
   /** AI 提供方配置；密钥不在此 */
   readonly ai: AiSettings;
+  readonly translationChannel: TranslationChannel;
   readonly panels: { readonly ai: AiPanelState };
   readonly canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>>;
   rememberFloatSize(docId: string, size: FloatSize): void;
@@ -182,6 +197,7 @@ export interface MachineState {
   forgetFloat(docId: string): void;
   setPomodoro(next: PomodoroState): void;
   setAi(patch: Partial<AiSettings>): void;
+  setTranslationChannel(channel: TranslationChannel): void;
   setAiPanel(patch: Partial<AiPanelState>): void;
   setCanvasFlag(canvasId: string, patch: { readonly recentEdits?: boolean }): void;
 }
@@ -332,6 +348,7 @@ export const parseMachineUi = (
       floatPositions,
       pomodoro: parsePomodoro(record.pomodoro),
       ai: parseAi(record.ai),
+      translationChannel: parseTranslationChannel(record.translationChannel),
       panels: { ai: parseAiPanel(panels.ai, area) },
       canvasFlags,
     };
@@ -347,6 +364,7 @@ export const serializeMachineUi = (
   ai: AiSettings = DEFAULT_AI,
   aiPanel: AiPanelState = DEFAULT_AI_PANEL,
   canvasFlags: Readonly<Record<string, { readonly recentEdits?: boolean }>> = {},
+  translationChannel: TranslationChannel = DEFAULT_TRANSLATION_CHANNEL,
 ): string => {
   // 已知字段覆盖写，未知字段（含 panels 下的其他面板）原样带回，避免两边同时写时互相抹掉
   const knownPanels = isRecord(preservedKeys.panels) ? preservedKeys.panels : {};
@@ -359,6 +377,7 @@ export const serializeMachineUi = (
       floatPositions: positions,
       pomodoro,
       ai: { ...knownAi, provider: ai.provider, baseUrl: ai.baseUrl, model: ai.model },
+      translationChannel,
       panels: {
         ...knownPanels,
         ai: {
@@ -401,6 +420,7 @@ const queueWrite = (): void => {
     state.ai,
     state.panels.ai,
     state.canvasFlags,
+    state.translationChannel,
   );
   writeChain = writeChain.then(async () => {
     try {
@@ -457,6 +477,7 @@ export const hydrateMachineUi = (): Promise<void> => {
         floatPositions: parsed.floatPositions,
         pomodoro: parsed.pomodoro,
         ai: parsed.ai,
+        translationChannel: parsed.translationChannel,
         panels: parsed.panels,
         canvasFlags: parsed.canvasFlags,
       });
@@ -497,6 +518,7 @@ export const useMachineStore = create<MachineState>((set) => ({
   floatPositions: {},
   pomodoro: DEFAULT_POMODORO,
   ai: DEFAULT_AI,
+  translationChannel: DEFAULT_TRANSLATION_CHANNEL,
   panels: { ai: DEFAULT_AI_PANEL },
   canvasFlags: {},
 
@@ -532,6 +554,10 @@ export const useMachineStore = create<MachineState>((set) => ({
   },
   setAi: (patch) => {
     set((state) => ({ ai: parseAi({ ...state.ai, ...patch }) }));
+    queueWrite();
+  },
+  setTranslationChannel: (channel) => {
+    set({ translationChannel: parseTranslationChannel(channel) });
     queueWrite();
   },
   setCanvasFlag: (canvasId, patch) => {

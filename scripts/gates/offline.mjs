@@ -65,6 +65,18 @@ const ALLOW = [
     reason: 'SVG / XML 命名空间标识符，仅用于 setAttribute，不是可请求地址',
     expires: '2027-01-31',
   },
+  {
+    file: 'src-tauri/src/ai/public_translate.rs',
+    match: /^https:\/\/api\.mymemory\.translated\.net$/,
+    reason: '仅用户显式选择公共免费接口并点击翻译时请求；固定端点、DNS 钉死、禁止重定向',
+    expires: '2027-01-31',
+  },
+  {
+    file: 'src-tauri/src/ai/public_translate.rs',
+    match: /^https:\/\/translate\.googleapis\.com$/,
+    reason: '仅用户显式选择公共免费接口并点击翻译时请求；MyMemory 失败后的回落端点',
+    expires: '2027-01-31',
+  },
 ];
 
 const COMMENT_STRIP_EXT = new Set(['.ts', '.tsx', '.css', '.js', '.mjs']);

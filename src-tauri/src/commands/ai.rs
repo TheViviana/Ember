@@ -13,6 +13,7 @@ use crate::ai::dns::SystemResolver;
 use crate::ai::endpoint::AiEndpoint;
 use crate::ai::error::{AiError, AiResult};
 use crate::ai::keychain::{KeyOrigin, KeyStore, MacKeychain};
+use crate::ai::public_translate::{translate_block, PublicTranslation};
 use crate::ai::sse::StreamEvent;
 
 /// 进程内钥匙串/内存会话；不跨命令暴露任何明文读取入口。
@@ -253,6 +254,25 @@ pub fn ai_chat_cancel(state: State<'_, AiState>, request_id: String) {
             flag.store(true, Ordering::SeqCst);
         }
     }
+}
+
+/// 公共免费接口翻译单段：不读取任何 AI 配置，也不新增通用 HTTP 入口。
+/// 与对话共用 requestId 取消表，`ai_chat_cancel` 同样可以中止分块之间的请求。
+#[tauri::command]
+pub async fn ai_translate_public(
+    state: State<'_, AiState>,
+    text: String,
+    request_id: String,
+) -> AiResult<PublicTranslation> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Ok(mut cancels) = state.cancels.lock() {
+        cancels.insert(request_id.clone(), Arc::clone(&cancel));
+    }
+    let result = translate_block(&text, &cancel).await;
+    if let Ok(mut cancels) = state.cancels.lock() {
+        cancels.remove(&request_id);
+    }
+    result
 }
 
 #[cfg(test)]

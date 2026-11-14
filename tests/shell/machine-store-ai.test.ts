@@ -6,12 +6,16 @@ import {
   clampAiPanelRect,
   DEFAULT_AI,
   DEFAULT_AI_PANEL,
+  DEFAULT_POMODORO,
+  DEFAULT_TRANSLATION_CHANNEL,
   defaultAiPanelRect,
   flushMachineUiWrites,
   hydrateMachineUi,
   parseAi,
   parseAiPanel,
   parseMachineUi,
+  parseTranslationChannel,
+  serializeMachineUi,
   useMachineStore,
 } from '../../src/data/stores/machine-store.ts';
 
@@ -134,4 +138,31 @@ void test('默认位置随可用区域变化：小窗口也落在底部上方', 
   assert.deepEqual(small, { x: 524, y: 68, width: 360, height: 480 });
   assert.equal(small.y + small.height, 600 - AI_PANEL_BOTTOM_RESERVE);
   assert.deepEqual(parseAiPanel(null, { width: 900, height: 600 }), small);
+});
+
+void test('翻译通道：缺键/非法值回落 model，public 可往返', () => {
+  assert.equal(DEFAULT_TRANSLATION_CHANNEL, 'model');
+  assert.equal(parseTranslationChannel(undefined), 'model');
+  assert.equal(parseTranslationChannel(null), 'model');
+  assert.equal(parseTranslationChannel('local'), 'model');
+  assert.equal(parseTranslationChannel('public'), 'public');
+
+  const legacy = parseMachineUi(LEGACY);
+  assert.ok(legacy !== null);
+  assert.equal(legacy.translationChannel, 'model');
+
+  const publicJson = serializeMachineUi(
+    {},
+    {},
+    DEFAULT_POMODORO,
+    DEFAULT_AI,
+    DEFAULT_AI_PANEL,
+    {},
+    'public',
+  );
+  assert.equal((JSON.parse(publicJson) as Record<string, unknown>).translationChannel, 'public');
+  assert.equal(parseMachineUi(publicJson)?.translationChannel, 'public');
+
+  const modelJson = serializeMachineUi({}, {}, DEFAULT_POMODORO, DEFAULT_AI, DEFAULT_AI_PANEL, {});
+  assert.equal((JSON.parse(modelJson) as Record<string, unknown>).translationChannel, 'model');
 });

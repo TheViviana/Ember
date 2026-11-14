@@ -20,6 +20,15 @@ import {
 } from '../../data/tauri/ai.ts';
 import type { CanvasGrid, SettingsPatch, VaultSettings } from '../../kernel/types.ts';
 import { isEscTop, useEscLayer } from '../esc-arbiter.ts';
+import {
+  PUBLIC_TRANSLATION_PRIVACY,
+  TRANSLATION_CHANNEL_OPTIONS,
+  describeProviderMismatch,
+  markPublicConfirmed,
+  requiresPublicConfirmation,
+  translationChannelChoice,
+  type TranslationChannelChoice,
+} from '../ai/translation-channel.ts';
 import { moveFloatFrame, type FloatFrame } from '../editor/float-layout.ts';
 import { DEFAULT_FLOAT_LIMIT } from '../editor/float-store.ts';
 import { useKernel } from '../kernel-provider.tsx';
@@ -145,6 +154,9 @@ export const SettingsPanel = ({
   const [activeSection, setActiveSection] = useState<SectionId>('canvas');
 
   const ai = useMachineStore((state) => state.ai);
+  const translationChannel = useMachineStore((state) => state.translationChannel);
+  const [translationHint, setTranslationHint] = useState<string | null>(null);
+  const [publicConfirmOpen, setPublicConfirmOpen] = useState(false);
   const [aiProvider, setAiProvider] = useState<AiProviderId>(ai.provider);
   const [aiBaseUrl, setAiBaseUrl] = useState(ai.baseUrl);
   const [aiModel, setAiModel] = useState(ai.model);
@@ -407,6 +419,34 @@ export const SettingsPanel = ({
   const testAi = async (): Promise<void> => {
     setAiStatus(null);
     await probeModel(aiModel.trim());
+  };
+
+  /**
+   * 翻译通道：本地/API 只记录“使用 ai 配置”，不复制地址与密钥，也不自动改 provider；
+   * 公共接口必须先确认正文外发，确认后才落盘。
+   */
+  const chooseTranslationChannel = (choice: TranslationChannelChoice): void => {
+    if (choice === 'public') {
+      if (translationChannel === 'public') return;
+      if (requiresPublicConfirmation('public')) {
+        setPublicConfirmOpen(true);
+        return;
+      }
+      setPublicConfirmOpen(false);
+      setTranslationHint(null);
+      useMachineStore.getState().setTranslationChannel('public');
+      return;
+    }
+    setTranslationHint(describeProviderMismatch(choice, ai.provider));
+    setPublicConfirmOpen(false);
+    useMachineStore.getState().setTranslationChannel('model');
+  };
+
+  const confirmPublicChannel = (): void => {
+    markPublicConfirmed();
+    useMachineStore.getState().setTranslationChannel('public');
+    setPublicConfirmOpen(false);
+    setTranslationHint(null);
   };
 
   /** 清除已保存密钥：换账号 / 排查密钥问题用；清除后状态回到「未保存」 */
@@ -835,6 +875,60 @@ export const SettingsPanel = ({
                 </button>
               </div>
               {aiStatus === null ? null : <p className={styles.note}>{aiStatus}</p>}
+              <div className={styles.field}>
+                <span className={styles.fieldLabel}>翻译通道</span>
+                <div className={styles.options}>
+                  {TRANSLATION_CHANNEL_OPTIONS.map((option) => {
+                    const active =
+                      translationChannelChoice(translationChannel, ai.provider) === option.id;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        className={`${styles.option} ${active ? styles.optionActive : ''}`}
+                        disabled={busy !== null || active}
+                        onClick={() => {
+                          chooseTranslationChannel(option.id);
+                        }}
+                      >
+                        <span className={styles.optionTitle}>{option.label}</span>
+                        <span className={styles.optionHint}>{option.hint}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              {translationHint === null ? null : <p className={styles.error}>{translationHint}</p>}
+              {publicConfirmOpen ? (
+                <div
+                  className={styles.section}
+                  role="alertdialog"
+                  aria-label="启用公共免费接口确认"
+                >
+                  <p className={styles.note}>{PUBLIC_TRANSLATION_PRIVACY}</p>
+                  <div className={styles.options}>
+                    <button
+                      type="button"
+                      className={`${styles.option} ${styles.action}`}
+                      onClick={confirmPublicChannel}
+                    >
+                      <span className={styles.optionTitle}>确认并启用</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`${styles.option} ${styles.action}`}
+                      onClick={() => {
+                        setPublicConfirmOpen(false);
+                      }}
+                    >
+                      <span className={styles.optionTitle}>取消</span>
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {translationChannel === 'public' ? (
+                <p className={styles.note}>{PUBLIC_TRANSLATION_PRIVACY}</p>
+              ) : null}
             </section>
           ) : null}
 

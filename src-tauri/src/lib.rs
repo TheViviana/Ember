@@ -85,6 +85,7 @@ pub fn run() {
             commands::ai::ai_list_models,
             commands::ai::ai_chat_stream,
             commands::ai::ai_chat_cancel,
+            commands::ai::ai_translate_public,
         ])
         .run(tauri::generate_context!())
         .expect("Ember 启动失败");

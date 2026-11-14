@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMachineStore } from '../../data/stores/machine-store.ts';
-import { aiKeySaved, describeAiError, startChat, type ChatSession } from '../../data/tauri/ai.ts';
+import {
+  aiKeySaved,
+  cancelPublicTranslate,
+  describeAiError,
+  startChat,
+  translatePublicBlock,
+  type ChatSession,
+} from '../../data/tauri/ai.ts';
+import { translationChannelChanged } from './translation-channel.ts';
 import { buildTranslatePrompt, translatableBlocks, TRANSLATE_SYSTEM_PROMPT } from './translate.ts';
 
 export type TranslationPhase = 'idle' | 'running' | 'done';
@@ -21,20 +29,23 @@ export const TRANSLATE_NOT_CONFIGURED = '先在设置里配置 AI 提供方与�
 export const TRANSLATE_EMPTY_MESSAGE = '这篇文章没有需要翻译的外文段落。';
 
 /**
- * 整篇双语对照的会话：逐段串行走 ai_chat_stream，译文只留在当前浮窗的视图层。
- * 不写 ui.json、不写 localStorage；离开阅读态或关闭浮窗即中止并清空。
+ * 整篇双语对照的会话：按设置里的翻译通道逐段串行取译文，译文只留在当前浮窗的视图层。
+ * model 通道走 ai_chat_stream；public 通道走 Rust 侧的公共免费接口。
+ * 不写 ui.json、不写 localStorage；离开阅读态、关闭浮窗或切换通道即中止并清空。
  */
 export const useTranslation = () => {
   const ai = useMachineStore((state) => state.ai);
+  const translationChannel = useMachineStore((state) => state.translationChannel);
   const [state, setState] = useState<TranslationState>(IDLE);
-  /** 云端提供方还要有密钥；Ollama 不需要 */
+  /** 云端提供方还要有密钥；Ollama 与公共免费接口不需要 */
   const [keyReady, setKeyReady] = useState<boolean>(ai.provider === 'ollama');
   const runIdRef = useRef(0);
   const sessionRef = useRef<ChatSession | null>(null);
+  const publicRequestRef = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
-    if (ai.provider === 'ollama') {
+    if (translationChannel === 'public' || ai.provider === 'ollama') {
       setKeyReady(true);
       return () => {
         active = false;
@@ -51,7 +62,7 @@ export const useTranslation = () => {
     return () => {
       active = false;
     };
-  }, [ai]);
+  }, [ai, translationChannel]);
 
   const cancelSession = useCallback((): void => {
     const session = sessionRef.current;
@@ -59,27 +70,47 @@ export const useTranslation = () => {
     if (session !== null) void session.cancel();
   }, []);
 
-  // 卸载 / 切换文档时中止流，避免后台继续占用连接
+  const cancelPublic = useCallback((): void => {
+    const requestId = publicRequestRef.current;
+    publicRequestRef.current = null;
+    if (requestId !== null) void cancelPublicTranslate(requestId);
+  }, []);
+
+  const cancelActive = useCallback((): void => {
+    cancelSession();
+    cancelPublic();
+  }, [cancelSession, cancelPublic]);
+
+  // 卸载 / 切换文档时中止取数，避免后台继续占用连接
   useEffect(
     () => () => {
       runIdRef.current += 1;
-      cancelSession();
+      cancelActive();
     },
-    [cancelSession],
+    [cancelActive],
   );
 
   /** 收起译文：中止进行中的翻译并清空视图层 */
   const restore = useCallback((): void => {
     runIdRef.current += 1;
-    cancelSession();
+    cancelActive();
     setState(IDLE);
-  }, [cancelSession]);
+  }, [cancelActive]);
 
   const stop = restore;
 
+  // 切换通道立即取消进行中的取数，避免旧通道的结果落进新通道的视图
+  const channelRef = useRef(translationChannel);
+  useEffect(() => {
+    if (!translationChannelChanged(channelRef.current, translationChannel)) return;
+    channelRef.current = translationChannel;
+    restore();
+  }, [translationChannel, restore]);
+
   const start = useCallback(
     (markdown: string): void => {
-      if (ai.model.trim() === '' || ai.baseUrl.trim() === '') {
+      const publicChannel = translationChannel === 'public';
+      if (!publicChannel && (ai.model.trim() === '' || ai.baseUrl.trim() === '')) {
         setState({ ...IDLE, note: TRANSLATE_NOT_CONFIGURED });
         return;
       }
@@ -91,12 +122,52 @@ export const useTranslation = () => {
 
       runIdRef.current += 1;
       const id = runIdRef.current;
-      cancelSession();
+      cancelActive();
       setState({ phase: 'running', entries: {}, total: blocks.length, done: 0, note: null });
 
       const update = (next: (current: TranslationState) => TranslationState): void => {
         setState((current) => (runIdRef.current !== id ? current : next(current)));
       };
+
+      if (publicChannel) {
+        void (async () => {
+          let failed = 0;
+          let firstError: string | null = null;
+          for (const block of blocks) {
+            if (runIdRef.current !== id) return;
+            const requestId = crypto.randomUUID();
+            publicRequestRef.current = requestId;
+            try {
+              const outcome = await translatePublicBlock(block.text, requestId);
+              if (runIdRef.current !== id) return;
+              publicRequestRef.current = null;
+              failed += outcome.failed;
+              update((current) => ({
+                ...current,
+                entries: { ...current.entries, [block.index]: outcome.text },
+                done: current.done + 1,
+              }));
+            } catch (cause) {
+              if (runIdRef.current !== id) return;
+              publicRequestRef.current = null;
+              failed += 1;
+              if (firstError === null) firstError = describeAiError(cause);
+              // 整段请求失败：不写 entry，原文照旧
+              update((current) => ({ ...current, done: current.done + 1 }));
+            }
+          }
+          if (runIdRef.current !== id) return;
+          update((current) => ({
+            ...current,
+            phase: 'done',
+            note:
+              failed === 0
+                ? null
+                : `${failed} 处翻译失败，已保留原文${firstError === null ? '' : `：${firstError}`}`,
+          }));
+        })();
+        return;
+      }
 
       void (async () => {
         let failed = 0;
@@ -173,11 +244,13 @@ export const useTranslation = () => {
         }));
       })();
     },
-    [ai, cancelSession],
+    [ai, cancelActive, translationChannel],
   );
 
-  /** 未配置或暂无密钥时入口置灰：给出同一条指引，不静默失败 */
-  const ready = ai.model.trim() !== '' && ai.baseUrl.trim() !== '' && keyReady;
+  /** 未配置或暂无密钥时入口置灰：公共免费接口不需要模型与密钥 */
+  const ready =
+    translationChannel === 'public' ||
+    (ai.model.trim() !== '' && ai.baseUrl.trim() !== '' && keyReady);
 
   return { state, ready, start, stop, restore };
 };

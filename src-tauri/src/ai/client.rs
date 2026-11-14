@@ -192,21 +192,31 @@ impl<R: DnsResolver> ChatGateway<R> {
     }
 
     fn build_client(&self, endpoint: &AiEndpoint) -> AiResult<Client> {
-        let mut builder = Client::builder()
-            .connect_timeout(self.limits.connect)
-            .read_timeout(self.limits.read)
-            .timeout(self.limits.total)
-            .redirect(Policy::none())
-            .no_proxy()
-            .user_agent(USER_AGENT);
-        if !endpoint.is_ip_host() {
-            let host = endpoint.host();
-            let addresses = self.resolver.resolve(host, endpoint.port()?)?;
-            validate_resolved(&addresses)?;
-            builder = builder.resolve_to_addrs(host, &addresses);
-        }
-        builder.build().map_err(|_| AiError::Network)
+        build_client_with(&self.resolver, endpoint, self.limits)
     }
+}
+
+/// 带 DNS 钉死的客户端：公共翻译接口与 AI 对话共用同一套传输安全姿势
+/// （禁止重定向、绕过系统代理、解析结果逐 IP 校验后钉死）。
+pub(crate) fn build_client_with<R: DnsResolver>(
+    resolver: &R,
+    endpoint: &AiEndpoint,
+    limits: TransportLimits,
+) -> AiResult<Client> {
+    let mut builder = Client::builder()
+        .connect_timeout(limits.connect)
+        .read_timeout(limits.read)
+        .timeout(limits.total)
+        .redirect(Policy::none())
+        .no_proxy()
+        .user_agent(USER_AGENT);
+    if !endpoint.is_ip_host() {
+        let host = endpoint.host();
+        let addresses = resolver.resolve(host, endpoint.port()?)?;
+        validate_resolved(&addresses)?;
+        builder = builder.resolve_to_addrs(host, &addresses);
+    }
+    builder.build().map_err(|_| AiError::Network)
 }
 
 fn request_body(config: &AiProviderConfig, request: &ChatRequest) -> serde_json::Value {
