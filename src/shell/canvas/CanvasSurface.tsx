@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useState, type DragEvent as ReactDragEvent, type ReactElement } from 'react';
 import type { CanvasBookmark, CanvasFilters, CanvasGrid, CanvasNode, CanvasScene } from '#canvas-engine';
-import type { CanvasId, DocId } from '#doc-model';
+import { asDocId, createUlid, type CanvasId, type DocId } from '#doc-model';
 import { useKernel } from '../kernel-provider.tsx';
 import { FloatLayer } from '../editor/FloatLayer.tsx';
 import type { CursorPosition } from '../editor/cursor.ts';
@@ -10,7 +10,8 @@ import { CanvasHistoryPanel } from './CanvasHistoryPanel.tsx';
 import { EMPTY_FILTERS, useCanvasViewStore } from './canvas-view-store.ts';
 import { buildBookmark } from './BookmarkStrip.tsx';
 import { ContextMenu, LabelPrompt } from './ContextMenu.tsx';
-import { boundsOfRects, fitViewport, orderedNodes } from './geometry.ts';
+import { centeredNodeRect, visibleNodeCenter } from './commands.ts';
+import { DEFAULT_NODE_SIZE, boundsOfRects, fitViewport, orderedNodes, screenToWorld, snapValue } from './geometry.ts';
 import {
   CanvasEmptyHint,
   CanvasEdgePass,
@@ -25,7 +26,6 @@ import { registerCaptureProvider } from './canvas-capture.ts';
 import { drainCanvasView, subscribeCanvasView } from './canvas-view-signal.ts';
 import { RecentEditsLayer } from './RecentEditsLayer.tsx';
 import { useMachineStore, flushMachineUiWrites } from '../../data/stores/machine-store.ts';
-import { screenToWorld, snapValue } from './geometry.ts';
 import { readAsset } from '../../data/tauri/asset-port.ts';
 import { useCanvasCommands, type AnchorMenuState, type MenuState } from './use-canvas-commands.ts';
 import { useCanvasImages } from './use-canvas-images.ts';
@@ -322,6 +322,42 @@ export const CanvasSurface = ({
     surfaceRef,
   });
 
+  /** 文档面板拖入：在鼠标位置落一个 kind:'doc' 节点，走正常 addNode 提交与保存 */
+  const onDropDoc = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>): void => {
+      const docId = asDocId(event.dataTransfer.getData('application/x-ember-doc'));
+      const element = surfaceRef.current;
+      if (docId === null || element === null || scene === null) return;
+      const bounds = element.getBoundingClientRect();
+      const center = visibleNodeCenter(
+        screenToWorld(
+          { x: event.clientX - bounds.left, y: event.clientY - bounds.top },
+          viewportRef.current,
+        ),
+        viewportRef.current,
+        { width: element.clientWidth, height: element.clientHeight },
+        DEFAULT_NODE_SIZE,
+      );
+      const rect = centeredNodeRect(center, DEFAULT_NODE_SIZE);
+      const node: CanvasNode = {
+        id: `n_${createUlid()}`,
+        kind: 'doc',
+        docId,
+        text: null,
+        rect: {
+          ...rect,
+          x: snapValue(rect.x, scene.grid),
+          y: snapValue(rect.y, scene.grid),
+        },
+        z: scene.nodes.reduce((max, item) => Math.max(max, item.z), 0) + 1,
+        groupId: null,
+        meta: {},
+      };
+      void kernel.canvas.apply(canvasId, [{ type: 'addNode', node }]).catch(doc.reportError);
+    },
+    [canvasId, doc.reportError, kernel, scene, surfaceRef, viewportRef],
+  );
+
   const closeAsset = useCallback((): void => {
     setLightboxAsset(null);
   }, []);
@@ -395,11 +431,19 @@ export const CanvasSurface = ({
       onPointerCancel={gestures.onPointerUp}
       onContextMenu={commands.onContextMenu}
       onDragOver={(event) => {
-        if ([...event.dataTransfer.types].includes('Files')) event.preventDefault();
+        const types = [...event.dataTransfer.types];
+        if (types.includes('Files') || types.includes('application/x-ember-doc')) event.preventDefault();
       }}
       onDrop={(event) => {
+        const types = [...event.dataTransfer.types];
+        // 文档面板拖入：落成文章卡片，不交给图片/文件通道
+        if (types.includes('application/x-ember-doc')) {
+          event.preventDefault();
+          onDropDoc(event);
+          return;
+        }
         // 拖放目标始终接管：不给浏览器留下「导航打开文件」的默认行为
-        if ([...event.dataTransfer.types].includes('Files')) event.preventDefault();
+        if (types.includes('Files')) event.preventDefault();
         onDropFiles(event);
       }}
     >
