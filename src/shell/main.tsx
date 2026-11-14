@@ -1,10 +1,9 @@
 import { QueryClientProvider } from '@tanstack/react-query';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createKernel } from '../data/bootstrap.ts';
 import { createQueryClient } from '../data/query-client.ts';
 import { App } from './App.tsx';
-import { KernelProvider } from './kernel-provider.tsx';
+import { VaultGate } from './vault/VaultGate.tsx';
 import '../styles/global.css';
 
 const queryClient = createQueryClient();
@@ -15,9 +14,9 @@ if (container === null) throw new Error('缺少 #root 挂载点');
 createRoot(container).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <KernelProvider start={() => createKernel()}>
+      <VaultGate>
         <App />
-      </KernelProvider>
+      </VaultGate>
     </QueryClientProvider>
   </StrictMode>,
 );

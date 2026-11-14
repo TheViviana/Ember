@@ -35,6 +35,7 @@ import { DEFAULT_FLOAT_LIMIT } from '../editor/float-store.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import { ActivityHeatmap } from './ActivityHeatmap.tsx';
 import { BackupSection } from './BackupSection.tsx';
+import { VaultSection } from './VaultSection.tsx';
 import styles from './SettingsPanel.module.css';
 
 export interface SettingsPanelProps {
@@ -50,6 +51,7 @@ const GRID_SIZES: readonly CanvasGrid['size'][] = [8, 16, 32];
 /** 类目划分与现有区块一一对应，不存在没有内容的空页 */
 const SETTINGS_SECTIONS = [
   { id: 'canvas', label: '画布' },
+  { id: 'vault', label: '库' },
   { id: 'floats', label: '浮窗' },
   { id: 'editor', label: '编辑器' },
   { id: 'tools', label: '工具' },
@@ -939,6 +941,8 @@ export const SettingsPanel = ({
               ) : null}
             </section>
           ) : null}
+
+          {activeSection === 'vault' ? <VaultSection /> : null}
 
           {activeSection === 'backup' ? <BackupSection /> : null}
 

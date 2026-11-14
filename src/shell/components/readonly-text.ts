@@ -1,6 +1,6 @@
 /**
  * 只读原因 → 状态栏/顶栏文案。
- * 原因值来自 Rust `ReadonlyReason` 的 camelCase 序列化（收敛为两态：被占用 / 丢失）；
+ * 原因值来自 Rust `ReadonlyReason` 的 camelCase 序列化（被占用 / 丢失 / 位置不可写）；
  * 未知或缺失时回退到通用文案。
  */
 export const readonlyText = (reason: string | null): string => {
@@ -9,6 +9,8 @@ export const readonlyText = (reason: string | null): string => {
       return '只读：另一实例已打开';
     case 'lockLost':
       return '只读：库锁已丢失';
+    case 'filesystemReadonly':
+      return '只读：库位置不可写';
     case 'vaultGuard':
       return '只读：库可能被整体替换或移走';
     default:
