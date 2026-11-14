@@ -5,7 +5,7 @@ import { bootKernel } from '../../src/kernel/boot.ts';
 import { tokenizeForIndex, tokenizeForQuery } from '../../src/kernel/search-token.ts';
 import type { KernelContext } from '../../src/kernel/context.ts';
 import type { Logger } from '../../src/kernel/types.ts';
-import { createMemoryVault } from './fakes.ts';
+import { createMemoryState, createMemoryVault } from './fakes.ts';
 
 const VAULT_ID = asVaultId('01JB8ZQ3K4M5N6P7Q8R9S0T1V2');
 assert.ok(VAULT_ID !== null);
@@ -40,7 +40,7 @@ void test('索引：元数据即时可搜，正文后台就绪后可搜正文', 
   const vault = createMemoryVault();
   const kernel = await bootKernel({
     vaultId: VAULT_ID,
-    ports: { vault: vault.port },
+    ports: { vault: vault.port, state: createMemoryState() },
     log: silentLogger,
   });
 
@@ -78,7 +78,7 @@ void test('索引：反链与双链解析（标题与路径），增量维护', 
   const vault = createMemoryVault();
   const kernel = await bootKernel({
     vaultId: VAULT_ID,
-    ports: { vault: vault.port },
+    ports: { vault: vault.port, state: createMemoryState() },
     log: silentLogger,
   });
 
@@ -118,7 +118,7 @@ void test('索引：referencesByRaw 反查原始键（嵌入与路径引用）',
   const vault = createMemoryVault();
   const kernel = await bootKernel({
     vaultId: VAULT_ID,
-    ports: { vault: vault.port },
+    ports: { vault: vault.port, state: createMemoryState() },
     log: silentLogger,
   });
 
@@ -142,7 +142,7 @@ void test('索引：rebuild 重建全量数据（删索引可救）', async () =
   const vault = createMemoryVault();
   const kernel = await bootKernel({
     vaultId: VAULT_ID,
-    ports: { vault: vault.port },
+    ports: { vault: vault.port, state: createMemoryState() },
     log: silentLogger,
   });
 

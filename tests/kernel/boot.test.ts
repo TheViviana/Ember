@@ -6,7 +6,7 @@ import type { DocId } from '#doc-model';
 import { bootKernel, type Kernel } from '../../src/kernel/boot.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
 import type { DocRevision, Logger } from '../../src/kernel/types.ts';
-import { createMemoryVault, type MemoryVault } from './fakes.ts';
+import { createMemoryState, createMemoryVault, type MemoryVault } from './fakes.ts';
 
 const VAULT_ID = asVaultId('01JB8ZQ3K4M5N6P7Q8R9S0T1V2');
 assert.ok(VAULT_ID !== null);
@@ -21,7 +21,7 @@ const silentLogger: Logger = {
 const boot = async (vault: MemoryVault): Promise<Kernel> =>
   bootKernel({
     vaultId: VAULT_ID,
-    ports: { vault: vault.port },
+    ports: { vault: vault.port, state: createMemoryState() },
     log: silentLogger,
   });
 
@@ -143,14 +143,21 @@ void test('启动后命令可注册与执行，注销后消失', async () => {
       calls.push('ping');
     },
   });
-  assert.deepEqual(kernel.context.commands.list().map((item) => String(item.id)), ['ember.test.ping']);
+  // 启动时内核已注册迁移回滚命令；这里只验证测试自己的命令进出
+  assert.deepEqual(
+    kernel.context.commands.list().map((item) => String(item.id)),
+    ['core.migration.rollback', 'ember.test.ping'],
+  );
 
   const result = await kernel.context.commands.execute(pingId);
   assert.equal(result.ok, true);
   assert.deepEqual(calls, ['ping']);
 
   registration.dispose();
-  assert.deepEqual(kernel.context.commands.list(), []);
+  assert.deepEqual(
+    kernel.context.commands.list().map((item) => String(item.id)),
+    ['core.migration.rollback'],
+  );
   await kernel.shutdown();
 });
 

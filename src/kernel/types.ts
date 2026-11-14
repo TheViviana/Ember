@@ -273,6 +273,11 @@ export interface VaultSettings {
     readonly [key: string]: unknown;
   };
   readonly linkOverrides: Readonly<Record<string, DocId>>;
+  /**
+   * 文档身份方案（D4 允许写进库内的唯一新键）：`path` = 已从旧 ULID 迁移到路径。
+   * 缺省表示尚未迁移或无需迁移。
+   */
+  readonly docIdScheme?: 'path';
   readonly [key: string]: unknown;
 }
 
@@ -290,6 +295,14 @@ export interface SettingsPatch {
 export interface SettingsService {
   read(): Promise<VaultSettings>;
   patch(patch: SettingsPatch): Promise<VaultSettings>;
+  /**
+   * 迁移专用：**整表替换** `linkOverrides`（可删除被丢弃的旧 id），并写入/清除
+   * `docIdScheme`；其余键原样保留。与 patch 共用同一条写入队列。
+   */
+  applyDocIdScheme(input: {
+    readonly linkOverrides: Readonly<Record<string, DocId>>;
+    readonly scheme: 'path' | null;
+  }): Promise<VaultSettings>;
   watch(listener: (next: VaultSettings) => void): Disposable;
   /**
    * 等待排队中的写入落盘；若自上次 flush 以来有写入失败，抛出一次后清空。

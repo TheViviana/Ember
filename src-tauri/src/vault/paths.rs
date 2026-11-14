@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::error::{VaultError, VaultResult};
 
 /// 把前端传来的 vault 相对路径解析成绝对路径。
@@ -66,9 +68,61 @@ pub fn workbench(root: &Path) -> PathBuf {
     root.join(WORKBENCH_DIR)
 }
 
-/// 规范 §7：锁文件为 `.workbench/.lock`。
+/// 规范化根路径文本：能解析就解析（软链、`..`、尾斜杠），失败退回字面值。
+/// 库外状态的键、锁的键都以它为准，保证同一库的不同写法落到同一条记录。
+pub fn normalized_root(root: &Path) -> String {
+    let resolved = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let text = resolved.to_string_lossy().to_string();
+    text.trim_end_matches('/').to_string()
+}
+
+pub fn sha256_hex(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// 库外状态的键（D7）：`settings.json` 的 `vault.id` 是合法 ULID 时优先用
+/// 它，否则派生自规范化根路径。首次确认建库时 `vault.id` 刚写入，
+/// 键会从派生值切到 ULID 一次——这是已知且接受的迁移点。
+pub fn vault_key(root: &Path) -> String {
+    if let Ok(text) = fs::read_to_string(settings_file(root)) {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(serde_json::Value::Object(vault)) = map.get("vault") {
+                if let Some(serde_json::Value::String(id)) = vault.get("id") {
+                    if crate::vault::ulid::is_ulid(id) {
+                        return id.clone();
+                    }
+                }
+            }
+        }
+    }
+    derived_key(root)
+}
+
+/// 仅由根路径派生（不看 settings）：建库前必须稳定，首次建库不会漂移。
+pub fn derived_key(root: &Path) -> String {
+    sha256_hex(&normalized_root(root))
+}
+
+/// 库外状态根：`~/Library/Application Support/Ember/vaults/<key>/`。
+/// 迁移快照与新历史日志都落在这里，绝不写进库内（可能位于 iCloud）。
+pub fn vault_state_dir(root: &Path) -> PathBuf {
+    app_support_dir().join("vaults").join(vault_key(root))
+}
+
+/// 库锁目录：`~/Library/Application Support/Ember/locks/<hash(root)>/`。
+/// 锁在建库前就要存在，且不能随 `vault.id` 出现而变化，因此只用根路径派生。
+pub fn lock_dir(root: &Path) -> PathBuf {
+    app_support_dir().join("locks").join(derived_key(root))
+}
+
 pub fn lock_file(root: &Path) -> PathBuf {
-    workbench(root).join(".lock")
+    lock_dir(root).join("lock")
 }
 
 pub fn settings_file(root: &Path) -> PathBuf {

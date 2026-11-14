@@ -7,6 +7,8 @@ import type { Disposable, WriteIntent } from '../../kernel/types.ts';
 interface RawStat {
   readonly mtime: string;
   readonly size: number;
+  readonly dev: number;
+  readonly ino: number;
 }
 
 interface RawScanEntry {
@@ -16,7 +18,7 @@ interface RawScanEntry {
 }
 
 /** 分块转换：逐字符拼接大文件（图库上限见 `src-tauri/src/vault/media.rs::MAX_ASSET_BYTES`）会在主线程上明显卡顿 */
-const toBase64 = (bytes: Uint8Array): string => {
+export const toBase64 = (bytes: Uint8Array): string => {
   let binary = '';
   const chunk = 0x8000;
   for (let index = 0; index < bytes.length; index += chunk) {
@@ -25,7 +27,7 @@ const toBase64 = (bytes: Uint8Array): string => {
   return btoa(binary);
 };
 
-const fromBase64 = (value: string): Uint8Array => {
+export const fromBase64 = (value: string): Uint8Array => {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
@@ -128,7 +130,9 @@ export const createTauriVaultPort = (options: TauriVaultPortOptions): VaultPort 
 
     stat: async (path) => {
       const stat = await invoke<RawStat | null>('vault_stat', { path: String(path) });
-      return stat === null ? null : { mtime: stat.mtime, size: stat.size };
+      return stat === null
+        ? null
+        : { mtime: stat.mtime, size: stat.size, dev: stat.dev, ino: stat.ino };
     },
 
     watch: (listener) => {

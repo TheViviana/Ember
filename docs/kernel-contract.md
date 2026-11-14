@@ -38,7 +38,7 @@
 | **I6** | 画布节点用 `docId` 引用文档，`docId` 语义为规范化相对路径。文档在应用内改名后由 `doc-service` 的 rename hook 触发 `canvas-host.rewriteDocRefs` 逐画布改写。 | 改名后画布断链 | 画布节点类型固定 `docId: DocId \| null` |
 | **I7** | 画布只存摆放：节点、连线、视口、书签、Portal 指向；不承载正文。 | 画布变成第二真相源 | `CanvasDocument` 无正文字段 |
 | **I8** | 文件被外部删除后，画布节点保留失效占位（不自动消失），右键可清理；从回收站放回后自动恢复可用。 | 误删布局 | 外部对账 + 失效占位测试 |
-| **I9** | 用户删除一律不永久删除：`vault_remove` 优先系统回收站，不可用时降级 Finder 与库内回收目录（细节见 vault-format §8.3）；`vault_purge` 仅供内核回滚（文章创建后画布写失败）与画布历史轮转，不注册为用户命令。 | 不可恢复的删除 | media/trash 测试 |
+| **I9** | 用户删除一律不永久删除：`vault_remove` 只进系统回收站（Finder 代删落点相同），不可用即失败，库内不再有降级副本（细节见 vault-format §8.3）；`vault_purge` 仅供内核回滚（文章创建后画布写失败）、画布历史轮转与文档历史淘汰，不注册为用户命令。 | 不可恢复的删除 | media/trash 测试 |
 | **I10** | Markdown 只有一条解析管线：`unified` + `remark-parse` + `remark-frontmatter` + `remark-gfm` + `remark-math`，产出单一 `mdast`。 | 两套 AST 语义漂移 | `packages/doc-model/src/markdown/pipeline.ts` 是唯一入口 |
 | **I11** | 未识别 frontmatter 键必须往返保留（语义级）。 | 破坏用户/其它工具数据 | 往返测试 |
 | **I12** | 基线冲突必须落盘冲突副本并 emit `doc:conflict`，不得只在内存里提示。 | 冲突被后续写入吞掉 | `WriteOutcome.conflict` 非空即已落盘 |
@@ -71,7 +71,7 @@ export interface DocService {
   create(input: CreateDocInput): Promise<DocSnapshot>;
   update(id: DocId, patch: DocPatch, opts: WriteOptions): Promise<WriteOutcome>;
   rename(id: DocId, next: VaultPath, opts: WriteOptions): Promise<WriteOutcome>;
-  remove(id: DocId, opts: WriteOptions): Promise<void>;   // 系统回收站（降级见 vault-format §8.3）
+  remove(id: DocId, opts: WriteOptions): Promise<void>;   // 只进系统回收站，不可用即失败（vault-format §8.3）
   listHistory(id: DocId): Promise<readonly DocHistoryEntry[]>;
   readHistory(id: DocId, versionId: string): Promise<DocHistoryPreview>;
   restoreHistory(id: DocId, versionId: string, opts: WriteOptions): Promise<WriteOutcome>;
@@ -114,13 +114,13 @@ export interface DocChange {
 - **D1a（D8 严格）** 保存只替换正文：`update` 不传 `patch.frontmatter` 时，frontmatter 区（含键序、引号、未知键、BOM）**逐字节原样保留**，只在正文区按原文件行尾写入；显式传 frontmatter 补丁时也只在原位改那几个顶层键，从不新增 `created` / `updated`，旧 `id` 原样留在原位。禁止退回「整份重排只保留值」。
 - **D2** `create` 命中已有路径抛 `path_exists`；身份即路径，不存在 `duplicate_id`。新建文件只写用户显式提供的展示元数据，不写 `id` / `created` / `updated`。
 - **D3** `rename` 改的是身份：校验目标路径合法且不存在（否则 `path_exists`）、基线过期抛 `stale_revision`；改名成功后旧键整体移除、新路径登记并迁移历史，再经 rename hook 同步画布节点（逐画布原子写，单张失败只记录不回滚改名），emit `renamed`（带 `from`）。frontmatter 一字节不动。
-- **D4** `remove` → `vault_remove` → OS 回收站（非 macOS 明确失败，不回退永久删除）；`purge` 只服务回滚。
+- **D4** `remove` → `vault_remove` → 只进系统回收站（Finder 代删落点也是系统回收站；不可用即 `io_failed`，文件保持原样，不回退库内副本、不永久删除）；`purge` 只服务回滚与历史淘汰。
 - **D5** `read` 返回的 `DocMeta.rev` 可直接作为后续写 `base`（read 不写盘，只同步缓存）。
 - **D6** 外部变更事件只由 watcher → refresh 链广播（`doc:changed` kind `external`）；read 不是事件源。
-- **D7** 外部改名/移动：身份即路径，对账表现为旧路径 `removed` + 新路径登记（`renamed` / `external`）。严格重绑（唯一候选 + 同卷 inode 或 sha256 全等至少一个第二信号；同名文件拒绝，宁断占位也不误绑）由迁移/对账层实现，未重绑成功前画布节点按 I8 转失效占位，**不按名字猜测绑定**。
+- **D7** 外部改名/移动：身份即路径。`applyFileEvents` 收到 `renamed(from)` 时按严格重绑裁决：`from` 必须唯一、且新路径未在目录中（同名冲突一律拒绝）；第二信号是 `dev/ino` 相同或整文件 sha256 全等，至少满足一个才把旧身份（含 `rev`）接到新路径并 emit `renamed`。拒绝或没有第二信号时退回「旧路径 `removed` + 新路径登记」；未重绑成功前画布节点按 I8 转失效占位，**不按名字猜测绑定**。`VaultPort.stat` 因此必须返回 `dev` / `ino`。
 - **D8** 文件消失：refresh 广播 `removed`；画布节点转失效占位（I8）。
 - **D9** per-docId 串行写队列仍然保留：读-改-写整体入队，防止进程内并发丢更新。`previousCommitted` 快照与 merge3 已删除。
-- **D10** `update` 快路径在提交主文前先把当前磁盘**原始字节**记入文档历史（`.workbench/history/documents/<docId>/`，每篇最多 20 版 / 64 MiB，最旧先淘汰）；历史写失败直接抛出且不提交主文。`create` / `rename` / 冲突副本创建 / `remove` / `purge` 不记录历史。
+- **D10** `update` 快路径在提交主文前先把当前磁盘**原始字节**记入文档历史（库外 `vaults/<key>/history/`：`log.jsonl` + 扁平 `versions/<ULID>.md`，每篇最多 20 版 / 64 MiB，最旧先淘汰）；历史写失败直接抛出且不提交主文。`create` / `rename` / 冲突副本创建 / `remove` / `purge` 不记录历史；`rename` 会把日志里的 `docId` 换到新身份。历史日志损坏按「无历史」处理并告警，坏行只跳过该行。
 - **D11** `restoreHistory` 在串行队列内重新读盘并校验 `opts.base.hash`：一致则先把当前版入历史再写回目标版原始字节（后续历史不删除，可用恢复前的版本再恢复）；失配时不改主文、不新增历史，把目标版内容写成冲突副本并返回 `merged: false`。目标版本 id 非法、文件缺失、非 UTF-8 或 sha256 与索引不符分别抛 `invalid_payload` / `doc_not_found`，且全程不写盘。
 - **D12** `DocMeta.conflictOf` 由 frontmatter `ember.conflictOf` 解析：值是原文的路径身份（`asDocId` 校验通过才归还），缺失/非法一律 `null`。冲突副本仍留在普通列表与搜索结果中，外壳据 `conflictOf !== null` 显示冲突标识；不做自动合并、不自动清理。
 - **D13** `adoptCopy` 在**原文** docId 队列内执行：重新读盘并分别校验副本与原文的 sha256（任一失配抛 `stale_revision`，零写入、且不制造新副本），把副本正文与 `title/summary/tags/aliases` 写回原文（`patchFrontmatterRegion` 只改这几个键，其余 frontmatter 字节不动），提交前 `recordHistory` 原文原始字节。第二步删除副本：复核 hash 后 `vault_remove`（系统回收站）并 emit `removed`；删除失败或副本已变化不撤销原文写入，只返回 `copyRemoved: false` 并告警。原文缺失时抛 `doc_not_found`（孤儿冲突只能另存或删除副本）。`detachCopy` 清除副本的 `ember.conflictOf` 并保留路径/正文，同样先记历史；非冲突副本、非 UTF-8 抛 `invalid_payload`，只读抛 `vault_locked`。
@@ -155,7 +155,7 @@ export interface HealthReport {
 
 - **H1** `scan` 只经 `VaultPort.scan` / `read` / `stat`：以文件系统清单为入口，**不依赖 `docs.list()`**（否则漏掉坏 frontmatter 文档），扫描期间零写入。
 - **H2** 超过 32 MiB 的文件只报 `oversize`，不读取；符号链接只报 `symlink`，不跟随、不读取目标。
-- **H3** 只开放一类修复：`.markdown` → `.md` 改名；坏 YAML、非 UTF-8、失效资产、坏画布/历史、符号链接只报告。身份即路径后不再有缺 id / 非法 id / 重复 id 三类问题。
+- **H3** 只开放一类修复：`.markdown` → `.md` 改名；坏 YAML、非 UTF-8、失效资产、坏画布/历史、符号链接只报告。身份即路径后不再有缺 id / 非法 id / 重复 id 三类问题。文档历史已外迁，`scan` 不再检查 `.workbench/history/documents/`，旧历史桶原样保留。
 - **H4** 修复前复核 path + 字节 sha256：失配抛 `stale_revision` 且零写入；改名目标已存在抛 `path_exists`，不覆盖；只读抛 `vault_locked`。
 - **H5** `renameMarkdown` 只改文件名、不改内容；成功后 `docs.refresh()`，新路径随即进入目录。
 
@@ -174,6 +174,25 @@ export interface FolderService {
 - **F1** 不维护 `.workbench/folders.json` 之类目录索引：空目录也直接来自 `VaultPort.listDirs`（磁盘），不存在第二真相源。
 - **F2** `create` 只建单层，父目录必须已存在；名称经 UI / 服务 / 后端三层同规则校验（空名、`/`、控制字符、`.`/`..`、隐藏名、`media`）。同名目录或同名文件抛 `path_exists`，父目录缺失抛 `doc_not_found`，只读抛 `vault_locked`。
 - **F3** `remove` 把整个目录（连同文档与子目录）作为**一个条目**移入系统回收站，不可撤销；走 `vault_remove_dir` → 系统回收站，系统回收站不可用时直接失败，不降级库内回收、不永久删除、不拆成逐文件删除。
+
+---
+
+## 3.3 MigrationService（库外快照 + 可回滚）
+
+```ts
+export interface MigrationService {
+  migrate(): Promise<MigrationReport>;   // noop | migrated
+  rollback(): Promise<MigrationRollbackReport>;
+}
+```
+
+- **M1** 启动时在文档扫描之后、画布服务之前执行（`doc-service` 对账已完成，`legacyIds()` 可用）；`settings.docIdScheme === 'path'` 时整段 noop。
+- **M2** 快照写到**库外** `vaults/<key>/migrations/<ULID>/snapshot.json`（原画布文本、原 `linkOverrides`、旧 ULID → 路径映射、占位清单、告警），保留最近 10 份。库内不新建 `migrations/`、`history/` 之类目录；库可能在 iCloud/Obsidian 目录，写进去会跟着同步。
+- **M3** 画布逐张原子写：节点旧 `docId` 唯一映射 → 改写成路径；0 个或多个候选 → 节点转 `kind: 'note'`、`docId: null`、`text` 留下原 ULID（能从旧历史桶唯一确定 basename 时一并写上）。原文与快照一致，回滚按快照原文逐字节写回。
+- **M4** `linkOverrides`：值映射到唯一文档 → 改写为路径；映射不到（0 或多候选）→ 丢弃并告警。回写设置时只替换 `linkOverrides` 与 `docIdScheme` 两个键，其余键与键序原样保留。
+- **M5** 库内旧历史桶 `.workbench/history/documents/` 原样保留：不导入、不删除、健康检查不扫描。
+- **M6** 回滚：命令 `core.migration.rollback` 取最近一份快照，恢复各画布原文与 `linkOverrides`、删除 `docIdScheme`；文档正文从头到尾未被改写，因此无需恢复。
+- **M7** 后置保证：全部 `.md` 字节与迁移前一致（保存只替换正文，frontmatter 一字节不动）；库内唯一变化是 `settings.json` 多出 `docIdScheme`。
 
 ---
 
@@ -275,7 +294,7 @@ export interface KernelContext {
 
 `KERNEL_VERSION = '2.5.0'`：2.4.0 → 2.5.0 为 minor，`KernelContext` 新增 `folders`（`FolderService`，见 §3.2），`VaultPort` 新增 `createDir` / `trashDir` / `listDirs`；既有方法签名与错误码不变。2.3.0 → 2.4.0 为 minor，`DocService` 新增 `guard` / `rescan`，`KernelEventMap` 新增 `vault:guarded` / `vault:sync`，`VaultPort` 新增可选 `setRuntimeReadonly`；既有方法签名与错误码不变。2.2.0 → 2.3.0 为 minor，`DocService` 新增 `adopt`，`KernelContext` 新增 `health`，`VaultPort` 新增只读 `scan`；既有方法签名与错误码不变。2.1.0 → 2.2.0 为 minor，`DocService` 新增 `adoptCopy` / `detachCopy` 两个方法，`DocMeta` 新增 `conflictOf`。2.0.0 → 2.1.0 为 minor，`DocService` 新增 `listHistory` / `readHistory` / `restoreHistory` 三个方法。相对 1.2.0 的 2.0.0 是 major：删除了 `articles` / `editor` / `capabilities` 三个服务与 `withOwner`，IndexService 语义变更。
 
-P1b（尚未发版，随下一版内核落地）：`DocId` 语义改为规范化相对路径，`DocService` 删除 `adopt`，`DocFlags` 与 `HealthIssueKind` 的三类 id 问题删除，`DocChange` 新增 `from`。
+P1b（尚未发版，随下一版内核落地）：`DocId` 语义改为规范化相对路径，`DocService` 删除 `adopt`，`DocFlags` 与 `HealthIssueKind` 的三类 id 问题删除，`DocChange` 新增 `from`；新增 `MigrationService`（§3.3）、`VaultStatePort`（库外历史与迁移快照）、`VaultPort.stat` 返回 `dev/ino`；库锁移到库外 `locks/<sha256(root)>/lock`。
 
 ---
 
@@ -325,8 +344,8 @@ P1b（尚未发版，随下一版内核落地）：`DocId` 语义改为规范化
 
 ## 9. 启动顺序
 
-1. Rust：`Vault::open`（身份文件 → 独占创建抢锁 → pid 存活判定 → 启动清扫）→ watcher 线程。
-2. TS：events → commands → settings → docs → index（懒启动）→ canvas（注入 docs）→ 绑定上下文。
+1. Rust：`Vault::open`（身份文件 → 库外独占创建抢锁 → pid 存活判定 → 启动清扫）→ watcher 线程。
+2. TS：events → commands → settings → docs → **migration（文档身份迁移，§3.3）** → index（懒启动）→ canvas（注入 docs）→ 绑定上下文。
 3. `docs.flush()` → watcher 对账订阅。
 4. 中途失败即抛出，不允许半初始化进入可写状态；抢不到锁 = 只读观察者（`lockedByOther`），永远不「无锁写入」。
 

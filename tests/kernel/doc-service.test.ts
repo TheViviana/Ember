@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createUlid } from '#doc-model';
+import { createUlid, unsafeVaultPath } from '#doc-model';
 import { createDocService } from '../../src/kernel/doc-service.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
 import { createEventBus } from '../../src/kernel/events.ts';
 import { createPathTools } from '../../src/kernel/paths.ts';
 import type { DocChange, Logger } from '../../src/kernel/types.ts';
-import { createMemoryVault, type MemoryVault } from './fakes.ts';
+import { createMemoryState, createMemoryVault, type MemoryVault } from './fakes.ts';
 
 const VALID = 'notes/ok.md';
 const BROKEN = 'notes/broken.md';
@@ -49,6 +49,7 @@ const setup = (
   const events = createEventBus();
   const service = createDocService({
     port: vault.port,
+    state: createMemoryState(),
     paths: createPathTools(),
     events,
     log: silentLog,
@@ -240,6 +241,7 @@ void test('并发 update 基于同一 base 时不得静默丢失任一方的改�
         await vault.port.write(path, bytes, intent);
       },
     },
+    state: createMemoryState(),
     paths: createPathTools(),
     events: createEventBus(),
     log: silentLog,
@@ -273,6 +275,7 @@ const createServiceWith = (
   const events = createEventBus();
   const service = createDocService({
     port: { ...vault.port, ...overrides },
+    state: createMemoryState(),
     paths: createPathTools(),
     events,
     log: silentLog,
@@ -563,4 +566,97 @@ void test('删除后库内不残留 .workbench/trash 副本', async () => {
   const trashKeys = Object.keys(vault.dump()).filter((path) => path.startsWith('.workbench/trash/'));
   assert.deepEqual(trashKeys, [], '文件是唯一真相源，库内不得再有删除副本');
   assert.equal(vault.dump()[VALID], undefined);
+});
+
+const NEXT = 'notes/moved.md';
+
+/** 模拟外部工具把文件从 from 移到 to（字节原样或改写后），再送一条 renamed 事件 */
+const moveExternally = async (
+  vault: MemoryVault,
+  service: ReturnType<typeof createDocService>,
+  from: string,
+  to: string,
+  text: string,
+): Promise<void> => {
+  vault.removeRaw(from);
+  vault.writeRaw(to, text);
+  await service.applyFileEvents([
+    { kind: 'renamed', path: unsafeVaultPath(to), from: unsafeVaultPath(from) },
+  ]);
+};
+
+void test('外部改名内容未变：唯一候选 + 内容信号重绑身份，rev 沿用并广播 renamed', async () => {
+  const { vault, service } = setup({ [VALID]: VALID_TEXT });
+  const before = (await service.list())[0];
+  assert.ok(before !== undefined);
+  const changes: DocChange[] = [];
+  const hooks: string[] = [];
+  const watcher = service.watch((change) => changes.push(change));
+  service.setRenameHook((from, to) => {
+    hooks.push(`${String(from)}→${String(to)}`);
+    return Promise.resolve();
+  });
+
+  await moveExternally(vault, service, VALID, NEXT, vault.dump()[VALID] ?? '');
+  watcher.dispose();
+
+  const after = await service.list();
+  assert.equal(after.length, 1, '改名不得产生第二篇文档');
+  assert.equal(String(after[0]?.id), NEXT);
+  assert.equal(after[0]?.rev.rev, before.rev.rev, '重绑沿用旧 rev，不重置为新建');
+  assert.equal(after[0]?.rev.hash, before.rev.hash, '字节未变则哈希不变');
+  assert.deepEqual(hooks, [`${VALID}→${NEXT}`], '画布引用同步钩子只调用一次');
+  const renamed = changes.filter((change) => change.kind === 'renamed');
+  assert.equal(renamed.length, 1);
+  assert.equal(String(renamed[0]?.from), VALID);
+  await assert.rejects(() => service.read(before.id), (error: unknown) => {
+    return error instanceof EmberError && error.code === 'doc_not_found';
+  });
+});
+
+void test('外部改名目标名已占用：拒绝重绑，退回删除 + 目标文档保持自身身份', async () => {
+  const { vault, service } = setup({
+    [VALID]: VALID_TEXT,
+    [NEXT]: '---\ntitle: 目标\n---\n\n目标正文\n',
+  });
+  const changes: DocChange[] = [];
+  const watcher = service.watch((change) => changes.push(change));
+  const hooks: string[] = [];
+  service.setRenameHook((from, to) => {
+    hooks.push(`${String(from)}→${String(to)}`);
+    return Promise.resolve();
+  });
+
+  await moveExternally(vault, service, VALID, NEXT, vault.dump()[VALID] ?? '');
+  watcher.dispose();
+
+  const after = await service.list();
+  assert.equal(after.length, 1);
+  assert.equal(String(after[0]?.path), NEXT);
+  // 拒绝重绑后磁盘是唯一真相：目标路径上的字节已经被新文件覆盖，目录跟随磁盘更新，
+  // 但绝不能再多出一篇文档或把旧身份搬过来。
+  assert.equal(after[0]?.title, '正常文档');
+  assert.equal(String(after[0]?.id), NEXT);
+  assert.deepEqual(hooks, [], '冲突时不触发画布引用同步');
+  assert.equal(changes.some((change) => change.kind === 'renamed'), false);
+});
+
+void test('外部改名且内容已变（无第二信号）：不重绑，按删除 + 新建处理', async () => {
+  const { vault, service } = setup({ [VALID]: VALID_TEXT });
+  const before = (await service.list())[0];
+  assert.ok(before !== undefined);
+  const changes: DocChange[] = [];
+  const watcher = service.watch((change) => changes.push(change));
+
+  await moveExternally(vault, service, VALID, NEXT, '---\ntitle: 新标题\n---\n\n新正文\n');
+  watcher.dispose();
+
+  const after = await service.list();
+  assert.equal(after.length, 1);
+  assert.equal(String(after[0]?.id), NEXT);
+  assert.equal(after[0]?.rev.rev, 1, '没有第二信号时按新文档登记');
+  assert.equal(after[0]?.title, '新标题');
+  assert.equal(changes.some((change) => change.kind === 'renamed'), false);
+  assert.equal(changes.filter((change) => change.kind === 'removed').length, 1);
+  assert.equal(changes.filter((change) => change.kind === 'created').length, 1);
 });

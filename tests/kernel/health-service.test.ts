@@ -7,7 +7,7 @@ import { createEventBus } from '../../src/kernel/events.ts';
 import { createHealthService } from '../../src/kernel/health-service.ts';
 import { createPathTools } from '../../src/kernel/paths.ts';
 import type { HealthIssue, HealthIssueKind, Logger } from '../../src/kernel/types.ts';
-import { createMemoryVault, type MemoryVaultOptions } from './fakes.ts';
+import { createMemoryState, createMemoryVault, type MemoryVaultOptions } from './fakes.ts';
 
 const silentLog: Logger = {
   debug: () => undefined,
@@ -26,7 +26,14 @@ const setup = (options: MemoryVaultOptions = {}) => {
   const vault = createMemoryVault(options);
   const paths = createPathTools();
   const events = createEventBus();
-  const docs = createDocService({ port: vault.port, paths, events, log: silentLog, now: NOW });
+  const docs = createDocService({
+    port: vault.port,
+    state: createMemoryState(),
+    paths,
+    events,
+    log: silentLog,
+    now: NOW,
+  });
   const health = createHealthService({ port: vault.port, paths, docs, log: silentLog, now: NOW });
   return { vault, docs, health };
 };
@@ -152,26 +159,13 @@ void test('失效资产引用只报告库内 media/ 路径', async () => {
   assert.equal(issue.fix, null);
 });
 
-void test('坏画布与坏历史可被发现', async () => {
-  const versionId = createUlid(1_700_000_000_001);
-  const index = JSON.stringify({
-    schemaVersion: 1,
-    docId: ID,
-    versions: [
-      {
-        versionId,
-        hash: `sha256:${'0'.repeat(64)}`,
-        path: 'notes/a.md',
-        at: '2026-11-13T00:00:00Z',
-        size: 10,
-      },
-    ],
-  });
+void test('坏画布与坏画布历史可被发现，旧文档历史桶不再检查', async () => {
   const { health } = setup({
     files: {
       '.workbench/canvas/x.json': '{',
       '.workbench/history/x.9.json': '{}',
-      [`.workbench/history/documents/${ID}/index.json`]: index,
+      // D6：旧文档历史桶原样保留，新历史在库外，健康检查不再读它
+      [`.workbench/history/documents/${ID}/index.json`]: '{not-json',
     },
   });
 
@@ -179,14 +173,8 @@ void test('坏画布与坏历史可被发现', async () => {
 
   assert.equal(issuesOf(report.issues, 'broken_canvas').length, 1);
   const historyIssues = issuesOf(report.issues, 'broken_history');
-  assert.equal(historyIssues.length, 2);
-  assert.ok(historyIssues.some((issue) => issue.detail.includes('槽位')));
-  const missingVersion = historyIssues.find((issue) => issue.target !== null);
-  assert.ok(missingVersion !== undefined);
-  assert.equal(
-    missingVersion.target,
-    `.workbench/history/documents/${ID}/${versionId}.md`,
-  );
+  assert.equal(historyIssues.length, 1, '只剩画布历史槽位问题');
+  assert.ok(historyIssues[0]?.detail.includes('槽位'));
 });
 
 void test('符号链接只报告不跟随', async () => {

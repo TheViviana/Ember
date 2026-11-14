@@ -5,6 +5,7 @@ import { bootKernel } from '../kernel/boot.ts';
 import type { WindowPort } from '../kernel/ports.ts';
 import { attachMachineUiPort, hydrateMachineUi } from './stores/machine-store.ts';
 import { createTauriMachineUiPort } from './tauri/machine-ui-port.ts';
+import { createTauriVaultStatePort } from './tauri/state-port.ts';
 import { createTauriVaultPort } from './tauri/vault-port.ts';
 import { createTauriWindowPort } from './tauri/window-port.ts';
 
@@ -46,6 +47,7 @@ export const createKernel = async (): Promise<BootedKernel> => {
         readonlyMode: identity.readonly,
         readonlyReason: identity.readonlyReason ?? null,
       }),
+      state: createTauriVaultStatePort(),
     },
   });
   return { ...kernel, window: createTauriWindowPort() };

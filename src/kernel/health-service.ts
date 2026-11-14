@@ -1,4 +1,4 @@
-import { isUlid, type ContentHash, type VaultPath } from '#doc-model';
+import type { ContentHash, VaultPath } from '#doc-model';
 import { parseCanvasDocument } from '#canvas-engine';
 import { hashBytes, isUtf8, parseDocText, utcNow } from './doc-text.ts';
 import { EmberError, toErrorText } from './errors.ts';
@@ -26,7 +26,6 @@ const decoder = new TextDecoder('utf-8', { fatal: false });
 /** 与 Rust `MAX_VAULT_READ_BYTES` 一致：超过即不读取 */
 const READ_LIMIT = 32 * 1024 * 1024;
 const CANVAS_SLOTS = 5;
-const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const MARKDOWN_IMAGE = /!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^)\s]+))(?:\s+["'][^"']*["'])?\s*\)/g;
 const WIKI_EMBED = /!\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g;
 
@@ -93,93 +92,7 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
     }
   };
 
-  const checkHistoryIndex = async (
-    entry: VaultScanEntry,
-    docId: string,
-    inventoryPaths: ReadonlySet<string>,
-    inventorySizes: ReadonlyMap<string, number>,
-    issues: HealthIssue[],
-  ): Promise<void> => {
-    const path = entry.path;
-    const bytes = await readLimited(path, entry.size);
-    if (bytes === undefined) {
-      issues.push(issue('broken_history', path, '历史索引超过 32 MiB，未读取'));
-      return;
-    }
-    if (bytes === null) return;
-    if (!isUtf8(bytes)) {
-      issues.push(issue('broken_history', path, '历史索引不是合法 UTF-8'));
-      return;
-    }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(decoder.decode(bytes));
-    } catch (error) {
-      issues.push(issue('broken_history', path, `历史索引 JSON 解析失败：${String(error)}`));
-      return;
-    }
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      issues.push(issue('broken_history', path, '历史索引根节点不是对象'));
-      return;
-    }
-    const record = raw as Readonly<Record<string, unknown>>;
-    if (record.schemaVersion !== 1) {
-      issues.push(issue('broken_history', path, '历史索引版本不支持'));
-      return;
-    }
-    if (record.docId !== docId) {
-      issues.push(issue('broken_history', path, '历史索引 docId 与目录不一致'));
-      return;
-    }
-    const rawVersions = record.versions;
-    if (!Array.isArray(rawVersions)) {
-      issues.push(issue('broken_history', path, '历史索引 versions 不是数组'));
-      return;
-    }
-    const versions = rawVersions as readonly unknown[];
-    for (const item of versions) {
-      if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-        issues.push(issue('broken_history', path, '历史版本条目不是对象'));
-        return;
-      }
-      const version = item as Readonly<Record<string, unknown>>;
-      const versionId = typeof version.versionId === 'string' ? version.versionId : '';
-      const hash = typeof version.hash === 'string' ? version.hash : '';
-      const size = typeof version.size === 'number' ? version.size : -1;
-      if (
-        !isUlid(versionId) ||
-        !HASH_PATTERN.test(hash) ||
-        typeof version.path !== 'string' ||
-        typeof version.at !== 'string' ||
-        !Number.isInteger(size) ||
-        size < 0
-      ) {
-        issues.push(issue('broken_history', path, `历史版本条目字段非法：${versionId || '(空)'}`));
-        return;
-      }
-      const versionPath = paths.normalize(
-        `.workbench/history/documents/${docId}/${versionId}.md`,
-      );
-      if (!inventoryPaths.has(String(versionPath))) {
-        issues.push(
-          issue('broken_history', path, '历史版本文件缺失', { target: versionPath }),
-        );
-        continue;
-      }
-      if (inventorySizes.get(String(versionPath)) !== size) {
-        issues.push(
-          issue('broken_history', path, '历史版本大小与索引不一致', { target: versionPath }),
-        );
-      }
-    }
-  };
-
-  const checkWorkbench = async (
-    entry: VaultScanEntry,
-    inventoryPaths: ReadonlySet<string>,
-    inventorySizes: ReadonlyMap<string, number>,
-    issues: HealthIssue[],
-  ): Promise<void> => {
+  const checkWorkbench = async (entry: VaultScanEntry, issues: HealthIssue[]): Promise<void> => {
     const path = String(entry.path);
     if (/^\.workbench\/canvas\/[^/]+\.json$/.test(path)) {
       await checkCanvasJson(entry, 'broken_canvas', `画布 ${path}`, issues);
@@ -193,18 +106,9 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
         return;
       }
       await checkCanvasJson(entry, 'broken_history', `画布历史 ${path}`, issues);
-      return;
     }
-    const indexMatch = /^\.workbench\/history\/documents\/([^/]+)\/index\.json$/.exec(path);
-    if (indexMatch !== null) {
-      await checkHistoryIndex(
-        entry,
-        indexMatch[1] ?? '',
-        inventoryPaths,
-        inventorySizes,
-        issues,
-      );
-    }
+    // 文档历史已迁到库外（`vaults/<key>/history/`）；库内 `.workbench/history/documents`
+    // 只剩旧版本遗留的桶（D6：原样保留），不再参与健康检查。
   };
 
   /** 只接受库内 `media/` 相对路径；外链与越界路径不检查 */
@@ -249,11 +153,6 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
     const inventory = await port.scan();
     const issues: HealthIssue[] = [];
     const inventoryPaths = new Set(inventory.map((entry) => String(entry.path)));
-    const inventorySizes = new Map(
-      inventory
-        .filter((entry) => entry.kind === 'file')
-        .map((entry) => [String(entry.path), entry.size] as const),
-    );
     let documents = 0;
 
     for (const entry of inventory) {
@@ -264,7 +163,7 @@ export const createHealthService = (options: HealthServiceOptions): HealthServic
         continue;
       }
       if (isWorkbench(entry.path)) {
-        await checkWorkbench(entry, inventoryPaths, inventorySizes, issues);
+        await checkWorkbench(entry, issues);
         continue;
       }
       const extension = paths.ext(entry.path).toLowerCase();

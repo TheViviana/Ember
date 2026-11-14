@@ -7,13 +7,14 @@ import { createEventBus } from '../../src/kernel/events.ts';
 import { createPathTools } from '../../src/kernel/paths.ts';
 import type { VaultPort } from '../../src/kernel/ports.ts';
 import type { DocMeta, DocRevision, Logger } from '../../src/kernel/types.ts';
+import { createMemoryState } from './fakes.ts';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8');
 
 const ORIGINAL_PATH = 'notes/原文.md';
 const COPY_PATH = 'notes/原文 (conflict 20260102-101010).md';
-const HISTORY_PREFIX = '.workbench/history/documents';
+
 
 const silentLog: Logger = {
   debug: () => undefined,
@@ -82,7 +83,9 @@ const createByteVault = (
     stat: (path) => {
       const bytes = files.get(String(path));
       return Promise.resolve(
-        bytes === undefined ? null : { mtime: new Date(0).toISOString(), size: bytes.byteLength },
+        bytes === undefined
+          ? null
+          : { mtime: new Date(0).toISOString(), size: bytes.byteLength, dev: 1, ino: 1 },
       );
     },
     watch: () => ({ dispose: (): void => undefined }),
@@ -104,12 +107,15 @@ const setup = (
   options: SetupOptions = {},
 ): {
   readonly vault: ByteVault;
+  readonly state: ReturnType<typeof createMemoryState>;
   readonly service: ReturnType<typeof createDocService>;
 } => {
   const vault = createByteVault(initial, options);
+  const state = createMemoryState();
   let tick = 1_700_000_000_000;
   const service = createDocService({
     port: vault.port,
+    state,
     paths: createPathTools(),
     events: createEventBus(),
     log: silentLog,
@@ -119,7 +125,7 @@ const setup = (
       return at;
     },
   });
-  return { vault, service };
+  return { vault, state, service };
 };
 
 const originalText = (body: string): string =>
@@ -273,7 +279,7 @@ void test('副本基线过期：采用抛 stale_revision 且不写原文', async
 
 void test('采用副本：正文与允许元数据写回原文，保留原 id，副本移入回收站', async () => {
   const { originalId, copyId, files } = seed();
-  const { vault, service } = setup(files);
+  const { vault, state, service } = setup(files);
   await service.refresh();
   const metas = await service.list();
   const copy = findCopy(metas);
@@ -297,8 +303,8 @@ void test('采用副本：正文与允许元数据写回原文，保留原 id，
   assert.doesNotMatch(result.snapshot.text, /原文正文/);
 
   assert.equal(vault.files.has(COPY_PATH), false, '副本应被移入回收站');
-  const historyFiles = [...vault.files.keys()].filter((path) => path.startsWith(HISTORY_PREFIX));
-  assert.ok(historyFiles.length > 0, '采用前应记录原文历史');
+  const historyFiles = Object.keys(state.dump()).filter((path) => path.startsWith('history/versions/'));
+  assert.ok(historyFiles.length > 0, '采用前应记录原文历史（库外日志）');
 
   const next = await service.list();
   assert.equal(next.length, 1);

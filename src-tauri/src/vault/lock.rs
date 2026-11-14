@@ -103,7 +103,8 @@ pub fn acquire_detailed(
     vault_id: &str,
 ) -> Result<VaultLock, AcquireFailure> {
     let path = paths::lock_file(root);
-    fs::create_dir_all(paths::workbench(root)).map_err(VaultError::from)?;
+    // 锁在库外（D7）：库可能位于 iCloud 或只读卷，锁的创建不能依赖库内目录。
+    fs::create_dir_all(paths::lock_dir(root)).map_err(VaultError::from)?;
     let machine_id = machine_id()?;
 
     for _ in 0..ACQUIRE_ATTEMPTS {
@@ -151,7 +152,7 @@ fn claim_stale(
     vault_id: &str,
     machine_id: &str,
 ) -> Result<Claim, AcquireFailure> {
-    let claim = paths::workbench(root).join(format!(
+    let claim = paths::lock_dir(root).join(format!(
         "lock.claim.{}.{}",
         std::process::id(),
         CLAIM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -297,6 +298,8 @@ mod tests {
     impl Drop for TempRoot {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+            // 锁已迁到库外：测试也必须清掉自己那份，别在真实 App Support 里留垃圾。
+            let _ = fs::remove_dir_all(paths::lock_dir(&self.0));
         }
     }
 
@@ -356,7 +359,7 @@ mod tests {
     #[test]
     fn dead_pid_lock_is_claimed() {
         let temp = TempRoot::new("lock-dead-pid");
-        fs::create_dir_all(paths::workbench(&temp.0)).unwrap();
+        fs::create_dir_all(paths::lock_dir(&temp.0)).unwrap();
         let path = paths::lock_file(&temp.0);
         write_lock(&path, &payload_with(999_999_999));
 
@@ -370,7 +373,7 @@ mod tests {
     #[test]
     fn corrupt_lock_is_claimed() {
         let temp = TempRoot::new("lock-corrupt");
-        fs::create_dir_all(paths::workbench(&temp.0)).unwrap();
+        fs::create_dir_all(paths::lock_dir(&temp.0)).unwrap();
         let path = paths::lock_file(&temp.0);
         fs::write(&path, b"garbage-not-json").unwrap();
 
@@ -382,7 +385,7 @@ mod tests {
     #[test]
     fn concurrent_acquire_has_exactly_one_winner() {
         let temp = TempRoot::new("lock-race");
-        fs::create_dir_all(paths::workbench(&temp.0)).unwrap();
+        fs::create_dir_all(paths::lock_dir(&temp.0)).unwrap();
         let path = paths::lock_file(&temp.0);
         write_lock(&path, &payload_with(999_999_999));
 

@@ -4,7 +4,6 @@ import {
   isUlid,
   joinFrontmatter,
   toSerializable,
-  unsafeContentHash,
   asDocId,
   type ContentHash,
   type DocId,
@@ -19,12 +18,18 @@ import {
   parseDocText,
   patchFrontmatterRegion,
   replaceBodyRegion,
-  utcNow,
 } from './doc-text.ts';
 import type { EventBus } from './events.ts';
 import { EmberError } from './errors.ts';
+import { createHistoryStore } from './history-store.ts';
 import type { PathTools } from './paths.ts';
-import type { TrashDestination, VaultPort, VaultFileChange, VaultFileEvent } from './ports.ts';
+import type {
+  TrashDestination,
+  VaultPort,
+  VaultFileChange,
+  VaultFileEvent,
+  VaultStatePort,
+} from './ports.ts';
 import type {
   AdoptConflictOptions,
   AdoptConflictResult,
@@ -53,7 +58,7 @@ export interface DocService {
   create(input: CreateDocInput): Promise<DocSnapshot>;
   update(id: DocId, patch: DocPatch, opts: WriteOptions): Promise<WriteOutcome>;
   rename(id: DocId, next: VaultPath, opts: WriteOptions): Promise<WriteOutcome>;
-  /** 用户删除：优先系统回收站，不可用降级库内回收目录；返回实际落点 */
+  /** 用户删除：只移入系统回收站（Finder 代删落点相同），不可用即失败；返回实际落点 */
   remove(id: DocId, opts: WriteOptions): Promise<TrashDestination | null>;
 
   /** 列出该文档历史版本（新→旧）；索引缺失/损坏返回空数组并告警，不抛错 */
@@ -96,6 +101,11 @@ export interface DocServiceInternal extends DocService {
   purge(id: DocId, opts: WriteOptions): Promise<void>;
   /** 注册改名后的外部引用同步（画布节点）；传 null 解除 */
   setRenameHook(hook: ((from: DocId, to: DocId) => Promise<void>) | null): void;
+  /**
+   * 旧 ULID → 当前路径（可能多对一，交给迁移层按「唯一候选」裁决）。
+   * 只读已扫描的目录，不写盘；迁移快照与回滚都需要这份索引。
+   */
+  legacyIds(): Promise<ReadonlyMap<string, readonly VaultPath[]>>;
 }
 
 interface CatalogEntry {
@@ -112,10 +122,15 @@ interface CatalogEntry {
   /** watcher 事件携带的元数据：与事件一致时增量对账可跳过读盘 */
   mtimeMs: number | null;
   size: number | null;
+  /** 严格重绑的第二信号：外部改名后 inode 不变，可证明还是同一个文件 */
+  dev: number | null;
+  ino: number | null;
 }
 
 export interface DocServiceOptions {
   readonly port: VaultPort;
+  /** 库外状态（历史日志）；迁移快照也走它，库里不再有 `.workbench/history/documents` */
+  readonly state: VaultStatePort;
   readonly paths: PathTools;
   readonly events: EventBus;
   readonly log: Logger;
@@ -124,14 +139,6 @@ export interface DocServiceOptions {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: false });
-
-/** 文档历史目录：`.workbench/history/documents/<docId>/`（与画布历史同属 history/） */
-const HISTORY_DOC_DIR = '.workbench/history/documents';
-/** 每篇文档保留的历史版本数 */
-const HISTORY_KEEP = 20;
-/** 每篇文档历史版本的字节预算 */
-const HISTORY_BUDGET = 64 * 1024 * 1024;
-const HISTORY_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 /**
  * 库守护熔断阈值（保守默认值）：
@@ -199,28 +206,12 @@ const composeDocText = (frontmatter: Frontmatter, body: string): string => {
   return joinFrontmatter(stringifyYaml(serializable, { lineWidth: 0 }).replace(/\n$/, ''), body);
 };
 
-/** 保留策略：最多 HISTORY_KEEP 版、总字节不超过 HISTORY_BUDGET，永远保留最新一条 */
-const pruneHistory = (
-  entries: readonly DocHistoryEntry[],
-): { readonly kept: DocHistoryEntry[]; readonly dropped: DocHistoryEntry[] } => {
-  const dropped: DocHistoryEntry[] = [];
-  let total = entries.reduce((sum, entry) => sum + entry.size, 0);
-  for (let index = entries.length - 1; index >= 1; index -= 1) {
-    if (entries.length - dropped.length <= HISTORY_KEEP && total <= HISTORY_BUDGET) break;
-    const victim = entries[index];
-    if (victim === undefined) continue;
-    dropped.push(victim);
-    total -= victim.size;
-  }
-  if (dropped.length === 0) return { kept: [...entries], dropped };
-  const droppedIds = new Set(dropped.map((entry) => entry.versionId));
-  return { kept: entries.filter((entry) => !droppedIds.has(entry.versionId)), dropped };
-};
-
 /** 目录对账：身份即规范化相对路径，所有合法 `.md` 直接收录（vault-format §3.1） */
 export const createDocService = (options: DocServiceOptions): DocServiceInternal => {
   const { port, paths, events, log } = options;
   const now = options.now ?? ((): Date => new Date());
+  // 历史日志在库外（D4）：库可能位于 iCloud，写进 `.workbench` 会跟着同步。
+  const history = createHistoryStore({ state: options.state, log, now });
 
   const entries = new Map<string, CatalogEntry>();
   /** 改名后同步外部引用（画布节点）；boot 在画布服务就绪后注册 */
@@ -326,119 +317,34 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
 
   const readBytes = async (path: VaultPath): Promise<Uint8Array | null> => port.read(path);
 
-  const historyRoot = paths.normalize(HISTORY_DOC_DIR);
-  const historyDir = (id: DocId): VaultPath => paths.join(historyRoot, String(id));
-  const historyIndexPath = (id: DocId): VaultPath => paths.join(historyDir(id), 'index.json');
-  const historyVersionPath = (id: DocId, versionId: string): VaultPath =>
-    paths.join(historyDir(id), `${versionId}.md`);
-
   /**
-   * 读取历史索引：缺失视为无历史；结构非法按整表损坏处理（告警 + 空列表），
-   * 不让一份坏 index.json 阻断编辑器。下次记录会以新表覆盖它。
+   * 内容提交前记录旧版：先写版本原始字节，再原子重写日志，最后尽力清理被淘汰的文件。
+   * 任一步失败都不会提交主文（调用方在写入正文前 await 它）。
    */
-  const readHistoryIndex = async (id: DocId): Promise<readonly DocHistoryEntry[]> => {
-    const bytes = await port.read(historyIndexPath(id));
-    if (bytes === null) return [];
-    try {
-      const parsed: unknown = JSON.parse(decoder.decode(bytes));
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error('索引根节点不是对象');
-      }
-      const record = parsed as Readonly<Record<string, unknown>>;
-      if (record.schemaVersion !== 1) throw new Error('索引版本不支持');
-      if (record.docId !== String(id)) throw new Error('索引文档 id 不匹配');
-      const rawVersions = record.versions;
-      if (!Array.isArray(rawVersions)) throw new Error('versions 不是数组');
-      const versions: DocHistoryEntry[] = [];
-      for (const item of rawVersions as readonly unknown[]) {
-        if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-          throw new Error('版本条目不是对象');
-        }
-        const raw = item as Readonly<Record<string, unknown>>;
-        const versionId = typeof raw.versionId === 'string' ? raw.versionId : '';
-        const hash = typeof raw.hash === 'string' ? raw.hash : '';
-        const path = typeof raw.path === 'string' ? raw.path : '';
-        const at = typeof raw.at === 'string' ? raw.at : '';
-        const size = raw.size;
-        if (!isUlid(versionId)) throw new Error('版本 id 非法');
-        if (!HISTORY_HASH_PATTERN.test(hash)) throw new Error('版本 hash 非法');
-        if (at === '') throw new Error('版本时间缺失');
-        if (typeof size !== 'number' || !Number.isInteger(size) || size < 0) {
-          throw new Error('版本大小非法');
-        }
-        const normalized = paths.normalize(path);
-        versions.push({ versionId, hash: unsafeContentHash(hash), path: normalized, at, size });
-      }
-      return versions;
-    } catch (error) {
-      log.warn('文档历史索引损坏，按无历史处理', {
-        id: String(id),
-        reason: error instanceof Error ? error.message : String(error),
-      });
-      return [];
-    }
-  };
+  const recordHistory = (id: DocId, docPath: VaultPath, bytes: Uint8Array): Promise<void> =>
+    history.record(id, docPath, bytes);
 
-  /** 整表重写；Rust 端 write_atomic 保证 rename 原子替换 */
-  const writeHistoryIndex = async (id: DocId, versions: readonly DocHistoryEntry[]): Promise<void> => {
-    const payload = { schemaVersion: 1, docId: String(id), versions };
-    await port.write(historyIndexPath(id), encoder.encode(`${JSON.stringify(payload, null, 2)}\n`), 'system');
-  };
-
-  /**
-   * 内容提交前记录旧版：先写版本原始字节，再原子更新索引，最后尽力清理被淘汰的文件。
-   * 任一步失败都清理本次新版本文件并向上抛，调用方不得提交主文。
-   */
-  const recordHistory = async (id: DocId, docPath: VaultPath, bytes: Uint8Array): Promise<void> => {
-    const versionId = createUlid(now().getTime());
-    const versionPath = historyVersionPath(id, versionId);
-    const entry: DocHistoryEntry = {
-      versionId,
-      path: docPath,
-      hash: await hashBytes(bytes),
-      at: utcNow(now()),
-      size: bytes.byteLength,
-    };
-    await port.write(versionPath, bytes, 'system');
-    try {
-      const existing = await readHistoryIndex(id);
-      const merged = [entry, ...existing.filter((item) => item.versionId !== versionId)];
-      const { kept, dropped } = pruneHistory(merged);
-      await writeHistoryIndex(id, kept);
-      for (const victim of dropped) {
-        await port.purge(historyVersionPath(id, victim.versionId)).catch(() => undefined);
-      }
-    } catch (error) {
-      await port.purge(versionPath).catch(() => undefined);
-      throw error;
-    }
-  };
-
-  const listHistory = async (id: DocId): Promise<readonly DocHistoryEntry[]> => readHistoryIndex(id);
+  const listHistory = async (id: DocId): Promise<readonly DocHistoryEntry[]> => history.list(id);
 
   const readHistory = async (id: DocId, versionId: string): Promise<DocHistoryPreview> => {
     if (!isUlid(versionId)) {
       throw new EmberError('invalid_payload', `历史版本 id 非法：${versionId}`, { id: String(id) });
     }
-    const entry = (await readHistoryIndex(id)).find((item) => item.versionId === versionId);
-    if (entry === undefined) {
+    const found = await history.read(id, versionId);
+    if (found === null) {
       throw new EmberError('doc_not_found', `历史版本不存在：${versionId}`, { id: String(id) });
     }
-    const bytes = await port.read(historyVersionPath(id, versionId));
-    if (bytes === null) {
-      throw new EmberError('doc_not_found', `历史版本文件已消失：${versionId}`, { id: String(id) });
-    }
-    if (!isUtf8(bytes)) {
+    if (!isUtf8(found.bytes)) {
       throw new EmberError('invalid_payload', '历史版本不是合法 UTF-8，无法预览', {
         id: String(id),
         versionId,
       });
     }
-    const hash = await hashBytes(bytes);
-    if (hash !== entry.hash) {
-      throw new EmberError('invalid_payload', '历史版本内容与索引不一致', { id: String(id), versionId });
+    const hash = await hashBytes(found.bytes);
+    if (hash !== found.entry.hash) {
+      throw new EmberError('invalid_payload', '历史版本内容与日志不一致', { id: String(id), versionId });
     }
-    return { entry, text: canonicalText(decoder.decode(bytes)) };
+    return { entry: found.entry, text: canonicalText(decoder.decode(found.bytes)) };
   };
 
   const runRefresh = async (): Promise<void> => {
@@ -471,6 +377,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       }
       const bytes = await readBytes(path);
       if (bytes === null) continue;
+      // inode 只在扫描时缓存一次：外部改名发生后旧路径已消失，必须提前留下第二信号
+      const stat = await port.stat(path);
       const rawText = decoder.decode(bytes);
       const parsed = parseDocText(rawText);
       if (parsed.issues.length > 0) {
@@ -502,6 +410,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         utf8Valid: isUtf8(bytes),
         mtimeMs: null,
         size: null,
+        dev: stat?.dev ?? null,
+        ino: stat?.ino ?? null,
       });
       bumpVersion(key);
       versionSnapshot.set(key, versions.get(key) ?? 0);
@@ -569,13 +479,89 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
    * 事件自带 mtime/size，与目录里的元数据一致时连这一次读盘也省掉。
    */
   const applyFileChange = async (event: VaultFileChange): Promise<void> => {
-    // 外部改名按「旧路径删除 + 新路径新建」处理：身份即路径，改名就是换身份。
-    // 严格重绑（inode / sha256 第二信号）由迁移层负责，这里不猜。
     if (
       event.kind === 'renamed' &&
       event.from !== undefined &&
       String(event.from) !== String(event.path)
     ) {
+      const fromId = asDocId(String(event.from));
+      const toId = asDocId(String(event.path));
+      const fromKey = fromId === null ? null : String(fromId);
+      const toKey = toId === null ? null : String(toId);
+      const fromEntry = fromKey === null ? undefined : entries.get(fromKey);
+      // 严格重绑：唯一候选（目标名未被占用、两端都不忙）+ 第二信号（inode 或 sha256）。
+      // 名字仍冲突（目标路径已有文档）时拒绝重绑，退回「删除 + 新建」，绝不猜。
+      if (
+        fromId !== null &&
+        toId !== null &&
+        fromKey !== null &&
+        toKey !== null &&
+        fromEntry !== undefined &&
+        !entries.has(toKey) &&
+        !isBusy(fromId) &&
+        !isBusy(toId) &&
+        !queues.has(fromKey) &&
+        !queues.has(toKey)
+      ) {
+        const bytes = await readBytes(event.path);
+        if (bytes !== null) {
+          const hash = await hashBytes(bytes);
+          const stat = await port.stat(event.path);
+          const sameContent = hash === fromEntry.hash;
+          const sameInode =
+            fromEntry.dev !== null &&
+            fromEntry.ino !== null &&
+            stat !== null &&
+            stat.dev === fromEntry.dev &&
+            stat.ino === fromEntry.ino;
+          if (sameContent || sameInode) {
+            const rawText = decoder.decode(bytes);
+            entries.delete(fromKey);
+            versions.delete(fromKey);
+            const moved: CatalogEntry = {
+              ...fromEntry,
+              id: toId,
+              path: event.path,
+              hash,
+              text: canonicalText(rawText),
+              style: detectStyle(bytes, rawText),
+              utf8Valid: isUtf8(bytes),
+              mtimeMs: event.mtimeMs ?? fromEntry.mtimeMs,
+              size: event.size ?? fromEntry.size,
+              dev: stat?.dev ?? null,
+              ino: stat?.ino ?? null,
+            };
+            entries.set(toKey, moved);
+            bumpVersion(fromKey);
+            bumpVersion(toKey);
+            await history.retag(fromId, toId).catch((error: unknown) => {
+              log.warn('外部改名后迁移历史日志失败', {
+                from: String(fromId),
+                to: String(toId),
+                error: String(error),
+              });
+            });
+            if (renameHook !== null) {
+              await renameHook(fromId, toId).catch((error: unknown) => {
+                log.warn('外部改名后同步画布引用失败', {
+                  from: String(fromId),
+                  to: String(toId),
+                  error: String(error),
+                });
+              });
+            }
+            emitChange({
+              id: toId,
+              from: fromId,
+              path: event.path,
+              kind: 'renamed',
+              revision: { rev: moved.rev, hash },
+            });
+            return;
+          }
+        }
+      }
+      // 没有第二信号/目标名冲突：身份即路径，改名就是换身份
       await applyFileChange({ kind: 'removed', path: event.from });
     }
 
@@ -614,6 +600,7 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
 
     const bytes = await readBytes(event.path);
     if (bytes === null) return;
+    const stat = await port.stat(event.path);
     const rawText = decoder.decode(bytes);
     const hash = await hashBytes(bytes);
     // 读盘/hash 期间可能刚好有写入入队：apply 前再确认一次
@@ -630,6 +617,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       existing.utf8Valid = utf8Valid;
       existing.mtimeMs = event.mtimeMs ?? null;
       existing.size = event.size ?? null;
+      existing.dev = stat?.dev ?? existing.dev;
+      existing.ino = stat?.ino ?? existing.ino;
       if (!changed) return;
       existing.hash = hash;
       existing.rev += 1;
@@ -648,6 +637,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
       utf8Valid,
       mtimeMs: event.mtimeMs ?? null,
       size: event.size ?? null,
+      dev: stat?.dev ?? null,
+      ino: stat?.ino ?? null,
     });
     bumpVersion(key);
     if (scanned) emitChange({ id, path: event.path, kind: 'created', revision: { rev: 1, hash } });
@@ -761,6 +752,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
           utf8Valid,
           mtimeMs: null,
           size: null,
+          dev: entry.dev,
+          ino: entry.ino,
         };
         return snapshotOf(view);
       }
@@ -851,6 +844,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
         utf8Valid: true,
         mtimeMs: null,
         size: null,
+        dev: null,
+        ino: null,
       };
       entries.set(String(id), entry);
       bumpVersion(String(id));
@@ -962,6 +957,14 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
             });
           }
         }
+        // 历史日志按路径索引：改名后把旧 id 的条目换到新 id，否则历史会“消失”。
+        await history.retag(oldId, nextId).catch((error: unknown) => {
+          log.warn('改名后迁移历史日志失败，旧历史仍按旧路径保存', {
+            from: String(oldId),
+            to: String(nextId),
+            error: String(error),
+          });
+        });
         emitChange({
           id: nextId,
           from: oldId,
@@ -1024,14 +1027,11 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
           });
         }
         const diskHash = await hashBytes(bytes);
-        const target = (await readHistoryIndex(id)).find((item) => item.versionId === versionId);
-        if (target === undefined) {
+        const target = await history.read(id, versionId);
+        if (target === null) {
           throw new EmberError('doc_not_found', `历史版本不存在：${versionId}`, { id: String(id) });
         }
-        const targetBytes = await port.read(historyVersionPath(id, versionId));
-        if (targetBytes === null) {
-          throw new EmberError('doc_not_found', `历史版本文件已消失：${versionId}`, { id: String(id) });
-        }
+        const targetBytes = target.bytes;
         if (!isUtf8(targetBytes)) {
           throw new EmberError('invalid_payload', '历史版本不是合法 UTF-8，拒绝恢复', {
             id: String(id),
@@ -1039,8 +1039,8 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
           });
         }
         const targetHash = await hashBytes(targetBytes);
-        if (targetHash !== target.hash) {
-          throw new EmberError('invalid_payload', '历史版本内容与索引不一致，拒绝恢复', {
+        if (targetHash !== target.entry.hash) {
+          throw new EmberError('invalid_payload', '历史版本内容与日志不一致，拒绝恢复', {
             id: String(id),
             versionId,
           });
@@ -1249,6 +1249,24 @@ export const createDocService = (options: DocServiceOptions): DocServiceInternal
 
     setRenameHook: (hook) => {
       renameHook = hook;
+    },
+
+    legacyIds: async () => {
+      await ensureScanned();
+      const index = new Map<string, VaultPath[]>();
+      for (const entry of entries.values()) {
+        const raw = parseDocText(entry.text).frontmatter.id;
+        if (raw === null) continue;
+        const legacy = raw.trim();
+        if (!isUlid(legacy)) continue;
+        const list = index.get(legacy);
+        if (list === undefined) {
+          index.set(legacy, [entry.path]);
+        } else {
+          list.push(entry.path);
+        }
+      }
+      return index;
     },
 
     flush: async () => {

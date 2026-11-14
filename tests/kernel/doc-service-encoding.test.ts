@@ -9,6 +9,7 @@ import { createPathTools } from '../../src/kernel/paths.ts';
 import type { Logger, WriteIntent } from '../../src/kernel/types.ts';
 import type { VaultPort } from '../../src/kernel/ports.ts';
 import { hasPendingWrite } from '../../src/shell/editor/float-persist.ts';
+import { createMemoryState } from './fakes.ts';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8');
@@ -62,7 +63,11 @@ const createByteVault = (
     scan: () => Promise.resolve([]),
     stat: (path) => {
       const bytes = files.get(String(path));
-      return Promise.resolve(bytes === undefined ? null : { mtime: new Date(0).toISOString(), size: bytes.byteLength });
+      return Promise.resolve(
+        bytes === undefined
+          ? null
+          : { mtime: new Date(0).toISOString(), size: bytes.byteLength, dev: 1, ino: 1 },
+      );
     },
     watch: () => ({ dispose: (): void => undefined }),
   };
@@ -84,6 +89,7 @@ const setup = (
   const vault = createByteVault(initial);
   const service = createDocService({
     port: vault.port,
+    state: createMemoryState(),
     paths: createPathTools(),
     events: createEventBus(),
     log: silentLog,

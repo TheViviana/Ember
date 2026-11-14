@@ -67,8 +67,18 @@ export interface VaultPort {
   scan(): Promise<readonly VaultScanEntry[]>;
   /** 画布清单（`.workbench/canvas/<id>.json`），画布库扫描用 */
   listCanvases(): Promise<readonly VaultPath[]>;
-  /** 文件元信息；不存在返回 null */
-  stat(path: VaultPath): Promise<{ readonly mtime: string; readonly size: number } | null>;
+  /**
+   * 文件元信息；不存在返回 null。
+   * `dev` / `ino` 用于严格重绑：改名/移动后 inode 不变，可证明「仍是同一文件」。
+   */
+  stat(
+    path: VaultPath,
+  ): Promise<{
+    readonly mtime: string;
+    readonly size: number;
+    readonly dev: number;
+    readonly ino: number;
+  } | null>;
   watch(listener: (event: VaultFileEvent) => void): Disposable;
   /**
    * 运行期只读切换（库守护熔断用）：传 null 解除。
@@ -76,6 +86,22 @@ export interface VaultPort {
    * 只会失去跨服务的只读扩散，内核自身仍会拒绝写入。
    */
   setRuntimeReadonly?(reason: string | null): void;
+}
+
+/**
+ * 库外状态端口（D4）：迁移快照、新历史日志与版本都落在
+ * `~/Library/Application Support/Ember/vaults/<key>/`，**不写进库内**。
+ * 路径是状态根下的相对 POSIX 路径，与库内 `VaultPort` 完全分离。
+ */
+export interface VaultStatePort {
+  /** 不存在返回 null */
+  read(path: string): Promise<Uint8Array | null>;
+  /** 原子写；父目录由实现方创建 */
+  write(path: string, bytes: Uint8Array): Promise<void>;
+  /** 列出目录下的直接子项名称；目录不存在返回空数组 */
+  list(path: string): Promise<readonly string[]>;
+  /** 永久删除；不存在视为成功 */
+  purge(path: string): Promise<void>;
 }
 
 /**

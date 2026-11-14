@@ -1,77 +1,41 @@
 //! macOS 系统回收站适配层（vault-format §8.3）。
 //!
-//! 用户删除的落点依次为：`NSFileManager.trashItemAtURL`（系统回收站）→ Finder 代删
-//! （`osascript`，落点同样是系统回收站）→ 库内 `.workbench/trash/<ULID>/`（30 天后
-//! 启动清扫回收）。任何路径都不调用 `fs::remove_file`，不会永久删除；非 macOS 平台明确失败。
+//! 用户删除的落点只有系统回收站：`NSFileManager.trashItemAtURL`，失败再让 Finder 代删
+//! （`osascript`，落点同样是系统回收站）。**不降级到库内回收目录**——库可能位于
+//! iCloud/Obsidian 目录，写进去会跟着同步并污染笔记目录。任何路径都不调用
+//! `fs::remove_file`，不会永久删除；系统回收站不可用时删除直接失败，文件保持原样。
 //!
 //! `unsafe` 只允许出现在本文件：objc2 的 FFI 边界集中在这里，每处都写明前置条件。
 
-#[cfg(target_os = "macos")]
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{VaultError, VaultResult};
 
-#[cfg(target_os = "macos")]
-use super::paths;
-
-
-
-/// 删除落点：system = 系统回收站；internal = 库内回收目录（30 天后启动清扫回收）。
+/// 删除落点。v1 只保留系统回收站；保留枚举是为了让「文件本就不存在」与
+/// 「已移入回收站」在 IPC 上仍是两种可区分的结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrashDestination {
     System,
-    Internal,
 }
 
 impl TrashDestination {
     pub fn as_str(self) -> &'static str {
         match self {
             TrashDestination::System => "system",
-            TrashDestination::Internal => "internal",
         }
     }
 }
 
-/// 用户删除的唯一入口：优先系统回收站；系统回收站不可用时降级为库内回收目录。
-///
-/// 常见降级场景：库在 `~/Documents` 下时，macOS 只授予了文稿目录的 TCC 权限，
-/// 而系统回收站要写 `~/.Trash`——同一授权域之外，`trashItemAtURL` 会报
-/// 「you don't have permission to access it」。降级动作是库内的普通 rename
-/// （`.workbench/trash/<ULID>/`，30 天后由启动清扫回收），不需要任何额外权限，
-/// 文件同样可找回，绝不静默永久删除。
+/// 用户删除的唯一入口：只进系统回收站，不可用即失败（不降级库内回收）。
 pub fn trash(root: &Path, absolute: &Path) -> VaultResult<TrashDestination> {
-    #[cfg(target_os = "macos")]
-    {
-        // 1) NSFileManager：有 ~/.Trash 写权限（全盘授权、或库不在 TCC 域内）时最快
-        if trash_system(root, absolute).is_ok() {
-            return Ok(TrashDestination::System);
-        }
-        // 2) Finder 代删：只有「文稿」授权的库（如 ~/Documents/EmberVault）写不了
-        //    ~/.Trash，但有全盘权限的 Finder 可以——macOS 标准绕行，首次会请求
-        //    「控制 Finder」的自动化授权。落点同样是系统回收站。
-        if trash_via_finder(absolute).is_ok() {
-            return Ok(TrashDestination::System);
-        }
-        // 3) 库内回收目录：前两者都不可用时兜底（30 天后启动清扫回收，可找回）
-        trash_internal(root, absolute).map(|()| TrashDestination::Internal)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // 非 macOS：无系统回收站 API，保持既有契约——明确拒绝，绝不永久删除
-        let _ = (root, absolute);
-        Err(VaultError::IoAt {
-            path: absolute.display().to_string(),
-            message: "当前平台不支持系统回收站，删除被拒绝（不会永久删除文件）".to_string(),
-        })
-    }
+    trash_system_only(root, absolute)?;
+    Ok(TrashDestination::System)
 }
 
-/// 目录删除专用：只进系统回收站，系统回收站不可用即失败。
+/// 目录删除专用：与单文件删除用同一落点（系统回收站），不可用即失败。
 ///
-/// 与 [`trash`] 的区别只有一点：绝不降级到库内回收目录。目录删除会把整棵子树
-/// 一起移走，落点必须是用户能在系统回收站里一眼找到、可整体还原的地方；
-/// 库内回收目录（30 天后启动清扫）不适合承载这类批量删除，失败就保持原样。
+/// 目录删除会把整棵子树一起移走，落点必须是用户能在系统回收站里一眼找到、可整体还原的地方；
+/// 失败就保持原样，不拆成逐文件删除。
 pub fn trash_system_only(root: &Path, absolute: &Path) -> VaultResult<()> {
     #[cfg(target_os = "macos")]
     {
@@ -226,39 +190,6 @@ fn trash_via_finder(absolute: &Path) -> VaultResult<()> {
     Ok(())
 }
 
-/// 降级落点：库内回收目录 `.workbench/trash/<ULID>/<文件名>`。
-/// 普通 rename，不依赖任何 TCC 授权；30 天后由启动清扫（sweep_expired_trash）回收。
-#[cfg(target_os = "macos")]
-fn trash_internal(root: &Path, absolute: &Path) -> VaultResult<()> {
-    let ulid = crate::vault::ulid::generate();
-    let dir = root.join(paths::WORKBENCH_DIR).join("trash").join(&ulid);
-    fs::create_dir_all(&dir).map_err(|error| io_at(&dir, &error.to_string()))?;
-    let file_name = absolute
-        .file_name()
-        .ok_or_else(|| VaultError::PathOutside(absolute.display().to_string()))?;
-    let target = dir.join(file_name);
-    fs::rename(absolute, &target).map_err(|error| io_at(absolute, &error.to_string()))?;
-    // 校验：源已消失、落点存在（与系统回收站同一验收口径）
-    if symlink_metadata_ok(absolute) {
-        return Err(io_at(
-            absolute,
-            "库内回收目录移动后源文件仍在库内",
-        ));
-    }
-    if !target.is_file() {
-        return Err(io_at(
-            absolute,
-            "库内回收目录落点不存在，无法确认删除结果",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn symlink_metadata_ok(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok()
-}
-
 /// 卷类型裁决：拿不到结论时按失败处理（fail-closed），避免把库外文件误移。
 #[cfg(target_os = "macos")]
 fn ensure_local_volume(is_local: Option<bool>, absolute: &Path) -> VaultResult<()> {
@@ -314,31 +245,5 @@ mod tests {
     #[test]
     fn local_volume_passes_precheck() {
         ensure_local_volume(Some(true), Path::new("/tmp/x.md")).unwrap();
-    }
-
-    #[test]
-    fn internal_trash_fallback_moves_file_into_workbench_trash() {
-        let seq = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        let root = std::env::temp_dir().join(format!("ember-trash-{}-{seq}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        let file = root.join("media").join("aa").join("test.png");
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, b"png").unwrap();
-
-        trash_internal(&root, &file).unwrap();
-
-        // 源消失
-        assert!(!file.exists());
-        // 落点在库内回收目录：.workbench/trash/<ULID>/test.png
-        let trash_dir = root.join(paths::WORKBENCH_DIR).join("trash");
-        let mut entries = std::fs::read_dir(&trash_dir).unwrap();
-        let entry = entries.next().unwrap().unwrap();
-        let restored = entry.path().join("test.png");
-        assert!(restored.is_file(), "落点应存在：{}", restored.display());
-        assert!(std::fs::read(&restored).unwrap() == b"png");
-        std::fs::remove_dir_all(&root).unwrap();
     }
 }

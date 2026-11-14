@@ -8,7 +8,7 @@ import { createEventBus } from '../../src/kernel/events.ts';
 import { createPathTools } from '../../src/kernel/paths.ts';
 import { createSettingsService } from '../../src/kernel/settings-service.ts';
 import type { Logger } from '../../src/kernel/types.ts';
-import { createMemoryVault, type MemoryVault } from './fakes.ts';
+import { createMemoryState, createMemoryVault, type MemoryVault } from './fakes.ts';
 
 const silentLog: Logger = {
   debug: () => undefined,
@@ -59,7 +59,15 @@ const setup = (
     vaultName: '测试库',
     now,
   });
-  const host = createCanvasHost({ port, paths, events, settings, docs: createDocService({ port, paths, events, log: silentLog, now }), log: silentLog, now });
+  const host = createCanvasHost({
+    port,
+    paths,
+    events,
+    settings,
+    docs: createDocService({ port, state: createMemoryState(), paths, events, log: silentLog, now }),
+    log: silentLog,
+    now,
+  });
   return { vault, writes, events, settings, host };
 };
 

@@ -34,31 +34,36 @@
 ├── .workbench/                  # 工作台状态（进库，参与同步，不参与索引）
 │   ├── settings.json
 │   ├── canvas/<canvasId>.json
-│   ├── history/<canvasId>.<n>.json # 画布历史，n=1 为上一版，最多 5 版
-│   ├── history/documents/<docId>/  # 文档历史：index.json + <versionId>.md（§8.2.1）
-│   └── .lock                    # 库锁，见 §7（独占创建 + pid 存活；无心跳无 journal）
+│   └── history/<canvasId>.<n>.json # 画布历史，n=1 为上一版，最多 5 版
 ├── notes/                       # 任意用户目录结构，Ember 不干预
 │   └── 某文档.md
 ├── inbox/                       # 快速收集箱默认目录；只是普通 Markdown 目录（§13 非事务）
 └── media/                       # 图库内容寻址存储（只能经 asset_save 写入）
 ```
 
-删除优先移入操作系统回收站；不可用时依次降级为 Finder 代删与库内回收目录 `.workbench/trash/<ULID>/`，任何路径都不永久删除（库内副本 30 天后由启动清扫回收，详见 §8.3）。
+删除只移入操作系统回收站（Finder 代删的落点同样是系统回收站）；回收站不可用时删除直接失败、文件保持原样。库内不再有回收目录或删除副本（§8.3）。
 
 不在库内、由 Ember 管理的位置：
 
 ```
 ~/Library/Application Support/Ember/
 ├── machine-id                   # 机器标识（库锁与 machines 目录共用）
-└── machines/<machineId>/
-    └── ui.json                  # 机器本地 UI 状态，见 §8.4
+├── locks/<sha256(规范化库根)>/lock # 库锁，见 §7（与 vault.id 无关，避免首次确认建库时钥匙变化）
+├── machines/<machineId>/
+│   └── ui.json                  # 机器本地 UI 状态，见 §8.4
+└── vaults/<key>/                # 库外状态（文档历史、迁移快照），见 §8.5
+    ├── history/log.jsonl
+    ├── history/versions/<ULID>.md
+    └── migrations/<ULID>/snapshot.json
+```
+
+`<key>` 规则写死：`settings.json` 里的 `vault.id` 是合法 ULID 就用它，否则按规范化库根路径的 sha256 派生。首次确认建库时 key 会从「路径派生」变成 `vault.id`，接受这一次状态目录搬迁。
 
 索引在 v2 是内核内存实现（见 §9），不再落 sqlite 文件；崩溃或损坏由 rebuild 一次恢复。
-```
 
 `[事实]` macOS 上 `Application Support` 随用户迁移，但不随库同步；这正是「机器状态」与「库状态」分家的原因。
 
-`[设计选择]` 忽略规则：`.workbench/`、`.` 开头的目录、`node_modules/`、`.git/` 不进入 Markdown 索引；watcher 只监听库内 `.md` 文件，同样跳过 `.workbench/` 与所有点开头路径（含 `.lock`），避免自我触发。
+`[设计选择]` 忽略规则：`.workbench/`、`.` 开头的目录、`node_modules/`、`.git/` 不进入 Markdown 索引；watcher 只监听库内 `.md` 文件，同样跳过 `.workbench/` 与所有点开头路径，避免自我触发。
 
 ---
 
@@ -95,7 +100,7 @@
 - 路径是 vault 相对路径，POSIX 分隔符，不允许 `..`、不允许绝对路径、大小写敏感（`[事实]` APFS 默认大小写不敏感，因此索引额外记录 `path_folded` 用于查找，但比较规则以实际磁盘为准）。
 - 文件名冲突后缀（§10）不参与 title 派生：`方案 (conflict 20261111T103205Z-7F3K).md` 的 title 仍是 `方案`，除非 frontmatter 显式写了 `title`。
 
-### 3.3 缺 id 的文档（adoption）
+### 3.4 缺 id 的文档（adoption）
 
 已取消。身份来自路径，缺 id 的既有 `.md` 由目录对账直接登记，无需任何补写；`DocService.adopt`、`DocMeta.flags` 与相关健康项已删除。
 
@@ -266,11 +271,15 @@ anchor     := heading-text | "^" block-id
 
 ## 7. 库锁与多实例
 
-锁文件：`<vault>/.workbench/.lock`
+锁文件：`~/Library/Application Support/Ember/locks/<sha256(规范化库根)>/lock`
 
 ```json
 {"vaultId":"01JB...","pid":48213,"machineId":"01JB...","startedAt":"2026-11-11T03:00:00Z","app":"0.1.0"}
 ```
+
+`[设计选择]` 锁在**库外**，且目录名只用规范化根路径的 sha256，不掺 `vault.id`：
+库可能位于 iCloud/Obsidian 目录，写进去会跟着同步；而首次确认建库时 `vault.id` 可能刚生成，
+锁目录不能因此换位置（否则首个实例会把锁丢在旧目录里）。
 
 `[设计选择]` v2 把锁从「心跳 + 租约 + fencing + 接管认领」收敛为**独占创建 + pid 存活 + 失效清理**——
 这是分布式系统的机制，单机个人库只需要进程级互斥；只读原因从 5 种收敛为 2 种（被占用 / 丢失）：
@@ -284,13 +293,13 @@ anchor     := heading-text | "^" block-id
   与 `vault://mode` 事件；只读状态在启动时确定后不变。
 - pid 探测：`/bin/kill -0 <pid>`，无 libc 依赖；探测命令不可用时保守视为存活，避免误抢锁。
 
-watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免自我触发。
+watcher 跳过整个 `.workbench/`；锁在库外，watcher 根本看不到。
 
 ---
 
 ## 8. `.workbench/` schema
 
-通用约定：所有 JSON 文件都带 `schemaVersion`（整数，当前为 `1`），未知版本 ≥ 当前应用支持版本时**拒绝写入**并提示升级应用；低于当前版本时按迁移链升级，升级前先写 `.workbench/backup/<name>.<ts>.json`（迁移链尚未实现，未知版本按拒绝处理）。
+通用约定：所有 JSON 文件都带 `schemaVersion`（整数，当前为 `1`），未知版本 ≥ 当前应用支持版本时**拒绝写入**并提示升级应用；低于当前版本时按迁移链升级（迁移链尚未实现，未知版本按拒绝处理；实现时备份同样放库外 `vaults/<key>/`，不写库内）。
 
 > **实现状态（v1 部分未实现）**：`vault.json` 读到未知/缺失 `schemaVersion` 时 `Vault::open` 返回可读错误，
 > 启动页显示「启动失败 + 原因」（不再 panic），但**没有迁移链、也没有升级前备份**；`settings.json` 由
@@ -331,7 +340,8 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免�
 | `ui.toolPomodoro` | boolean | 左下角番茄钟入口（能力化，默认关）。 |
 | `ui.toolGallery` | boolean | 左下角附件面板入口（能力化，默认关；键名沿用旧图库命名）。 |
 | `ui.theme` | `"ember-black"` | 主题标识；仅纯黑主题。 |
-| `linkOverrides` | map<string, DocId> | 歧义链接的用户裁决，键为正文里的原始链接文本 `rawTarget`（同一原始链接在全库共用一个裁决）。 |
+| `linkOverrides` | map<string, DocId> | 歧义链接的用户裁决，键为正文里的原始链接文本 `rawTarget`（同一原始链接在全库共用一个裁决）。迁移前值可能是旧方案 ULID，由迁移层改写为路径。 |
+| `docIdScheme` | `"path"` 或缺失 | 文档身份迁移完成的标记。缺失表示该库还可能带着旧 ULID 引用；迁移写入后不再回退（回滚时会删除）。 |
 
 `[设计选择]` 这些键属于**库状态**而不是机器状态：换一台机器打开同一个库，画布导航与主题行为一致。窗口位置、缩放、AI 面板几何、每画布开关等机器相关状态不走 `settings.json`，见 §8.4。
 
@@ -421,32 +431,36 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免�
 - 历史文件与主画布分别使用单文件原子写；历史轮转和主画布写入**不是跨文件事务**，崩溃可能只完成部分轮转，主画布仍保证为完整的旧版或新版。
 - 校验失败不写盘、不更新内存场景；命令返回 `ok: false` 与 `canvas_invalid` 文案。
 
-### 8.2.1 文档历史（`history/documents/<docId>/`）
+### 8.2.1 文档历史（库外 `vaults/<key>/history/`）
 
-- 每次 `DocService.update` 提交主文前、以及 `restoreHistory` 写回目标版前，把当前磁盘文件的**原始字节**
-  （含 BOM 与 CRLF）存为 `history/documents/<docId>/<versionId>.md`；`versionId` 为 ULID。
-- 同目录 `index.json` 由内核整表原子写维护：
-  `{ schemaVersion: 1, docId, versions: [{ versionId, path, hash, at, size }] }`，`versions` 新→旧。
-  `hash` 是版本字节的 sha256，读取时与实际文件交叉校验。
-- 保留策略：每篇文档最多 **20 版**、总字节最多 **64 MiB**，超出从最旧开始淘汰（永远保留最新一版）；
-  淘汰的文件经内部 `vault_purge` 清理。历史写失败时本次主文不提交。
-- 只有 `update`、`restoreHistory`、`adoptCopy`、`detachCopy` 记录历史；`create`、`rename`、冲突副本创建、`remove`、`purge` 都不记录。
+- 位置：`~/Library/Application Support/Ember/vaults/<key>/`，**不在库内**（§2、§8.5）。库可能位于
+  iCloud 的 Obsidian 目录，历史写进去会跟着同步，还会污染笔记目录。
+- 布局是扁平的：`history/versions/<versionId>.md`（`versionId` 为 ULID，一个文件就是一个版本的
+  原始字节）+ `history/log.jsonl`（一行一条索引）：
+  `{"docId":"notes/方案.md","versionId":"01JB...","hash":"sha256:...","path":"notes/方案.md","at":"2026-11-11T03:00:00Z","size":4211}`。
+- 每次 `DocService.update` 提交主文前、以及 `restoreHistory` 写回目标版前，把当前磁盘文件的
+  **原始字节**（含 BOM 与 CRLF）存为版本文件；先写版本文件，再原子重写日志，任一步失败都不留下
+  指向半截数据的索引。日志写失败时本次主文不提交。
+- 保留策略：每篇文档最多 **20 版**、合计最多 **64 MiB**，超出从最旧淘汰（永远保留最新一版）；
+  淘汰时删除版本文件并把日志整表原子重写。日志只保留现存版本，不存在指向已删除版本的悬空行。
+- 日志损坏（非法 UTF-8）按「无历史」处理并告警；单行无法解析或结构非法只跳过该行。
+- 只有 `update`、`restoreHistory`、`adoptCopy`、`detachCopy` 记录历史；`create`、`rename`、冲突副本创建、`remove`、`purge` 都不记录。`rename` 会把该文档的全部日志条目 `docId` 换到新身份。
 - 预览只读、不写盘。恢复前重新校验 `base.hash`：一致则当前版先入历史再写回目标版原始字节（后续历史不删除）；
   失配则不改主文、不新增历史，把目标版内容写成冲突副本（kernel-contract D11）。
-- 索引损坏（JSON 非法、schema 版本不符、任一条目非法）按「无历史」处理并告警，下次保存重建；
-  已存在的版本文件成为孤儿，不阻断编辑。
+- 历史遗留：旧版库内 `.workbench/history/documents/<docId>/` **原样保留，不导入、不删除**（D6）；
+  健康检查也不再扫描它。
 
 ### 8.3 删除与系统回收站
 
-- `[事实]` 用户删除（`docs.remove`）优先把文件移入**操作系统回收站**（macOS：`NSFileManager.trashItemAtURL`）；系统回收站不可用时依次降级为 Finder 代删（`osascript`，落点仍是系统回收站）与库内回收目录 `.workbench/trash/<ULID>/`。任何路径都不调用 `fs::remove_file`，不会永久删除。
-- `[设计选择]` 不做 id 重写：Ember 不再感知离开库的文件 id，重写没有收益。风险是用户从系统回收站还原、或从库内回收目录手动移回时，可能与库内同 id 文档并存——`refresh()` 按路径字典序保留先收录者并告警，不会改写任何文件（§10.5）。
-- `[设计选择]` 应用内**没有**"从回收站恢复"的入口：系统回收站里的文件需在系统里恢复；库内回收目录的副本需在 30 天内手动移回（到期由启动清扫回收）。撤销只存在于本次运行内（重建文档，不从回收站取回），见 §10.5 与 AI 删除提案的文案。
-- 降级语义：非本地卷（网络盘/云盘）、无法确认卷类型、回收站 API 报错或权限不足时逐级降级（Finder → 库内回收目录）；三级全部失败才报错，文件保持原样。非 macOS 平台明确报 `io_failed`（文案说明该平台不支持系统回收站），**绝不**回退为永久删除。
+- `[事实]` 用户删除（`docs.remove`）只把文件移入**操作系统回收站**（macOS：`NSFileManager.trashItemAtURL`）；该 API 不可用时用 Finder 代删（`osascript`，落点仍是系统回收站）。**不降级到库内回收目录**：库可能位于 iCloud/Obsidian 目录，副本会跟着同步并污染笔记目录。任何路径都不调用 `fs::remove_file`，不会永久删除；两级都不可用时删除直接失败、文件保持原样。
+- `[设计选择]` 不做 id 重写：Ember 不再感知离开库的文件 id，重写没有收益。风险是用户从系统回收站还原时，可能与库内同路径文档并存——`refresh()` 按路径字典序保留先收录者并告警，不会改写任何文件（§10.5）。
+- `[设计选择]` 应用内**没有**"从回收站恢复"的入口：系统回收站里的文件需在系统里恢复。撤销只存在于本次运行内（重建文档，不从回收站取回），见 §10.5 与 AI 删除提案的文案。
+- 失败语义：非本地卷（网络盘/云盘）、无法确认卷类型、回收站 API 报错或权限不足 → Finder 代删，仍失败则报 `io_failed`，文件保持原样。非 macOS 平台明确报 `io_failed`（文案说明该平台不支持系统回收站），**绝不**回退为永久删除。
 - 调用后校验：源路径必须消失；系统返回的 `resultingItemURL` 必须存在且不在库根内（回收站内文件名可能被改写，不能按原路径推断）。
 - 文章创建后画布写入失败的回滚，以及画布历史轮转、文档历史淘汰的过期版本清理，共用内核内部入口 `Vault::purge` / `vault_purge`；不对用户暴露，也不注册为 `core.doc.purge` 命令（kernel-contract D4/I9）。
-- 历史遗留：库内回收目录 `.workbench/trash/<ULID>/` 不迁移、不自动放回；持锁实例在 Vault::open 时执行惰性清扫，副本目录 mtime 超过 **30 天**整目录回收；全库孤儿 `.ember-tmp-` 临时文件（>24h）一并回收。清扫只记日志不影响启动，mtime 不可读按保守不删处理。
-- 孤儿 temp 清扫**覆盖** `.workbench/` 内部：锁文件与设置写入的瞬时 temp 也在那里，24h 门槛远大于单次写入的存活时间，不会与 rename 竞态（§7 已无心跳与认领副本）。
-- 数值提示：孤儿 temp（24h）与库内回收目录（30 天）的保留期以 `vault/mod.rs` 常量为准，改代码必须同步本文件。
+- 历史遗留：旧版库内回收目录 `.workbench/trash/<ULID>/` 不再产生新副本，也不自动放回；持锁实例在 Vault::open 时执行惰性清扫，副本目录 mtime 超过 **30 天**整目录回收；全库孤儿 `.ember-tmp-` 临时文件（>24h）一并回收。清扫只记日志不影响启动，mtime 不可读按保守不删处理。
+- 孤儿 temp 清扫**覆盖** `.workbench/` 内部：设置写入的瞬时 temp 也在那里，24h 门槛远大于单次写入的存活时间，不会与 rename 竞态（§7 已无心跳与认领副本）。
+- 数值提示：孤儿 temp（24h）与遗留回收目录（30 天）的保留期以 `vault/mod.rs` 常量为准，改代码必须同步本文件。
 
 ### 8.4 machines/<machineId>/ui.json（机器本地，不在库内）
 
@@ -459,6 +473,15 @@ watcher 跳过整个 `.workbench/`（因此也天然忽略 `.lock`），避免�
 - 历史遗留键（旧版 `recall`、`sidebarWidth`、`panels.ai.open`）不再是已知键，作为未知键原样保留。
 - 序列化时未知顶层键与 `panels.*` 的他人子键**原样保留**，不做整体重写；对话与提案只存内存，不落盘。
 - 读到更高 `schemaVersion` 时整会话禁止回写（旧版应用不得用默认态覆盖新版数据）。
+
+### 8.5 库外状态（`vaults/<key>/`）
+
+- 只有两类：`history/`（§8.2.1）与 `migrations/`（§12）。库内 `.workbench/` 不新增
+  `migrations/`、`history/` 之类目录；迁移只在 `settings.json` 多写一个 `docIdScheme`。
+- `<key>` 规则见 §2：`settings.json` 的 `vault.id` 优先，缺失或非法时用规范化库根的 sha256。
+- 写入只经 `VaultStatePort`（IPC `vault_state_read/write/list/purge`）：路径相对状态根、
+  拒绝 `..` 与绝对路径；内核不拼绝对路径，Rust 负责落到 `vaults/<key>/` 下。
+- 迁移快照保留最近 **10** 份，超出按 ULID 从旧到新删除。
 
 ---
 
@@ -590,10 +613,10 @@ Ember Export <vaultName> <YYYY-MM-DD>/
 | `media/**` | `assets/<media 下的相对路径>` |
 | `.workbench/settings.json` | `.workbench/settings.json` |
 | `.workbench/canvas/*.json` | `.workbench/canvas/…` |
-| `.workbench/history/*` | `.workbench/history/**`（含 `documents/<docId>/` 嵌套目录与 `index.json`） |
+| `.workbench/history/*` | `.workbench/history/**`（画布历史；文档历史在库外，不导出） |
 
-排除：`.workbench/.lock`、`.workbench/trash/`、`.workbench/backup/`、`*.ember-tmp-*`、点开头的文件/目录。
-机器本地状态（`machines/<machineId>/ui.json`、`ai/<vaultId>.json`、钥匙串）不在库内，结构上不会被导出。
+排除：`.workbench/trash/`（历史遗留）、`.workbench/backup/`、`*.ember-tmp-*`、点开头的文件/目录。
+机器本地状态（`machines/<machineId>/ui.json`、`ai/<vaultId>.json`、钥匙串）与库外状态（`vaults/<key>/`，含文档历史与迁移快照）不在库内，结构上不会被导出。
 
 导出流程：遍历拒绝符号链接 → 逐文件流式 SHA-256 写入 staging 目录 → 复核 staging 字节 → 复核源文件 hash
 （导出期间被外部改动即整体失败）→ 最后写 `manifest.json` → `rename(staging, 目标)`。任何失败都会删除 staging，
@@ -613,13 +636,35 @@ Ember Export <vaultName> <YYYY-MM-DD>/
 ## 12. 版本与迁移
 
 - 本规范的 schema 版本：`vaultSchemaVersion = 1`，写入 `settings.json.schemaVersion`。
-- 迁移必须单向、可重入：迁移前备份到 `.workbench/backup/`，逐文件原子写，失败项单独报告。
+- 迁移必须单向、可重入：迁移前把快照写到**库外** `vaults/<key>/migrations/<ULID>/snapshot.json`，
+  逐文件原子写，失败项单独报告。库内不新建 `migrations/`、`history/` 之类目录——库可能位于
+  iCloud 的 Obsidian 目录，写进去会跟着同步并污染笔记目录。
 - 迁移失败 → 库进入只读并提示，不留下「迁移了一半」的库。
 - 索引不受库 schema 版本约束，但受 `tokenizer_version` 约束（§9.3）。
 
+### 12.1 文档身份迁移（旧 ULID → 路径）
+
+启动顺序：库锁 → 文档目录扫描 → **身份迁移** → 画布服务 → 外壳。标记是
+`settings.json.docIdScheme = "path"`；已有该标记时整段迁移是 noop。
+
+- 旧身份来源：frontmatter `id`（遗留字段，只读不写）。同一个 ULID 可能对应多篇文档，
+  也可能一篇都没有。
+- 画布节点：逐画布改写旧 `docId`，每张画布单独原子写；失败只记录并保留原文件。
+  映射到唯一文档 → 写成该文档的路径；0 个或多个候选 → 节点转 `kind: "note"` 占位，
+  `docId` 置 `null`，正文留下可追溯线索（原 ULID；能从旧历史桶确定唯一 basename 时一并写上）。
+- `linkOverrides`：映射到唯一文档 → 改写为路径；映射不到 → 丢弃并告警（D5）。
+  写回时只替换 `linkOverrides` 与 `docIdScheme` 两个键，其余键与键序原样保留。
+- 库内旧历史桶 `.workbench/history/documents/` **原样保留**，不导入、不删除（D6）。
+- 画布改名/正文保存的字节保真：迁移与保存都不重写 frontmatter，键序、引号、旧 `id` 一个字节都不动；
+  只替换正文（D8）。
+- 回滚：`core.migration.rollback` 取最近一份快照，恢复各画布原文与 `linkOverrides`、删除
+  `docIdScheme`；文档正文从头到尾没被改过，因此无需恢复。
+- vaultId / 状态目录：`settings.json` 里的 `vault.id` 是合法 ULID 就用它作为 `vaults/<key>`，
+  否则按规范化库根的 sha256 派生（D7）。首次确认建库时 key 变一次，接受。
+
 ---
 
-## 12.1 库健康检查
+## 12.2 库健康检查
 
 `[设计选择]` 体检是显式触发的一次性只读扫描，不是后台常驻任务。入口为设置页「检查库健康」或命令
 `ember.panel.health`。
@@ -630,8 +675,8 @@ Ember Export <vaultName> <YYYY-MM-DD>/
 - `.md`：坏 frontmatter、非 UTF-8、超过 32 MiB（不读取内容）；
 - `.markdown`：不会被索引收录，可安全改名为 `.md`；
 - 正文中的 `media/` 图片引用是否存在（外链不检查）；
-- `.workbench/canvas/*.json`、`.workbench/history/<canvasId>.<n>.json`（n 仅 1..5）、
-  `.workbench/history/documents/<docId>/index.json` 及其版本文件；
+- `.workbench/canvas/*.json`、`.workbench/history/<canvasId>.<n>.json`（n 仅 1..5）；
+  文档历史在库外，且旧版库内 `.workbench/history/documents/` 不检查；
 - 库内符号链接：只报告，不跟随、不读取目标。
 
 只读保证：扫描期间不写盘。安全修复只有一类：

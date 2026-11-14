@@ -1,6 +1,11 @@
 import { unsafeVaultPath } from '#doc-model';
 import type { KernelContext } from '../../src/kernel/context.ts';
-import type { VaultFileChange, VaultFileEvent, VaultPort } from '../../src/kernel/ports.ts';
+import type {
+  VaultFileChange,
+  VaultFileEvent,
+  VaultPort,
+  VaultStatePort,
+} from '../../src/kernel/ports.ts';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: false });
@@ -203,6 +208,9 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
       return Promise.resolve({
         mtime,
         size: sizeOverrides.get(String(path)) ?? bytes.byteLength,
+        // 内存桩没有真实 inode：用路径哈希的两段数字冒充，只保证同路径稳定
+        dev: 1,
+        ino: [...String(path)].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 1_000_003, 7),
       });
     },
     watch: (listener) => {
@@ -252,6 +260,60 @@ export const createMemoryVault = (options: MemoryVaultOptions = {}): MemoryVault
       files.delete(path);
       mtimes.delete(path);
       sizeOverrides.delete(path);
+    },
+  };
+};
+
+/** 库外状态内存桩：迁移快照与历史日志在测试里也走同一套 read/write/list/purge */
+export const createMemoryState = (): VaultStatePort & {
+  dump(): Readonly<Record<string, string>>;
+} => {
+  const files = new Map<string, Uint8Array>();
+  const dirs = new Set<string>();
+  const parentsOf = (path: string): readonly string[] => {
+    const segments = path.split('/');
+    segments.pop();
+    const out: string[] = [];
+    let cursor = '';
+    for (const segment of segments) {
+      if (segment.length === 0) continue;
+      cursor = cursor.length === 0 ? segment : `${cursor}/${segment}`;
+      out.push(cursor);
+    }
+    return out;
+  };
+  return {
+    read: (path) => Promise.resolve(files.get(path) ?? null),
+    write: (path, bytes) => {
+      files.set(path, bytes);
+      for (const dir of parentsOf(path)) dirs.add(dir);
+      return Promise.resolve();
+    },
+    list: (path) => {
+      const prefix = path.length === 0 ? '' : `${path}/`;
+      const names = new Set<string>();
+      for (const file of files.keys()) {
+        if (!file.startsWith(prefix)) continue;
+        const rest = file.slice(prefix.length);
+        const name = rest.split('/')[0];
+        if (name !== undefined && name.length > 0) names.add(name);
+      }
+      for (const dir of dirs) {
+        if (!dir.startsWith(prefix)) continue;
+        const rest = dir.slice(prefix.length);
+        const name = rest.split('/')[0];
+        if (name !== undefined && name.length > 0) names.add(name);
+      }
+      return Promise.resolve([...names].sort());
+    },
+    purge: (path) => {
+      files.delete(path);
+      return Promise.resolve();
+    },
+    dump: () => {
+      const out: Record<string, string> = {};
+      for (const [path, bytes] of files) out[path] = new TextDecoder().decode(bytes);
+      return out;
     },
   };
 };

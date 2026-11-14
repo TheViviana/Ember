@@ -7,11 +7,13 @@ import { createEventBus } from '../../src/kernel/events.ts';
 import { createPathTools } from '../../src/kernel/paths.ts';
 import type { VaultPort } from '../../src/kernel/ports.ts';
 import type { DocRevision, Logger } from '../../src/kernel/types.ts';
+import { createMemoryState } from './fakes.ts';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8');
 const PATH = 'notes/history.md';
-const HISTORY_PREFIX = '.workbench/history/documents';
+const LOG_PATH = 'history/log.jsonl';
+const VERSIONS_PREFIX = 'history/versions';
 
 const silentLog: Logger = {
   debug: () => undefined,
@@ -73,7 +75,9 @@ const createByteVault = (
     stat: (path) => {
       const bytes = files.get(String(path));
       return Promise.resolve(
-        bytes === undefined ? null : { mtime: new Date(0).toISOString(), size: bytes.byteLength },
+        bytes === undefined
+          ? null
+          : { mtime: new Date(0).toISOString(), size: bytes.byteLength, dev: 1, ino: 1 },
       );
     },
     watch: () => ({ dispose: (): void => undefined }),
@@ -93,14 +97,28 @@ const createByteVault = (
 const setup = (
   initial: Readonly<Record<string, Uint8Array>>,
   failWrite?: (path: string) => boolean,
+  failState?: (path: string) => boolean,
 ): {
   readonly vault: ByteVault;
+  readonly state: ReturnType<typeof createMemoryState>;
   readonly service: ReturnType<typeof createDocService>;
 } => {
   const vault = createByteVault(initial, failWrite);
+  const memory = createMemoryState();
+  const state =
+    failState === undefined
+      ? memory
+      : {
+          ...memory,
+          write: (path: string, bytes: Uint8Array) => {
+            if (failState(path)) return Promise.reject(new Error(`注入失败：${path}`));
+            return memory.write(path, bytes);
+          },
+        };
   let tick = 1_700_000_000_000;
   const service = createDocService({
     port: vault.port,
+    state,
     paths: createPathTools(),
     events: createEventBus(),
     log: silentLog,
@@ -110,7 +128,7 @@ const setup = (
       return at;
     },
   });
-  return { vault, service };
+  return { vault, state: memory, service };
 };
 
 const docText = (id: string, body: string): string =>
@@ -137,19 +155,17 @@ const updateBody = async (
   await service.update(id, { body }, { base: snap.meta.rev, intent: 'user' });
 };
 
-const historyFiles = (vault: ByteVault, id: DocId): readonly string[] =>
-  [...vault.files.keys()].filter(
-    (path) => path.startsWith(`${HISTORY_PREFIX}/${String(id)}/`) && path.endsWith('.md'),
+const historyFiles = (state: ReturnType<typeof createMemoryState>): readonly string[] =>
+  Object.keys(state.dump()).filter(
+    (path) => path.startsWith(`${VERSIONS_PREFIX}/`) && path.endsWith('.md'),
   );
 
-const indexRaw = (id: DocId): string => `${HISTORY_PREFIX}/${String(id)}/index.json`;
-const versionRaw = (id: DocId, versionId: string): string =>
-  `${HISTORY_PREFIX}/${String(id)}/${versionId}.md`;
+const versionRaw = (versionId: string): string => `${VERSIONS_PREFIX}/${versionId}.md`;
 
 void test('保留策略：连续更新 21 次只留 20 版，最旧文件被清理', async () => {
   const id = createUlid(1_700_000_100_000);
   const initial = { [PATH]: encoder.encode(docText(id, 'v0\n')) };
-  const { vault, service } = setup(initial);
+  const { state, service } = setup(initial);
   const booted = await boot(service, initial);
 
   for (let index = 1; index <= 21; index += 1) {
@@ -158,7 +174,7 @@ void test('保留策略：连续更新 21 次只留 20 版，最旧文件被清�
 
   const history = await service.listHistory(booted.id);
   assert.equal(history.length, 20, '最多保留 20 版');
-  assert.equal(historyFiles(vault, booted.id).length, 20, '磁盘上也只保留 20 个版本文件');
+  assert.equal(historyFiles(state).length, 20, '库外也只保留 20 个版本文件');
   const oldest = history[history.length - 1];
   assert.ok(oldest !== undefined);
   const kept = history.find((entry) => entry.versionId === oldest.versionId);
@@ -168,26 +184,24 @@ void test('保留策略：连续更新 21 次只留 20 版，最旧文件被清�
 void test('字节预算：旧索引条目超过 64 MiB 时从最旧开始淘汰，最新版保留', async () => {
   const id = createUlid(1_700_000_200_000);
   const initial = { [PATH]: encoder.encode(docText(id, 'v0\n')) };
-  const { vault, service } = setup(initial);
+  const { state, service } = setup(initial);
   const booted = await boot(service, initial);
   await updateBody(service, booted.id, 'v1\n');
 
   const newest = createUlid(1_700_000_201_000);
   const older = createUlid(1_700_000_202_000);
   const fakeHash = `sha256:${'ab'.repeat(32)}`;
-  vault.writeRaw(
-    indexRaw(booted.id),
-    encoder.encode(
-      JSON.stringify({
-        schemaVersion: 1,
-        docId: String(booted.id),
-        versions: [
-          { versionId: newest, path: PATH, hash: fakeHash, at: '2026-01-01T00:00:01Z', size: 40 * 1024 * 1024 },
-          { versionId: older, path: PATH, hash: fakeHash, at: '2026-01-01T00:00:00Z', size: 40 * 1024 * 1024 },
-        ],
-      }),
-    ),
+  const lines = [newest, older].map((versionId, index) =>
+    JSON.stringify({
+      docId: String(booted.id),
+      versionId,
+      path: PATH,
+      hash: fakeHash,
+      at: `2026-01-01T00:00:0${1 - index}Z`,
+      size: 40 * 1024 * 1024,
+    }),
   );
+  await state.write(LOG_PATH, encoder.encode(`${lines.join('\n')}\n`));
 
   await updateBody(service, booted.id, 'v2\n');
   const history = await service.listHistory(booted.id);
@@ -201,14 +215,14 @@ void test('历史版本按原始字节保存：BOM 与 CRLF 逐字节不变', as
   const id = createUlid(1_700_000_300_000);
   const original = encoder.encode(`\uFEFF---\r\nid: ${id}\r\ntitle: 历史\r\n---\r\none\r\ntwo\r\n`);
   const initial = { [PATH]: original };
-  const { vault, service } = setup(initial);
+  const { state, service } = setup(initial);
   const booted = await boot(service, initial);
   await updateBody(service, booted.id, 'one\ntwo\nthree\n');
 
   const [entry] = await service.listHistory(booted.id);
   assert.ok(entry !== undefined);
-  const stored = vault.files.get(versionRaw(booted.id, entry.versionId));
-  assert.ok(stored !== undefined, '版本文件应存在');
+  const stored = await state.read(versionRaw(entry.versionId));
+  assert.ok(stored !== null, '版本文件应存在');
   assert.deepEqual([...stored], [...original], '历史文件必须逐字节等于旧版磁盘字节');
 
   const preview = await service.readHistory(booted.id, entry.versionId);
@@ -219,15 +233,19 @@ void test('历史版本按原始字节保存：BOM 与 CRLF 逐字节不变', as
 void test('历史写失败时不提交主文', async () => {
   const id = createUlid(1_700_000_400_000);
   const original = encoder.encode(docText(id, 'v0\n'));
-  const { vault, service } = setup({ [PATH]: original }, (path) => path.startsWith(HISTORY_PREFIX));
+  const { vault, state, service } = setup(
+    { [PATH]: original },
+    undefined,
+    (path) => path.startsWith('history/'),
+  );
   const booted = await boot(service, { [PATH]: original });
 
   await assert.rejects(updateBody(service, booted.id, 'v1\n'), /注入失败/);
   assert.deepEqual([...(vault.files.get(PATH) ?? new Uint8Array())], [...original], '主文字节不变');
   const after = await service.read(booted.id);
   assert.equal(after.meta.rev.rev, booted.rev.rev, 'rev 不推进');
-  assert.equal((await service.listHistory(booted.id)).length, 0, '索引不应写成功');
-  assert.equal(historyFiles(vault, booted.id).length, 0, '失败的新版本文件应被清理');
+  assert.equal((await service.listHistory(booted.id)).length, 0, '日志不应写成功');
+  assert.equal(historyFiles(state).length, 0, '失败的新版本文件应被清理');
 });
 
 void test('重启后仍能列出并预览历史', async () => {
@@ -240,6 +258,7 @@ void test('重启后仍能列出并预览历史', async () => {
 
   const second = createDocService({
     port: first.vault.port,
+    state: first.state,
     paths: createPathTools(),
     events: createEventBus(),
     log: silentLog,
@@ -256,16 +275,16 @@ void test('重启后仍能列出并预览历史', async () => {
 void test('索引损坏按无历史处理，下次保存重建', async () => {
   const id = createUlid(1_700_000_700_000);
   const initial = { [PATH]: encoder.encode(docText(id, 'v0\n')) };
-  const { vault, service } = setup(initial);
+  const { state, service } = setup(initial);
   const booted = await boot(service, initial);
   await updateBody(service, booted.id, 'v1\n');
 
-  vault.writeRaw(indexRaw(booted.id), encoder.encode('{not-json'));
-  assert.deepEqual(await service.listHistory(booted.id), [], '损坏索引返回空列表而不抛错');
+  await state.write(LOG_PATH, encoder.encode('{not-json'));
+  assert.deepEqual(await service.listHistory(booted.id), [], '损坏日志返回空列表而不抛错');
 
   await updateBody(service, booted.id, 'v2\n');
   const rebuilt = await service.listHistory(booted.id);
-  assert.equal(rebuilt.length, 1, '下次保存以新表覆盖损坏索引');
+  assert.equal(rebuilt.length, 1, '下次保存以新日志覆盖损坏文件');
   assert.ok(rebuilt[0] !== undefined);
   const preview = await service.readHistory(booted.id, rebuilt[0].versionId);
   assert.ok(preview.text.includes('v1'), '重建后的索引指向本次写入前的版本');
@@ -274,19 +293,16 @@ void test('索引损坏按无历史处理，下次保存重建', async () => {
 void test('列表与预览零写入', async () => {
   const id = createUlid(1_700_000_800_000);
   const initial = { [PATH]: encoder.encode(docText(id, 'v0\n')) };
-  const { vault, service } = setup(initial);
+  const { state, service } = setup(initial);
   const booted = await boot(service, initial);
   await updateBody(service, booted.id, 'v1\n');
 
-  const before = new Map([...vault.files].map(([path, bytes]) => [path, [...bytes]]));
+  const before = state.dump();
   const history = await service.listHistory(booted.id);
   for (const entry of history) {
     await service.readHistory(booted.id, entry.versionId);
   }
-  assert.deepEqual([...vault.files.keys()].sort(), [...before.keys()].sort(), '文件集合不变');
-  for (const [path, bytes] of before) {
-    assert.deepEqual([...(vault.files.get(path) ?? new Uint8Array())], bytes, `${path} 字节不变`);
-  }
+  assert.deepEqual(state.dump(), before, '库外状态与库内文件都零写入');
 });
 
 void test('恢复基线过期：主文不变、落冲突副本、历史不新增', async () => {
@@ -371,7 +387,7 @@ void test('纯 rename 与冲突副本创建都不记录历史', async () => {
 void test('非法版本 id、缺失文件与哈希不符都拒绝预览/恢复', async () => {
   const id = createUlid(1_700_001_200_000);
   const initial = { [PATH]: encoder.encode(docText(id, 'v0\n')) };
-  const { vault, service } = setup(initial);
+  const { vault, state, service } = setup(initial);
   const booted = await boot(service, initial);
   await updateBody(service, booted.id, 'v1\n');
   const [entry] = await service.listHistory(booted.id);
@@ -386,9 +402,9 @@ void test('非法版本 id、缺失文件与哈希不符都拒绝预览/恢复',
     (error: unknown) => error instanceof EmberError && error.code === 'invalid_payload',
   );
 
-  const stored = vault.files.get(versionRaw(booted.id, entry.versionId));
-  assert.ok(stored !== undefined);
-  vault.writeRaw(versionRaw(booted.id, entry.versionId), encoder.encode('tampered'));
+  const stored = await state.read(versionRaw(entry.versionId));
+  assert.ok(stored !== null);
+  await state.write(versionRaw(entry.versionId), encoder.encode('tampered'));
   await assert.rejects(service.readHistory(booted.id, entry.versionId), (error: unknown) => {
     return error instanceof EmberError && error.code === 'invalid_payload';
   });
@@ -397,7 +413,7 @@ void test('非法版本 id、缺失文件与哈希不符都拒绝预览/恢复',
     (error: unknown) => error instanceof EmberError && error.code === 'invalid_payload',
   );
 
-  vault.removeRaw(versionRaw(booted.id, entry.versionId));
+  await state.purge(versionRaw(entry.versionId));
   await assert.rejects(service.readHistory(booted.id, entry.versionId), (error: unknown) => {
     return error instanceof EmberError && error.code === 'doc_not_found';
   });

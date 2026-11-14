@@ -1,4 +1,4 @@
-import type { VaultId } from '#doc-model';
+import { asCommandId, type VaultId } from '#doc-model';
 import { createCanvasHost } from './canvas-host.ts';
 import { createCommandBus } from './command-bus.ts';
 import { createKernelContext, type KernelContext } from './context.ts';
@@ -8,8 +8,9 @@ import { toErrorText } from './errors.ts';
 import { createFolderService } from './folder-service.ts';
 import { createHealthService } from './health-service.ts';
 import { createIndexService } from './index-service.ts';
+import { createMigrationService } from './migration-service.ts';
 import { createPathTools } from './paths.ts';
-import type { VaultFileEvent, VaultPort } from './ports.ts';
+import type { VaultFileEvent, VaultPort, VaultStatePort } from './ports.ts';
 import { createSettingsService } from './settings-service.ts';
 import type { KernelEnv, Logger } from './types.ts';
 
@@ -17,6 +18,8 @@ export const KERNEL_VERSION = '2.5.0';
 
 export interface BootPorts {
   readonly vault: VaultPort;
+  /** 库外状态：迁移快照、历史日志（D4） */
+  readonly state: VaultStatePort;
 }
 
 export interface BootOptions {
@@ -85,11 +88,36 @@ export const bootKernel = async (options: BootOptions): Promise<Kernel> => {
 
   const docs = createDocService({
     port: options.ports.vault,
+    state: options.ports.state,
     paths,
     events,
     log,
     ...(options.now ? { now: options.now } : {}),
   });
+
+  // 旧 ULID → 路径：必须在画布被读取前完成，否则节点会指向已不存在的文档。
+  const migration = createMigrationService({
+    port: options.ports.vault,
+    state: options.ports.state,
+    paths,
+    settings,
+    docs,
+    log,
+    ...(options.now ? { now: options.now } : {}),
+  });
+  await migration.migrate();
+  const rollbackCommand = asCommandId('core.migration.rollback');
+  if (rollbackCommand !== null) {
+    commands.register({
+      id: rollbackCommand,
+      title: '回滚文档身份迁移',
+      scope: 'global',
+      run: async () => {
+        await migration.rollback();
+      },
+    });
+  }
+
   const folders = createFolderService({ port: options.ports.vault, paths });
   const index = createIndexService({ docs, settings, events, log });
   const health = createHealthService({

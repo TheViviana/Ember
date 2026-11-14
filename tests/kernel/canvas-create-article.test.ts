@@ -4,7 +4,7 @@ import { asVaultId, createUlid, unsafeVaultPath } from '#doc-model';
 import { bootKernel, type Kernel } from '../../src/kernel/boot.ts';
 import { EmberError } from '../../src/kernel/errors.ts';
 import type { Logger } from '../../src/kernel/types.ts';
-import { createMemoryVault, type MemoryVault } from './fakes.ts';
+import { createMemoryState, createMemoryVault, type MemoryVault } from './fakes.ts';
 
 const VAULT_ID = asVaultId('01JB8ZQ3K4M5N6P7Q8R9S0T1V2');
 if (VAULT_ID === null) throw new Error('测试库 id 非法');
@@ -27,7 +27,7 @@ const createLogger = (): { log: Logger; warns: string[] } => {
 const boot = async (vault: MemoryVault, log: Logger): Promise<Kernel> =>
   bootKernel({
     vaultId: VAULT_ID,
-    ports: { vault: vault.port },
+    ports: { vault: vault.port, state: createMemoryState() },
     log,
   });
 

@@ -1,4 +1,4 @@
-import { asDocId, asVaultId, type DocId, type VaultId } from '#doc-model';
+import { asDocId, asVaultId, isUlid, type DocId, type VaultId } from '#doc-model';
 import { EmberError } from './errors.ts';
 import type { EventBus } from './events.ts';
 import type { PathTools } from './paths.ts';
@@ -87,8 +87,17 @@ const normalizeSettings = (
     for (const [key, value] of Object.entries(raw['linkOverrides'])) {
       if (typeof value !== 'string') continue;
       const docId = asDocId(value);
-      if (docId !== null) linkOverrides[key] = docId;
-      else onDroppedOverride?.(key, value);
+      if (docId !== null) {
+        linkOverrides[key] = docId;
+        continue;
+      }
+      // 旧方案（path 之前）里 DocId 是 ULID：迁移与回滚都要看到原值，
+      // 这里只做类型放宽，不改写磁盘；映射不到唯一文档的条目由迁移层丢弃（D5）。
+      if (isUlid(value)) {
+        linkOverrides[key] = value as unknown as DocId;
+        continue;
+      }
+      onDroppedOverride?.(key, value);
     }
   }
 
@@ -121,6 +130,21 @@ const normalizeSettings = (
     },
     linkOverrides,
   };
+};
+
+/** 迁移写回时需要删除可选键 `docIdScheme`，只读类型得先放宽一次 */
+type MutableSettings = { -readonly [K in keyof VaultSettings]: VaultSettings[K] };
+
+/** 原始磁盘对象：迁移写回只动两个键，不做归一化回写（库内可能跟着 iCloud 同步） */
+const readRawSettings = async (read: () => Promise<Uint8Array | null>): Promise<Record<string, unknown> | null> => {
+  const bytes = await read();
+  if (bytes === null) return null;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 };
 
 const mergePatch = (current: VaultSettings, patch: SettingsPatch): VaultSettings => {
@@ -232,6 +256,40 @@ export const createSettingsService = (options: SettingsServiceOptions): Settings
         (error: unknown) => {
           const detail = error instanceof Error ? error.message : String(error);
           lastFailure = new EmberError('io_failed', `设置写入失败（${fields}）：${detail}`);
+        },
+      );
+      return chained;
+    },
+
+    applyDocIdScheme: async ({ linkOverrides, scheme }) => {
+      if (options.port.readonlyMode) {
+        throw new EmberError('vault_locked', '库为只读，写操作被拒绝（原因见状态栏）', {
+          reason: options.port.readonlyReason,
+        });
+      }
+      const chained: Promise<VaultSettings> = writing.then(async () => {
+        // 只改 linkOverrides 与 docIdScheme：迁移不应把归一化默认值（ui 等）
+        // 顺手写进用户的 settings.json，库可能位于 iCloud 且会被同步。
+        const raw = await readRawSettings(() => options.port.read(path));
+        const base: Record<string, unknown> = raw ?? fallback();
+        const next = {
+          ...base,
+          // 整表替换：迁移可能丢弃映射不到的旧 ULID，merge 语义做不到删除
+          linkOverrides: { ...linkOverrides },
+        } as MutableSettings;
+        if (scheme === 'path') next.docIdScheme = 'path';
+        else delete next.docIdScheme;
+        await persistWrite(next);
+        // 缓存按 VaultSettings 形态重建；磁盘上的原始键序不受影响
+        cached = normalizeSettings(next, fallback());
+        publish(cached);
+        return cached;
+      });
+      writing = chained.then(
+        () => undefined,
+        (error: unknown) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          lastFailure = new EmberError('io_failed', `身份方案写入失败：${detail}`);
         },
       );
       return chained;

@@ -84,6 +84,9 @@ pub fn window_resize_frame(
 pub struct FileStat {
     mtime: String,
     size: u64,
+    /// 设备号与 inode：内核用它们判定「改名/移动后仍是同一个文件」（严格重绑）
+    dev: u64,
+    ino: u64,
 }
 
 /// vault 文档读入上限：整文件 + base64（×4/3）都驻留内存，超限拒绝而非读入
@@ -110,8 +113,8 @@ pub async fn vault_read(
     let session = state.session()?;
     let vault = session.vault()?;
     // stat 先行：外部塞进库里的超大文件不读入内存
-    if let Some((_, size)) = vault.stat(&path)? {
-        if size > MAX_VAULT_READ_BYTES {
+    if let Some(stat) = vault.stat(&path)? {
+        if stat.size > MAX_VAULT_READ_BYTES {
             return Err(VaultError::Encoding(format!(
                 "文件超过读入上限 {} MB：{path}",
                 MAX_VAULT_READ_BYTES / (1024 * 1024)
@@ -142,8 +145,8 @@ pub async fn vault_write(
     session.vault()?.write(&path, &bytes, &intent)
 }
 
-/// 用户删除：优先系统回收站，不可用时降级 Finder 与库内回收目录（vault-format §8.3）。
-/// 返回实际落点 `system` / `internal`；文件本就不存在时返回 `null`。
+/// 用户删除：只进系统回收站（含 Finder 代删），不可用即失败，不降级库内回收。
+/// 返回 `system`；文件本就不存在时返回 `null`。
 #[tauri::command]
 pub async fn vault_remove(
     state: State<'_, VaultApp>,
@@ -224,20 +227,83 @@ pub async fn vault_stat(
     path: String,
 ) -> VaultResult<Option<FileStat>> {
     let session = state.session()?;
-    Ok(session
-        .vault()?
-        .stat(&path)?
-        .map(|(mtime, size)| FileStat { mtime, size }))
+    Ok(session.vault()?.stat(&path)?.map(|stat| FileStat {
+        mtime: stat.mtime,
+        size: stat.size,
+        dev: stat.dev,
+        ino: stat.ino,
+    }))
 }
 
-/// 图库清单：`media/` 下所有合法图片，相对路径字典序。
+/// 读库外状态（迁移快照、历史日志）；不存在返回 null。路径相对于库外状态根。
+#[tauri::command]
+pub async fn vault_state_read(
+    state: State<'_, VaultApp>,
+    path: String,
+) -> VaultResult<Option<String>> {
+    let session = state.session()?;
+    let vault = session.vault()?;
+    if let Some(bytes) = vault.state_read(&path)? {
+        if bytes.len() as u64 > MAX_VAULT_READ_BYTES {
+            return Err(VaultError::Encoding(format!(
+                "状态文件超过读入上限 {} MB：{path}",
+                MAX_VAULT_READ_BYTES / (1024 * 1024)
+            )));
+        }
+        return Ok(Some(STANDARD.encode(bytes)));
+    }
+    Ok(None)
+}
+
+/// 原子写库外状态；父目录自动创建。路径相对于库外状态根。
+#[tauri::command]
+pub async fn vault_state_write(
+    state: State<'_, VaultApp>,
+    path: String,
+    data: String,
+) -> VaultResult<()> {
+    if (data.len() as u64) * 3 / 4 > MAX_VAULT_WRITE_BYTES {
+        return Err(VaultError::Encoding(format!(
+            "状态写入超过 {} MB 上限：{path}",
+            MAX_VAULT_WRITE_BYTES / (1024 * 1024)
+        )));
+    }
+    let bytes = STANDARD
+        .decode(data.as_bytes())
+        .map_err(|error| VaultError::Encoding(error.to_string()))?;
+    let session = state.session()?;
+    session.vault()?.state_write(&path, &bytes)
+}
+
+/// 列库外状态目录的直接子项名称；目录不存在返回空。
+#[tauri::command]
+pub async fn vault_state_list(
+    state: State<'_, VaultApp>,
+    path: String,
+) -> VaultResult<Vec<String>> {
+    let session = state.session()?;
+    session.vault()?.state_list(&path)
+}
+
+/// 永久删除库外状态项；不存在视为成功。
+#[tauri::command]
+pub async fn vault_state_purge(
+    state: State<'_, VaultApp>,
+    path: String,
+) -> VaultResult<()> {
+    let session = state.session()?;
+    session.vault()?.state_purge(&path)
+}
+
+/// 图库清单：`media/` 内容寻址资产 + 指针型库里按真实布局散落的磁盘图片。
 #[tauri::command]
 pub async fn asset_list(state: State<'_, VaultApp>) -> VaultResult<Vec<media::AssetEntry>> {
     let session = state.session()?;
     media::list(session.vault()?)
 }
 
-/// 读单张图库图片，字节以 base64 过 IPC；只接受 `media/` 下的资产路径。
+/// 读单张图库图片，字节以 base64 过 IPC。
+/// `media/` 路径仍走内容寻址校验；其余路径只允许读库内、白名单扩展名、非符号链接的图片。
 #[tauri::command]
 pub async fn asset_read(
     state: State<'_, VaultApp>,

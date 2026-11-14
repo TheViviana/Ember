@@ -12,6 +12,8 @@ pub mod ulid;
 pub mod watcher;
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
@@ -27,9 +29,18 @@ const CANVAS_DIR: &str = ".workbench/canvas";
 /// 孤儿临时文件保留期：正常一次原子写远不到 1 小时，超龄的 `.ember-tmp-`
 /// 必然是崩溃遗留的孤儿（索引与画布都是派生数据，残留清扫即可恢复）。
 const ORPHAN_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
-/// 库内回收目录（`.workbench/trash/<ULID>/`）保留期：删除降级到库内时
-/// 由启动清扫按 mtime 回收，见 `trash::TrashDestination::Internal`。
+/// 历史遗留的库内回收目录（`.workbench/trash/<ULID>/`）保留期：v1 起删除不再
+/// 降级到库内，这里只为还没被清理的老副本保留一次惰性清扫。
 const TRASH_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// 文件元信息。`dev` / `ino` 供严格重绑判定同一文件（改名/移动后 inode 不变）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatInfo {
+    pub mtime: String,
+    pub size: u64,
+    pub dev: u64,
+    pub ino: u64,
+}
 
 /// 默认忽略的目录名：依赖缓存与版本库元数据。它们可能含成百上千个 `.md`
 /// （README、依赖文档），既不属于知识库内容，也不该被 watcher 每轮轮询。
@@ -130,6 +141,13 @@ impl Vault {
             }
             Err(lock::AcquireFailure::Error(error)) => return Err(error),
         };
+        // 锁在库外，锁的创建不再能代表库位置可写：用 settings.json 的只写打开
+        // （不截断、不写字节）补一次探测，只读卷仍然降级为观察者。
+        let mut guard = guard;
+        if guard.is_some() && !writable_probe(&root) {
+            guard = None;
+            startup_readonly_reason = Some(lock::ReadonlyReason::FilesystemReadonly);
+        }
         let initially_readonly = guard.is_none();
 
         // 只有持锁实例才执行启动清扫；另一实例可能正在写。
@@ -224,8 +242,8 @@ impl Vault {
         atomic::write_atomic(&absolute, bytes).map_err(|error| with_path(error, &absolute))
     }
 
-    /// 删除：优先系统回收站，不可用时降级 Finder 与库内回收目录（vault-format §8.3）。
-    /// 返回实际落点；文件不存在视为成功并返回 `None`，便于内核做幂等对账。
+    /// 删除：移入系统回收站（Finder 代删的落点同样是系统回收站），不可用即失败；
+    /// 库内不再有降级副本。返回实际落点；文件不存在视为成功并返回 `None`，便于内核做幂等对账。
     pub fn remove(&self, relative: &str) -> VaultResult<Option<trash::TrashDestination>> {
         self.ensure_writable()?;
         let (absolute, normalized) = paths::resolve(&self.root, relative)?;
@@ -417,7 +435,7 @@ impl Vault {
         Ok(entries)
     }
 
-    pub fn stat(&self, relative: &str) -> VaultResult<Option<(String, u64)>> {
+    pub fn stat(&self, relative: &str) -> VaultResult<Option<StatInfo>> {
         let (absolute, _) = paths::resolve(&self.root, relative)?;
         let metadata = match fs::metadata(&absolute) {
             Ok(value) => value,
@@ -430,7 +448,75 @@ impl Vault {
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|duration| duration.as_millis() as u64)
             .unwrap_or_default();
-        Ok(Some((clock::iso8601(millis), metadata.len())))
+        #[cfg(unix)]
+        let (dev, ino) = (metadata.dev(), metadata.ino());
+        #[cfg(not(unix))]
+        let (dev, ino) = (0, 0);
+        Ok(Some(StatInfo {
+            mtime: clock::iso8601(millis),
+            size: metadata.len(),
+            dev,
+            ino,
+        }))
+    }
+
+    /// 库外状态根（迁移快照、历史日志、锁之外的所有派生记录）。
+    pub fn state_dir(&self) -> PathBuf {
+        paths::vault_state_dir(&self.root)
+    }
+
+    /// 读库外状态；不存在返回 None。只读会话也允许读（历史预览本身不写盘）。
+    pub fn state_read(&self, relative: &str) -> VaultResult<Option<Vec<u8>>> {
+        let (absolute, _) = paths::resolve(&self.state_dir(), relative)?;
+        match fs::read(&absolute) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// 原子写库外状态；自动创建父目录。库只读时同样拒绝（历史是写入的派生数据）。
+    pub fn state_write(&self, relative: &str, bytes: &[u8]) -> VaultResult<()> {
+        self.ensure_writable()?;
+        let (absolute, _) = paths::resolve(&self.state_dir(), relative)?;
+        let _gate = self.begin_write()?;
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        atomic::write_atomic(&absolute, bytes).map_err(|error| with_path(error, &absolute))
+    }
+
+    /// 列出库外某个目录下的直接子项名称（文件与文件夹都返回，字典序）。
+    /// `relative` 为空串表示状态根本身。
+    pub fn state_list(&self, relative: &str) -> VaultResult<Vec<String>> {
+        let dir = if relative.is_empty() {
+            self.state_dir()
+        } else {
+            paths::resolve(&self.state_dir(), relative)?.0
+        };
+        let entries = match fs::read_dir(&dir) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            names.push(entry?.file_name().to_string_lossy().to_string());
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// 永久删除库外状态；不存在视为成功（历史裁剪与回滚都是幂等的）。
+    pub fn state_purge(&self, relative: &str) -> VaultResult<()> {
+        self.ensure_writable()?;
+        let (absolute, _) = paths::resolve(&self.state_dir(), relative)?;
+        let _gate = self.begin_write()?;
+        match fs::remove_file(&absolute) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(with_path(error.into(), &absolute)),
+        }
     }
 
     /// 当前是否允许写入：启动即持锁则整个会话可写（独占创建模型下运行期不会失守）。
@@ -488,6 +574,25 @@ fn validate_dir_name(normalized: &str) -> VaultResult<()> {
     Ok(())
 }
 
+/// 库位置可写探测：锁已迁到库外，不能再靠「能否在 `.workbench` 建锁」判断。
+/// 这里只看库根目录的写权限位——不写任何文件，避免在 iCloud 库里制造临时文件。
+#[cfg(unix)]
+fn writable_probe(root: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    match fs::metadata(root) {
+        Ok(metadata) => metadata.permissions().mode() & 0o222 != 0,
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn writable_probe(root: &Path) -> bool {
+    fs::metadata(root)
+        .map(|metadata| !metadata.permissions().readonly())
+        .unwrap_or(false)
+}
+
 /// 给 IO 错误补上绝对磁盘路径，便于用户直接定位文件。
 fn with_path(error: VaultError, path: &Path) -> VaultError {
     match error {
@@ -521,34 +626,38 @@ fn sweep_housekeeping(root: &Path) {
     }
 }
 
-/// `.workbench/` 顶层：认领者在 rename 拿走死锁之后、删除副本之前崩溃留下的
-/// `lock.claim.<pid>.<seq>` 文件。复用孤儿 temp 的 24h 门槛——认领到删除只隔
-/// 几条指令，超龄副本必然是崩溃残留；只匹配数字后缀形态，`.lock` 一律不碰。
+/// 锁目录顶层：认领者在 rename 拿走死锁之后、删除副本之前崩溃留下的
+/// `lock.claim.<pid>.<seq>` 文件。锁已迁到库外；`.workbench/` 也扫一遍，
+/// 清理旧版本遗留的认领副本。复用孤儿 temp 的 24h 门槛——认领到删除只隔
+/// 几条指令，超龄副本必然是崩溃残留；只匹配数字后缀形态，`lock` 本身一律不碰。
 fn sweep_claim_copies(root: &Path, now: SystemTime) -> usize {
     let mut removed = 0usize;
-    let entries = match fs::read_dir(paths::workbench(root)) {
-        Ok(value) => value,
-        Err(_) => return 0,
-    };
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let Some(rest) = name.strip_prefix("lock.claim.") else {
-            continue;
+    for dir in [paths::lock_dir(root), paths::workbench(root)] {
+        let entries = match fs::read_dir(&dir) {
+            Ok(value) => value,
+            Err(_) => continue,
         };
-        let numeric =
-            rest.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
-        if !numeric || rest.is_empty() {
-            continue;
-        }
-        let path = entry.path();
-        if !older_than(&path, now, ORPHAN_TEMP_MAX_AGE) {
-            continue;
-        }
-        if fs::remove_file(&path).is_ok() {
-            removed += 1;
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(rest) = name.strip_prefix("lock.claim.") else {
+                continue;
+            };
+            let numeric = rest
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+            if !numeric || rest.is_empty() {
+                continue;
+            }
+            let path = entry.path();
+            if !older_than(&path, now, ORPHAN_TEMP_MAX_AGE) {
+                continue;
+            }
+            if fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
         }
     }
     removed
@@ -878,6 +987,9 @@ mod tests {
     impl Drop for TempVault {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+            // 锁与库外状态都在 App Support：测试自己清掉，避免污染真实目录。
+            let _ = fs::remove_dir_all(paths::lock_dir(&self.root));
+            let _ = fs::remove_dir_all(paths::vault_state_dir(&self.root));
         }
     }
 
