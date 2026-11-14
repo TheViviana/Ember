@@ -10,6 +10,11 @@
   z-index: calc(var(--layer-chrome) + 1);
   display: grid;
   place-items: center;
+  /* 启动画面在外壳根节点之外，拿不到 .root 的 overflow 裁切；
+   * 窗口本身是透明的，覆盖层不自己收圆角就会在开屏时露出四个直角。
+   * 与外壳共用同一个窗口圆角变量，避免两处数字各写一遍。 */
+  border-radius: var(--window-radius);
+  overflow: hidden;
   background: var(--ember-bg-deep);
   transition: opacity var(--duration-slow) var(--ease-out);
 }
