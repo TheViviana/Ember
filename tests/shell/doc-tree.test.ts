@@ -69,6 +69,22 @@ void test('buildTree：无路径段重复，子目录折叠为嵌套文件夹', 
   assert.equal(tree.filter((entry) => entry.kind === 'folder').length, 1);
 });
 
+void test('buildTree：磁盘目录（含空文件夹）合并进树', () => {
+  const tree = buildTree([doc('notes/a.md')], ['notes', 'notes/sub', 'empty', 'empty/deep']);
+  const empty = folder(tree, 'empty');
+  assert.ok(empty !== undefined && empty.kind === 'folder');
+  assert.deepEqual(
+    empty.children.map((entry) => (entry.kind === 'folder' ? entry.path : entry.name)),
+    ['empty/deep'],
+  );
+  const deep = folder(empty.children, 'empty/deep');
+  assert.ok(deep !== undefined && deep.kind === 'folder');
+  assert.deepEqual(deep.children, []);
+  assert.deepEqual(collectFolderPaths(tree), ['empty', 'empty/deep', 'notes', 'notes/sub']);
+  // 不传目录时保持旧行为：只从文档路径反推
+  assert.deepEqual(collectFolderPaths(buildTree([doc('notes/a.md')])), ['notes']);
+});
+
 void test('flattenTree：折叠的文件夹只保留自身行，展开后递归显示子行', () => {
   const tree = buildTree([doc('notes/a.md'), doc('notes/sub/b.md'), doc('root.md')]);
   const collapsed = flattenTree(tree, () => false);

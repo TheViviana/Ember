@@ -89,6 +89,8 @@ export const App = (): ReactElement => {
   useImportCommands();
 
   const documents = useQuery({ queryKey: ['docs', 'list'], queryFn: () => kernel.docs.list() });
+  // 目录清单直接来自磁盘：空文件夹也要出现在树与「移动到…」里
+  const folders = useQuery({ queryKey: ['folders', 'list'], queryFn: () => kernel.folders.list() });
 
   /** 当前最前浮窗文档的库内路径：状态栏展示 + 点击复制 */
   const activeDocPath = useMemo(() => {
@@ -435,6 +437,7 @@ export const App = (): ReactElement => {
         {docListOpen ? (
           <DocumentListPanel
             documents={documents.data ?? []}
+            folders={(folders.data ?? []).map((path) => String(path))}
             loading={documents.isPending}
             error={documentsError}
             activeDocId={activeDocId === null ? null : String(activeDocId)}

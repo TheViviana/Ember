@@ -71,15 +71,18 @@ const toEntries = (folder: FolderBuilder): readonly DocTreeEntry[] => {
   return [...folders, ...docs];
 };
 
-/** 文档清单 → 树。路径为空或只有文件名的条目落在根层 */
-export const buildTree = (documents: readonly DocMeta[]): readonly DocTreeEntry[] => {
+/**
+ * 文档清单 + 磁盘目录 → 树。`dirs` 是 `FolderService.list()` 的原始清单，
+ * 因此没有任何文档的空文件夹也会出现在树里；路径为空或只有文件名的条目落在根层。
+ */
+export const buildTree = (
+  documents: readonly DocMeta[],
+  dirs: readonly string[] = [],
+): readonly DocTreeEntry[] => {
   const root = createBuilder('', '');
-  for (const meta of documents) {
-    const segments = String(meta.path).split('/');
-    const fileName = segments[segments.length - 1] ?? '';
-    if (fileName.length === 0) continue;
+  const ensureFolder = (segments: readonly string[]): FolderBuilder => {
     let cursor = root;
-    for (const segment of segments.slice(0, -1)) {
+    for (const segment of segments) {
       if (segment.length === 0) continue;
       const path = cursor.path.length === 0 ? segment : `${cursor.path}/${segment}`;
       let child = cursor.folders.get(segment);
@@ -89,7 +92,14 @@ export const buildTree = (documents: readonly DocMeta[]): readonly DocTreeEntry[
       }
       cursor = child;
     }
-    cursor.docs.push(meta);
+    return cursor;
+  };
+  for (const dir of dirs) ensureFolder(dir.split('/'));
+  for (const meta of documents) {
+    const segments = String(meta.path).split('/');
+    const fileName = segments[segments.length - 1] ?? '';
+    if (fileName.length === 0) continue;
+    ensureFolder(segments.slice(0, -1)).docs.push(meta);
   }
   return toEntries(root);
 };

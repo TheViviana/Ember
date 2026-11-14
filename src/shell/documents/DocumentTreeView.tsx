@@ -20,6 +20,7 @@ export interface DocumentTreeViewProps {
   readonly onSelectDoc: (id: string) => void;
   readonly onClose: () => void;
   readonly onOpenMenu: (event: React.MouseEvent, meta: DocMeta) => void;
+  readonly onFolderMenu: (event: React.MouseEvent, path: string) => void;
   readonly onMoveDoc: (docId: string, fromPath: string, targetDir: string) => void;
 }
 
@@ -54,6 +55,7 @@ export const DocumentTreeView = ({
   onSelectDoc,
   onClose,
   onOpenMenu,
+  onFolderMenu,
   onMoveDoc,
 }: DocumentTreeViewProps): ReactElement => {
   const [dragging, setDragging] = useState<DragSource | null>(null);
@@ -222,6 +224,9 @@ export const DocumentTreeView = ({
                 title={row.path}
                 onClick={() => {
                   onToggleFolder(row.path);
+                }}
+                onContextMenu={(event) => {
+                  onFolderMenu(event, row.path);
                 }}
                 onDragOver={(event) => {
                   onFolderDragOver(event, row.path);

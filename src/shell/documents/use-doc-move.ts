@@ -13,7 +13,7 @@ export interface PanelNotice {
 }
 
 export interface DocMoveApi {
-  /** 右键「移动到…」的可选目录：由库内文档路径反推（库根由调用方单独提供） */
+  /** 右键「移动到…」的可选目录：磁盘目录 ∪ 文档路径反推（库根由调用方单独提供） */
   readonly moveDirs: readonly string[];
   readonly moveDoc: (docId: string, fromPath: string, targetDir: string) => void;
   readonly undoLastMove: () => void;
@@ -33,6 +33,7 @@ interface MoveRecord {
 export const useDocMove = (
   documents: readonly DocMeta[],
   setNotice: (notice: PanelNotice | null) => void,
+  dirs: readonly string[] = [],
 ): DocMoveApi => {
   const kernel = useKernel();
   const queryClient = useQueryClient();
@@ -124,13 +125,14 @@ export const useDocMove = (
   );
 
   const moveDirs = useMemo(() => {
-    const dirs = new Set<string>();
+    // 磁盘目录优先（空文件夹也能成为移动目标），文档路径反推用于兜底
+    const paths = new Set<string>(dirs);
     for (const meta of documents) {
       const dir = parentDirOf(String(meta.path));
-      if (dir.length > 0) dirs.add(dir);
+      if (dir.length > 0) paths.add(dir);
     }
-    return [...dirs].sort(compareNatural);
-  }, [documents]);
+    return [...paths].sort(compareNatural);
+  }, [documents, dirs]);
 
   return { moveDirs, moveDoc, undoLastMove };
 };

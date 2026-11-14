@@ -5,15 +5,17 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
 } from 'react';
-import { unsafeDocId } from '#doc-model';
+import { unsafeDocId, unsafeVaultPath } from '#doc-model';
 import type { DocMeta } from '../../kernel/types.ts';
 import { toErrorText } from '../../kernel/errors.ts';
 import { isEmberError } from '../../kernel/errors.ts';
 import { useEscLayer, isEscTop } from '../esc-arbiter.ts';
 import { clampVisible, growVisible, SIDEBAR_INITIAL } from '../components/list-window.ts';
+import { readonlyText } from '../components/readonly-text.ts';
 import { flushMachineUiWrites, useMachineStore } from '../../data/stores/machine-store.ts';
 import { DUPLICATE_DOC_COMMAND } from '../commands/shell-commands.ts';
 import { useKernel } from '../kernel-provider.tsx';
@@ -21,11 +23,15 @@ import { buildTree, collectFolderPaths, flattenTree, type DocTreeRow } from './d
 import { isDocDragActive } from './doc-drag.ts';
 import { DocumentItemOverlay, type ItemOverlay } from './DocumentItemOverlay.tsx';
 import { DocumentTreeView } from './DocumentTreeView.tsx';
+import { FolderCreateRow } from './FolderCreateRow.tsx';
+import { FolderMenuOverlay, type FolderMenu } from './FolderMenuOverlay.tsx';
 import { useDocMove, type PanelNotice } from './use-doc-move.ts';
 import styles from './DocumentListPanel.module.css';
 
 export interface DocumentListPanelProps {
   readonly documents: readonly DocMeta[];
+  /** 磁盘目录清单：含没有文档的空文件夹，树与「移动到…」都以它为准 */
+  readonly folders: readonly string[];
   readonly loading: boolean;
   readonly error: string | null;
   readonly activeDocId: string | null;
@@ -47,6 +53,7 @@ const UNDO_WINDOW_MS = 8000;
  */
 export const DocumentListPanel = ({
   documents,
+  folders,
   loading,
   error,
   activeDocId,
@@ -60,6 +67,9 @@ export const DocumentListPanel = ({
   const [query, setQuery] = useState('');
   const [visibleDocs, setVisibleDocs] = useState(SIDEBAR_INITIAL);
   const [menu, setMenu] = useState<ItemOverlay | null>(null);
+  const [folderMenu, setFolderMenu] = useState<FolderMenu | null>(null);
+  /** 新建文件夹的父目录；null 表示不在新建状态 */
+  const [createParent, setCreateParent] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [notice, setNotice] = useState<PanelNotice | null>(null);
   const [width, setWidth] = useState<number | null>(
@@ -84,7 +94,7 @@ export const DocumentListPanel = ({
     [documents, keyword],
   );
 
-  const tree = useMemo(() => buildTree(documents), [documents]);
+  const tree = useMemo(() => buildTree(documents, folders), [documents, folders]);
   const folderPaths = useMemo(() => collectFolderPaths(tree), [tree]);
   const storedExpanded = useMachineStore((state) => state.docTreeExpanded[vaultId]);
   const expanded = useMemo(() => {
@@ -198,7 +208,7 @@ export const DocumentListPanel = ({
     };
   }, [notice]);
 
-  const { moveDirs, moveDoc } = useDocMove(documents, setNotice);
+  const { moveDirs, moveDoc } = useDocMove(documents, setNotice, folders);
 
   // ---- 右键菜单动作 ----
 
@@ -224,6 +234,69 @@ export const DocumentListPanel = ({
       });
     },
     [],
+  );
+
+  // ---- 文件夹动作 ----
+
+  const openFolderMenu = useCallback((event: ReactMouseEvent, path: string): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.currentTarget;
+    const rect = target instanceof Element ? target.getBoundingClientRect() : null;
+    setCreateParent(null);
+    setFolderMenu({
+      path,
+      left: rect?.left ?? event.clientX,
+      top: rect?.top ?? event.clientY,
+      bottom: rect?.bottom ?? event.clientY,
+      w: rect?.width ?? 220,
+    });
+  }, []);
+
+  const invalidateFolders = useCallback((): void => {
+    // 建/删目录不产生 watcher 事件，只能由操作方主动失效清单
+    void queryClient.invalidateQueries({ queryKey: ['folders', 'list'] });
+  }, [queryClient]);
+
+  /** 成功返回 null，失败返回可直接展示的文案（由新建行就地显示） */
+  const createFolder = useCallback(
+    (parent: string, name: string): Promise<string | null> =>
+      kernel.folders
+        .create(parent, name)
+        .then((path) => {
+          invalidateFolders();
+          if (parent.length > 0) expandFolder(parent);
+          setCreateParent(null);
+          setNotice({ tone: 'ok', text: `已新建文件夹 ${String(path)}` });
+          return null;
+        })
+        .catch((cause: unknown) => toErrorText(cause)),
+    [expandFolder, invalidateFolders, kernel],
+  );
+
+  /** 删除前先在面板侧拦非空目录，避免把整棵文档树一起移进废纸篓 */
+  const removeFolder = useCallback(
+    (path: string): void => {
+      setFolderMenu(null);
+      const prefix = `${path}/`;
+      if (
+        documents.some((meta) => String(meta.path).startsWith(prefix)) ||
+        folders.some((dir) => dir.startsWith(prefix))
+      ) {
+        setNotice({ tone: 'error', text: '只支持删除空文件夹：请先移走其中的文档或子文件夹' });
+        return;
+      }
+      void (async () => {
+        try {
+          await kernel.folders.remove(unsafeVaultPath(path));
+          invalidateFolders();
+          setNotice({ tone: 'ok', text: `已删除文件夹 ${path}（系统回收站）` });
+        } catch (cause) {
+          setNotice({ tone: 'error', text: `删除文件夹失败：${toErrorText(cause)}` });
+        }
+      })();
+    },
+    [documents, folders, invalidateFolders, kernel],
   );
 
   const copyPath = useCallback((path: string): void => {
@@ -357,6 +430,17 @@ export const DocumentListPanel = ({
         <span className={styles.headerIcon}>◇</span>
         <span className={styles.headerTitle}>文档</span>
         <span className={styles.headerCount}>{filtered.length}</span>
+        <button
+          type="button"
+          className={styles.headerAction}
+          disabled={kernel.env.readonlyMode}
+          title={kernel.env.readonlyMode ? readonlyText(kernel.env.readonlyReason) : '在库根新建文件夹'}
+          onClick={() => {
+            setCreateParent((current) => (current === null ? '' : null));
+          }}
+        >
+          ＋
+        </button>
         <button type="button" className={styles.close} onClick={onClose} title="关闭">
           ✕
         </button>
@@ -380,6 +464,16 @@ export const DocumentListPanel = ({
         />
       </div>
 
+      {createParent === null ? null : (
+        <FolderCreateRow
+          key={createParent}
+          parent={createParent}
+          disabled={kernel.env.readonlyMode}
+          onCancel={() => setCreateParent(null)}
+          onSubmit={(name) => createFolder(createParent, name)}
+        />
+      )}
+
       <DocumentTreeView
         rows={rows}
         visibleDocs={visibleDocs}
@@ -395,6 +489,7 @@ export const DocumentListPanel = ({
         onSelectDoc={onSelectDoc}
         onClose={onClose}
         onOpenMenu={openMenu}
+        onFolderMenu={openFolderMenu}
         onMoveDoc={moveDoc}
       />
 
@@ -426,6 +521,19 @@ export const DocumentListPanel = ({
           )}
         </div>
       )}
+
+      <FolderMenuOverlay
+        menu={folderMenu}
+        onClose={() => setFolderMenu(null)}
+        onCreateChild={(path) => {
+          setFolderMenu(null);
+          expandFolder(path);
+          setCreateParent(path);
+        }}
+        onDelete={removeFolder}
+        readonlyMode={kernel.env.readonlyMode}
+        readonlyReason={kernel.env.readonlyReason}
+      />
 
       <DocumentItemOverlay
         menu={menu}
