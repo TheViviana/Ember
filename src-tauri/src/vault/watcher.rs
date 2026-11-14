@@ -100,16 +100,19 @@ impl Drop for Watcher {
     }
 }
 
-pub fn spawn(app: AppHandle, root: PathBuf) -> Watcher {
+/// 启动轮询线程。线程创建失败必须由调用方决定如何告知用户：
+/// 静默吞掉会出现「库已打开但外部改动永不刷新」的假象。
+pub fn spawn(app: AppHandle, root: PathBuf) -> Result<Watcher, std::io::Error> {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
     let thread = thread::Builder::new()
         .name("ember-vault-watcher".to_string())
-        .spawn(move || run(app, root, flag))
-        .map_err(|error| eprintln!("vault watcher 启动失败：{error}"))
-        .ok();
+        .spawn(move || run(app, root, flag))?;
 
-    Watcher { stop, thread }
+    Ok(Watcher {
+        stop,
+        thread: Some(thread),
+    })
 }
 
 fn run(app: AppHandle, root: PathBuf, stop: Arc<AtomicBool>) {

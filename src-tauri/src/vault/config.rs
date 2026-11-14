@@ -89,16 +89,31 @@ pub fn load_at(file: &Path) -> (VaultsConfig, Option<String>) {
 }
 
 /// 记录一次成功打开：更新 `lastRoot`，把该路径置顶到最近列表并截断。
-/// 同路径按字符串去重（同一库只保留最近一次），不追规范化软链。
-pub fn record_open(root: &Path, vault_id: &str) -> VaultResult<()> {
+/// 比较与写入都用规范化路径（解析软链、去尾斜杠），同一库只有一条记录。
+///
+/// 返回需要在界面上提示的告警：原配置无法识别时会先备份再覆盖。
+pub fn record_open(root: &Path, vault_id: &str) -> VaultResult<Option<String>> {
     record_open_at(&config_file(), root, vault_id)
 }
 
-pub fn record_open_at(file: &Path, root: &Path, vault_id: &str) -> VaultResult<()> {
-    let (mut config, _) = load_at(file);
-    let path = root.to_string_lossy().to_string();
+pub fn record_open_at(file: &Path, root: &Path, vault_id: &str) -> VaultResult<Option<String>> {
+    let (mut config, warning) = load_at(file);
+    // 降级运行（配置来自更高版本或已损坏）时不得静默覆盖：先留一份原文件。
+    let notice = if warning.is_some() && fs::read(file).is_ok() {
+        let backup = backup_config(file)?;
+        Some(format!(
+            "原有库配置无法识别，已备份到 {} 并写入新配置。",
+            backup.display()
+        ))
+    } else {
+        None
+    };
+
+    let path = normalized_path(root);
     config.last_root = Some(path.clone());
-    config.recents.retain(|entry| entry.path != path);
+    config
+        .recents
+        .retain(|entry| normalized_path(Path::new(&entry.path)) != path);
     config.recents.insert(
         0,
         RecentVault {
@@ -113,7 +128,25 @@ pub fn record_open_at(file: &Path, root: &Path, vault_id: &str) -> VaultResult<(
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent)?;
     }
-    atomic::write_atomic(file, &serde_json::to_vec_pretty(&config)?)
+    atomic::write_atomic(file, &serde_json::to_vec_pretty(&config)?)?;
+    Ok(notice)
+}
+
+/// 规范化路径用于去重：能解析就解析（软链、`..`、尾斜杠），不能解析时
+/// 退回去掉尾斜杠的字面值——删掉目录后 recents 里的旧条目仍然可比。
+fn normalized_path(path: &Path) -> String {
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let text = resolved.to_string_lossy().to_string();
+    text.trim_end_matches('/').to_string()
+}
+
+/// 覆盖无法识别/损坏的配置前留一份副本（固定 `vaults.json.bak`，只保留最近一份）。
+fn backup_config(file: &Path) -> std::io::Result<PathBuf> {
+    let mut name = file.as_os_str().to_owned();
+    name.push(".bak");
+    let backup = PathBuf::from(name);
+    fs::copy(file, &backup)?;
+    Ok(backup)
 }
 
 #[cfg(test)]
@@ -215,5 +248,90 @@ mod tests {
             config.recents[0].path,
             format!("/vaults/{}", MAX_RECENTS + 2)
         );
+    }
+
+    #[test]
+    fn same_vault_with_trailing_slash_is_one_recent_entry() {
+        let temp = TempDir::new("dedupe-slash");
+        let file = temp.file();
+        let root = temp.0.join("vault");
+        fs::create_dir_all(&root).unwrap();
+
+        record_open_at(&file, &root, "01JA").unwrap();
+        let with_slash = format!("{}/", root.to_string_lossy());
+        record_open_at(&file, Path::new(&with_slash), "01JA").unwrap();
+
+        let (config, _) = load_at(&file);
+        assert_eq!(config.recents.len(), 1, "尾斜杠不得生成第二条记录");
+        assert_eq!(
+            config.last_root.as_deref(),
+            Some(config.recents[0].path.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_vault_through_symlink_is_one_recent_entry() {
+        let temp = TempDir::new("dedupe-symlink");
+        let file = temp.file();
+        let root = temp.0.join("vault");
+        let link = temp.0.join("alias");
+        fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+
+        record_open_at(&file, &root, "01JA").unwrap();
+        record_open_at(&file, &link, "01JA").unwrap();
+
+        let (config, _) = load_at(&file);
+        assert_eq!(config.recents.len(), 1, "软链与实体目录是同一个库");
+        assert_eq!(
+            config.recents[0].path,
+            root.canonicalize().unwrap().to_string_lossy().to_string()
+        );
+    }
+
+    #[test]
+    fn unknown_version_config_is_backed_up_before_overwrite() {
+        let temp = TempDir::new("backup-version");
+        let file = temp.file();
+        let raw = br#"{"schemaVersion":99,"lastRoot":"/future","recents":[{"path":"/future","openedAt":"2026-01-01T00:00:00Z"}]}"#;
+        fs::write(&file, raw).unwrap();
+
+        let notice = record_open_at(&file, Path::new("/vaults/a"), "01JA")
+            .unwrap()
+            .expect("覆盖前应给出备份提示");
+        assert!(notice.contains(".bak"), "提示应指明备份位置：{notice}");
+
+        let backup = PathBuf::from(format!("{}.bak", file.to_string_lossy()));
+        assert_eq!(fs::read(&backup).unwrap(), raw, "备份必须是原文件内容");
+
+        let (config, warning) = load_at(&file);
+        assert!(warning.is_none(), "改写后的配置应可正常读取");
+        assert_eq!(config.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(config.last_root.as_deref(), Some("/vaults/a"));
+    }
+
+    #[test]
+    fn corrupt_config_is_backed_up_before_overwrite() {
+        let temp = TempDir::new("backup-corrupt");
+        let file = temp.file();
+        fs::write(&file, b"not-json").unwrap();
+
+        record_open_at(&file, Path::new("/vaults/a"), "01JA")
+            .unwrap()
+            .expect("损坏配置也应先备份");
+        let backup = PathBuf::from(format!("{}.bak", file.to_string_lossy()));
+        assert_eq!(fs::read(&backup).unwrap(), b"not-json");
+    }
+
+    #[test]
+    fn supported_config_is_not_backed_up() {
+        let temp = TempDir::new("no-backup");
+        let file = temp.file();
+        record_open_at(&file, Path::new("/vaults/a"), "01JA").unwrap();
+        assert!(record_open_at(&file, Path::new("/vaults/b"), "01JB")
+            .unwrap()
+            .is_none());
+        assert!(!PathBuf::from(format!("{}.bak", file.to_string_lossy())).exists());
     }
 }
