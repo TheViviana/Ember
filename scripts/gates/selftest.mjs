@@ -400,7 +400,7 @@ if (realSize.length === 0) {
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self'",
-    `style-src-elem 'self' ${styleHash}`,
+    `style-src-elem 'self' ${styleHash} 'nonce-RW1iZXJFZGl0b3JTdHlsZU5vbmNl'`,
     "style-src-attr 'unsafe-inline'",
     "img-src 'self' data:",
     "font-src 'self'",

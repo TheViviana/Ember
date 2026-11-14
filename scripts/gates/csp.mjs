@@ -30,7 +30,8 @@ export const PROD_BASELINE = {
   'default-src': ["'self'"],
   'script-src': ["'self'"],
   'style-src': ["'self'"],
-  'style-src-elem': ["'self'"], // 哈希集合另由 index.html 现算
+  // 哈希由 index.html 现算；nonce 只给 CodeMirror 运行时注入的 <style>（style-mod 不支持哈希）
+  'style-src-elem': ["'self'", "'nonce-RW1iZXJFZGl0b3JTdHlsZU5vbmNl'"],
   'style-src-attr': ["'unsafe-inline'"], // KaTeX 例外，唯一允许 inline 的指令
   'img-src': ["'self'", 'data:'],
   'font-src': ["'self'"],

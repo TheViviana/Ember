@@ -24,7 +24,7 @@ import { isPermissionDenied, toErrorText } from '../../kernel/errors.ts';
 import type { Disposable, DocChange, DocSnapshot } from '../../kernel/types.ts';
 import { useKernel } from '../kernel-provider.tsx';
 import { subscribeFloatJump } from './float-jump.ts';
-import { emberEditorThemeExtensions } from './cm-theme.ts';
+import { CSP_STYLE_NONCE, emberEditorThemeExtensions } from './cm-theme.ts';
 import type { CursorPosition } from './cursor.ts';
 import { registerFloatFlusher, settleFloatWrite, trackFloatWrite } from './float-flush.ts';
 import {
@@ -297,6 +297,8 @@ export const useFloatDocument = ({
         const state = EditorState.create({
           doc: savedBody,
           extensions: [
+            // 生产 CSP 只放行带 nonce 的运行时样式；CM 的 baseTheme 与主题都靠它注入
+            EditorView.cspNonce.of(CSP_STYLE_NONCE),
             lineNumbersCompartment.of(lineNumbersRef.current ? [lineNumbersGutter()] : []),
             history(),
             drawSelection(),

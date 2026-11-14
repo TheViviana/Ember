@@ -4,6 +4,14 @@ import { tags } from '@lezer/highlight';
 import { colors, fonts, fontSize, overlay, radius, space } from '../theme/tokens.ts';
 
 /**
+ * 生产 CSP 只放行带此 nonce 的运行时 <style>（与 tauri.conf.json、scripts/gates/csp.mjs 同步）。
+ * CodeMirror 的基础样式与主题都由 style-mod 在运行时注入 <style>，没有 nonce 会被 CSP
+ * 整段拦掉：.cm-scroller 失去 flex/overflow，正文不显示也滚不动。
+ * index.html 的首帧兜底样式仍走 sha256，不使用 nonce。
+ */
+export const CSP_STYLE_NONCE = 'RW1iZXJFZGl0b3JTdHlsZU5vbmNl';
+
+/**
  * CodeMirror 主题：所有颜色/字号/间距都取自 tokens.ts（与 tokens.css 同源）。
  * 这里只写 token 引用，不新增品牌值。
  */
